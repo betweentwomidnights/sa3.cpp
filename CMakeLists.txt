@@ -39,3 +39,6 @@ target_link_libraries(sa3 INTERFACE ggml)
 # --- tools -----------------------------------------------------------------
 add_executable(sa3-smoke tools/sa3-smoke.cpp)
 target_link_libraries(sa3-smoke PRIVATE sa3)
+
+add_executable(sa3-codec tools/sa3-codec.cpp)
+target_link_libraries(sa3-codec PRIVATE sa3)

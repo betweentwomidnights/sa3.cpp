@@ -7,8 +7,9 @@ build/
 *.obj
 *.exe
 
-# Reference activation dumps (regenerate via tools/dump_refs.py)
+# Reference activation dumps (regenerate via tools/dump_refs.py) + C++ checkpoint dumps
 refdata/
+cppout/
 
 # Model weights / checkpoints
 models/

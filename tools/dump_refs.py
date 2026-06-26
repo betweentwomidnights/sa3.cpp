@@ -86,6 +86,8 @@ def main():
     h1.remove(); h2.remove()
 
     save("z", z)
+    # raw f32 of z in ggml [latent, T] layout (= z[0].T, C-contiguous) for the C++ tool to read
+    np.ascontiguousarray(z[0].detach().cpu().float().numpy().T).tofile(out / "z.f32")
     save("after_in_proj", caps["after_in_proj"])
     save("after_resampling", caps["after_resampling"])
     save("audio", audio)
