@@ -27,6 +27,8 @@ def main():
     ap.add_argument("--frames", type=int, default=64)
     ap.add_argument("--steps", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--init-wav", default=None, help="audio2audio: init WAV to encode + vary from")
+    ap.add_argument("--init-noise-level", type=float, default=1.0, help="sigma_max for audio2audio")
     args = ap.parse_args()
 
     os.environ["HF_HOME"] = args.hf_home
@@ -62,8 +64,21 @@ def main():
     glob  = cond_t["seconds_total"][0].squeeze(1)                                # [1, 768]
     print("cross_attn_cond", tuple(cross.shape), "global_embed", tuple(glob.shape))
 
-    # --- schedule (post dist-shift) ---
-    sigmas = build_schedule(steps=args.steps, sigma_max=1.0, dist_shift=wrapper.sampling_dist_shift,
+    # --- audio2audio: encode the init WAV to z_init (= pretransform.encode, same as inference) ---
+    sigma_max = args.init_noise_level if args.init_wav else 1.0
+    z_init = None
+    if args.init_wav:
+        import torchaudio
+        wav, in_sr = torchaudio.load(args.init_wav)            # [ch, samples]
+        assert in_sr == sr, f"init WAV is {in_sr} Hz, expected {sr}"
+        if wav.shape[0] == 1: wav = wav.repeat(2, 1)
+        Lreq = T * ds
+        wav = wav[:, :Lreq] if wav.shape[1] >= Lreq else torch.nn.functional.pad(wav, (0, Lreq - wav.shape[1]))
+        z_init = wrapper.pretransform.encode(wav.unsqueeze(0).float())   # [1, io, T]
+        print(f"init z_init {tuple(z_init.shape)} range [{z_init.min():.3f},{z_init.max():.3f}]  sigma_max={sigma_max}")
+
+    # --- schedule (post dist-shift); sigma_max < 1 for audio2audio ---
+    sigmas = build_schedule(steps=args.steps, sigma_max=sigma_max, dist_shift=wrapper.sampling_dist_shift,
                             fallback_seq_len=T, include_endpoint=True, device=dev).float()  # [steps+1]
     print("sigmas:", [round(float(s), 4) for s in sigmas])
 
@@ -71,6 +86,8 @@ def main():
     g = torch.Generator(device=dev).manual_seed(args.seed)
     io = config["model"]["io_channels"]
     noise0 = torch.randn(1, io, T, generator=g)
+    if z_init is not None:                                      # mix: init*(1-sigma_max) + noise*sigma_max
+        noise0 = z_init * (1 - sigma_max) + noise0 * sigma_max
     step_noise = [torch.randn(1, io, T, generator=g) for _ in range(args.steps)]
     dit = wrapper.model.model
     x = noise0.clone()
