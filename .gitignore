@@ -8,8 +8,11 @@ build/
 *.exe
 
 # Reference activation dumps (regenerate via tools/dump_refs.py) + C++ checkpoint dumps
-refdata/
+refdata*/
 cppout*/
+
+# LoRA/DoRA adapter checkpoints + exports (large; convert to gguf via tools/convert_lora.py)
+loras/
 
 # Model weights / checkpoints
 models/
@@ -22,4 +25,3 @@ __pycache__/
 *.pyc
 .venv/
 _smallweights/
-refdata_small/

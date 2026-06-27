@@ -22,10 +22,13 @@ struct GgufModel {
     ggml_backend_t        backend = nullptr;
     ggml_backend_buffer_t buf     = nullptr;
     std::map<std::string, ggml_tensor*> tensors;
+    std::map<std::string, ggml_tensor*> overrides;   // LoRA-effective weights (see lora.h)
 
     bool has(const std::string& n) const { return tensors.count(n) != 0; }
 
     ggml_tensor* get(const std::string& n) const {
+        auto ov = overrides.find(n);                 // LoRA W_eff transparently shadows the base weight
+        if (ov != overrides.end()) return ov->second;
         auto it = tensors.find(n);
         if (it == tensors.end()) { fprintf(stderr, "[gguf] missing tensor: %s\n", n.c_str()); exit(1); }
         return it->second;
