@@ -72,22 +72,27 @@ int main(int argc, char** argv) {
     const sa3::SameConfig    sc = sa3::SameConfig::from(AE);
     const int ds = sc.patch_size * sc.output_seg;          // downsampling ratio (4096 samples/frame)
 
-    // ---------- audio2audio: load init WAV, derive T from it (overrides --frames) ----------
+    // ---------- load source WAV; derive output T (overrides --frames) ----------
+    // audio2audio: output length = the source. inpaint/continuation: output length =
+    // max(source, --inpaint-end) so a short clip can be extended (mask_end = total duration).
     std::vector<float> init_audio; int init_L = 0;         // padded planar [init_L, 2]
     if (init_p) {
         int n_samp, n_ch, sr;
         std::vector<float> raw = sa3::read_wav_planar(init_p, n_samp, n_ch, sr);
         if (n_ch != sc.out_channels / sc.patch_size) { fprintf(stderr, "init WAV must be %d-channel\n", sc.out_channels / sc.patch_size); return 1; }
         if (sr != 44100) fprintf(stderr, "warning: init WAV is %d Hz, expected 44100\n", sr);
+        int want = n_samp;
+        if (inpaint && inpaint_end > 0.0f) want = std::max(want, (int)(inpaint_end * 44100.0f));
         // pad up so T is an integer (and EVEN for SAME-S, which needs T*17 divisible by eff_chunk)
         const int mult = sc.chunk ? 2 * ds : ds;
-        init_L = ((n_samp + mult - 1) / mult) * mult;
+        init_L = ((want + mult - 1) / mult) * mult;
         init_audio.assign((size_t)init_L * n_ch, 0.0f);
-        for (int c = 0; c < n_ch; c++)                      // planar copy, zero-padded tail
-            memcpy(&init_audio[(size_t)c*init_L], &raw[(size_t)c*n_samp], n_samp * sizeof(float));
+        const int copy = std::min(n_samp, init_L);          // source at the start, zero-padded tail
+        for (int c = 0; c < n_ch; c++)
+            memcpy(&init_audio[(size_t)c*init_L], &raw[(size_t)c*n_samp], copy * sizeof(float));
         frames = init_L / ds;
-        printf("audio2audio: init \"%s\" %.2fs -> T=%d (padded %.2fs), sigma_max=%.3f\n",
-               init_p, (float)n_samp/44100.0f, frames, (float)init_L/44100.0f, init_noise_level);
+        printf("%s: src \"%s\" %.2fs -> output T=%d (%.2fs)\n",
+               inpaint ? "inpaint" : "audio2audio", init_p, (float)n_samp/44100.0f, frames, (float)init_L/44100.0f);
     }
 
     const int T = frames, max_len = (int)TE.u32("t5g.max_length");
