@@ -6,12 +6,12 @@ what's done:
 
 what's next:
 
-[x] - same-s / stable-audio-3-small-music and sfx
-[ ] - inpainting
-[x] - audio2audio
-[ ] - loras
-[ ] - support cuda/metal/vulkan
-[ ] - benchmark generation times and stuff
+- [x] same-s / stable-audio-3-small-music and sfx
+- [x] audio2audio
+- [ ] inpainting
+- [ ] loras
+- [ ] support cuda/metal/vulkan
+- [ ] benchmark generation times and stuff
 
 credits:
 
