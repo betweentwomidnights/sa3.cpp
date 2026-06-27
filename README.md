@@ -6,16 +6,16 @@ what's done:
 
 what's next:
 
-- same-s / stable-audio-3-small-music and sfx
-- inpainting
-- audio2audio
-- loras
-- support cuda/metal/vulkan
-- benchmark generation times and stuff
+[x] - same-s / stable-audio-3-small-music and sfx
+[ ] - inpainting
+[x] - audio2audio
+[ ] - loras
+[ ] - support cuda/metal/vulkan
+[ ] - benchmark generation times and stuff
 
 credits:
 
-acestep.cpp was used as a bit of a guide here.
+[acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) was used as a bit of a guide here.
 
 official upstream repo:
 
