@@ -1,23 +1,24 @@
-# sa3.cpp
+# stable-audio-3-medium in c++
 
-A portable C++17 / [GGML](https://github.com/ggml-org/ggml) implementation of
-**Stable Audio 3** — focused on the `medium` DiT + `SAME-L` autoencoder (the ARC ping-pong variant),
-with text2music, audio2audio, and inpainting/continuation, plus PyTorch-compatible LoRA loading.
+what's done:
 
-Modeled on [`acestep.cpp`](https://github.com/ServeurpersoCom/acestep.cpp), a GGML port of the closely
-related ACE-Step 1.5 stack.
+- text2music, cpu-only rn
 
-> **Status: exploration / scaffolding.** No code yet — see the design docs below.
+what's next:
 
-## Docs
-- [docs/ARCHITECTURE-NOTES.md](docs/ARCHITECTURE-NOTES.md) — how SA3 is built and how it maps to GGML.
-- [docs/ROADMAP.md](docs/ROADMAP.md) — the phased plan from spike to working renderer.
+- same-s / stable-audio-3-small-music and sfx
+- inpainting
+- audio2audio
+- loras
+- support cuda/metal/vulkan
+- benchmark generation times and stuff
 
-## Reference material (`refs/`, git-ignored)
-- `refs/stable-audio-3/` — Stability AI's PyTorch implementation (what we port).
-- `refs/acestep.cpp/` — the GGML porting playbook.
+credits:
 
-## Key idea
-SA3's whole stack (T5Gemma text encoder → DiT → SAME-L autoencoder) is transformer-based —
-attention + linear + norm + plain conv1d. Unlike acestep's convolutional Oobleck VAE, it needs
-no custom GGML ops, so we target **vanilla GGML**.
+acestep.cpp was used as a bit of a guide here.
+
+official upstream repo:
+
+https://github.com/Stability-AI/stable-audio-3
+
+License: MIT
