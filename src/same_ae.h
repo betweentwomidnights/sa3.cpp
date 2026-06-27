@@ -8,7 +8,9 @@
 #include "nn.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <string>
+#include <vector>
 
 namespace sa3 {
 
@@ -47,6 +49,18 @@ struct SameConfig {
         return c;
     }
 };
+
+// Host-side [M,M] additive attention mask (row-major (q,k)) for a SAME AE:
+// block-diagonal over eff_chunk (chunked, SAME-S) or sliding-window band (SAME-L).
+// 0 where attention is allowed, -inf where masked. Shared by every driver so the
+// SAME-L band and SAME-S block-diag rule live in exactly one place.
+inline std::vector<float> build_attn_mask(const SameConfig& c, int M) {
+    std::vector<float> b((size_t)M * M);
+    for (int q = 0; q < M; q++) for (int k = 0; k < M; k++)
+        b[(size_t)q*M + k] = c.chunk ? ((q/c.eff_chunk == k/c.eff_chunk) ? 0.0f : -INFINITY)
+                                     : ((std::abs(q-k) <= c.sliding_window) ? 0.0f : -INFINITY);
+    return b;
+}
 
 // One SAME TransformerBlock over a packed sequence x:[dim, N]:
 //   x = x + diff_attn(dyt(x))   then   x = x + swiglu_ff(dyt(x))
@@ -117,6 +131,9 @@ inline EncodeOut same_encode(ggml_context* ctx, const GgufModel& W, ggml_tensor*
     const int Tp = stride * T;                       // patch-frames (= L / patch_size)
     const int64_t N = (int64_t)T * c.sub_chunk;
     EncodeOut out{};
+    // SAME-L (sliding-window) encode only; the SAME-S chunked encoder (Phase 5) will
+    // mirror same_decode's midpoint-shift split. Fail loudly until it lands.
+    GGML_ASSERT(!c.chunk && "SAME-S chunked encoder not implemented yet");
 
     // patchify: audio [L, ch] -> [patch, ch, Tp] -> [patch, Tp, ch] -> [patch*ch=512, Tp]
     ggml_tensor* pa = ggml_reshape_3d(ctx, audio, c.patch_size, Tp, ch);
@@ -164,6 +181,9 @@ inline DecodeOut same_decode(ggml_context* ctx, const GgufModel& W, ggml_tensor*
     const int dim = c.dim;
     const int64_t N = (int64_t)T * c.sub_chunk;
     DecodeOut out{};
+    // chunked (SAME-S) decode needs the shifted-half graph inputs; make the contract
+    // explicit so a 6-arg caller on a SAME-S model fails loudly, not via a null deref.
+    GGML_ASSERT(!c.chunk || (pos2 && mask2));
 
     // bottleneck.decode (z * running_std) + in_proj (latent -> dim)
     ggml_tensor* x = ggml_scale(ctx, z, c.running_std);

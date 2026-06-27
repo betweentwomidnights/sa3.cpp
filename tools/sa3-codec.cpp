@@ -91,10 +91,7 @@ int main(int argc, char** argv) {
 
     auto set_pos = [&](ggml_tensor* p, int64_t n){ std::vector<int32_t> b(n); for (int i=0;i<n;i++) b[i]=i; ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t)); };
     auto set_mask = [&](ggml_tensor* mt, int64_t M){
-        std::vector<float> mb((size_t)M*M);
-        for (int q = 0; q < M; q++) for (int kk = 0; kk < M; kk++)
-            mb[(size_t)q*M+kk] = c.chunk ? ((q/c.eff_chunk == kk/c.eff_chunk) ? 0.0f : -INFINITY)   // block-diag
-                                         : ((std::abs(q-kk) <= c.sliding_window) ? 0.0f : -INFINITY); // band
+        std::vector<float> mb = sa3::build_attn_mask(c, (int)M);
         ggml_backend_tensor_set(mt, mb.data(), 0, mb.size()*sizeof(float));
     };
     set_pos(pos, N); set_mask(mask, N);

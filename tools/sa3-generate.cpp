@@ -209,10 +209,7 @@ int main(int argc, char** argv) {
     ggml_backend_tensor_set(z, host_x.data(), 0, N*sizeof(float));
     auto set_pos = [&](ggml_tensor* p, int n){ std::vector<int32_t> b(n); for (int i=0;i<n;i++) b[i]=i; ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t)); };
     auto set_mask = [&](ggml_tensor* mt, int M){
-        std::vector<float> b((size_t)M*M);
-        for (int q=0;q<M;q++) for (int k=0;k<M;k++)
-            b[(size_t)q*M+k] = sc.chunk ? ((q/sc.eff_chunk==k/sc.eff_chunk)?0.0f:-INFINITY)
-                                        : ((std::abs(q-k)<=sc.sliding_window)?0.0f:-INFINITY);
+        std::vector<float> b = sa3::build_attn_mask(sc, M);
         ggml_backend_tensor_set(mt, b.data(), 0, b.size()*sizeof(float));
     };
     set_pos(pos_e, Ndec); set_mask(mask_e, Ndec);
