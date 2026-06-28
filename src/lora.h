@@ -29,9 +29,9 @@ struct LoraAdapter {
     float       strength = 1.0f;
 };
 
-inline LoraAdapter load_lora(const char* path, float strength = 1.0f) {
+inline LoraAdapter load_lora(const char* path, float strength = 1.0f, ggml_backend_t backend = nullptr) {
     LoraAdapter a;
-    a.gguf = load_gguf(path);
+    a.gguf = load_gguf(path, backend);   // load onto the base's backend so the GPU apply graph can read it
     int ti = gguf_find_key(a.gguf.gguf, "lora.adapter_type");
     a.type     = ti < 0 ? "lora" : gguf_get_val_str(a.gguf.gguf, ti);
     a.rank     = (int)a.gguf.u32("lora.rank");
@@ -64,7 +64,7 @@ inline void write_from_f32(ggml_tensor* t, const std::vector<float>& src) {
     }
 }
 
-// W_eff storage: own a context + backend buffer holding the override tensors.
+// W_eff storage: own a context + persistent backend buffer holding the override tensors.
 struct LoraStack {
     ggml_context*         ctx = nullptr;
     ggml_backend_buffer_t buf = nullptr;
@@ -75,34 +75,57 @@ struct LoraStack {
     }
 };
 
-// Apply `adapters` (in order) to `base`, filling base.overrides with W_eff for every
-// targeted weight. Returns a LoraStack owning the override tensors (free after the model).
-inline LoraStack apply_loras(GgufModel& base, std::vector<LoraAdapter>& adapters) {
-    LoraStack st;
-    // 1. collect the set of base weights any adapter targets (base name = "<X>.weight",
-    //    adapter tensors are "<X>.lora_A/.lora_B/.magnitude").
-    std::vector<std::string> targets;
-    for (auto& kv : base.tensors) {
-        const std::string& wname = kv.first;
-        if (wname.size() < 7 || wname.compare(wname.size()-7, 7, ".weight") != 0) continue;
-        std::string stem = wname.substr(0, wname.size()-7);
-        for (auto& a : adapters)
-            if (a.gguf.has(stem + ".lora_A") || a.gguf.has(stem + ".M_xs")) { targets.push_back(wname); break; }
-    }
+// GPU/graph path handles additive lora + dora-rows (covers our DoRA adapters). The
+// column-norm / -xs families stay on the host fallback (rare; no trained test adapters).
+inline bool lora_graph_ok(const std::vector<LoraAdapter>& adapters) {
+    for (auto& a : adapters) if (a.type != "lora" && a.type != "dora-rows") return false;
+    return true;
+}
 
-    // 2. allocate a context holding one override tensor per target
-    ggml_init_params ip = { (size_t)targets.size()*ggml_tensor_overhead() + (1<<20), nullptr, /*no_alloc=*/true };
-    st.ctx = ggml_init(ip);
-    std::vector<ggml_tensor*> outs; outs.reserve(targets.size());
+// Build one ggml graph that recomputes every W_eff and run it on base.backend (GPU when CUDA).
+//   delta = B@A ; V = W + (alpha/rank)*strength*delta ;
+//   dora-rows: W_eff = magnitude[:,None] * V / ||V||_row  (= magnitude * rms_norm(V)/sqrt(in)).
+// W_eff is written back IN-PLACE over the base weight (cast(W0) reads it once up front, the final
+// ggml_cpy writes it last — no aliasing), so there's no second copy of the model in VRAM. Adapters
+// must already be loaded on base.backend (load_lora(..., base.backend)).
+inline LoraStack apply_loras_graph(GgufModel& base, std::vector<LoraAdapter>& adapters,
+                                   const std::vector<std::string>& targets) {
+    const size_t nn = targets.size()*20 + 64;
+    ggml_init_params ip = { nn*ggml_tensor_overhead() + ggml_graph_overhead_custom(nn, false) + (1<<20), nullptr, true };
+    ggml_context* ctx = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx, nn, false);
     for (auto& wname : targets) {
+        std::string stem = wname.substr(0, wname.size()-7);
         ggml_tensor* W0 = base.tensors[wname];
-        ggml_tensor* t = ggml_new_tensor_2d(st.ctx, W0->type, W0->ne[0], W0->ne[1]);   // match base dtype (f16/f32)
-        ggml_set_name(t, wname.c_str());
-        outs.push_back(t);
+        const int64_t in = W0->ne[0], out = W0->ne[1];
+        ggml_tensor* Wc = ggml_cast(ctx, W0, GGML_TYPE_F32);                          // running weight [in,out] (f32 copy)
+        for (auto& a : adapters) {
+            if (!a.gguf.has(stem + ".lora_A") || a.strength == 0.0f) continue;
+            ggml_tensor* A = a.gguf.get(stem+".lora_A");                              // [in, rank]
+            ggml_tensor* B = a.gguf.get(stem+".lora_B");                              // [rank, out]
+            ggml_tensor* delta = ggml_mul_mat(ctx, ggml_cont(ctx, ggml_transpose(ctx, A)), B); // [in,out]
+            ggml_tensor* V = ggml_add(ctx, Wc, ggml_scale(ctx, delta, (a.alpha/a.rank)*a.strength));
+            if (a.type == "dora-rows") {
+                ggml_tensor* mag = ggml_reshape_2d(ctx, a.gguf.get(stem+".magnitude"), 1, out); // [1,out]
+                ggml_tensor* Vn = ggml_scale(ctx, ggml_rms_norm(ctx, V, 1e-12f), 1.0f/sqrtf((float)in));
+                Wc = ggml_mul(ctx, Vn, mag);
+            } else {
+                Wc = V;                                                               // additive lora
+            }
+        }
+        ggml_build_forward_expand(gf, ggml_cpy(ctx, Wc, W0));                         // write W_eff back over W0
     }
-    st.buf = ggml_backend_alloc_ctx_tensors(st.ctx, base.backend);
+    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(base.backend));
+    ggml_gallocr_alloc_graph(alloc, gf);
+    ggml_backend_graph_compute(base.backend, gf);
+    ggml_gallocr_free(alloc); ggml_free(ctx);
+    return LoraStack{};   // weights modified in place; nothing to keep
+}
 
-    // 3. compute W_eff per target (host), chaining adapters in order. Buffers reused across targets.
+// Host fallback: compute W_eff per target with plain loops (all 8 adapter families), in place.
+inline LoraStack apply_loras_host(GgufModel& base, std::vector<LoraAdapter>& adapters,
+                                  const std::vector<std::string>& targets) {
+    // compute W_eff per target (host), chaining adapters in order. Buffers reused across targets.
     // W is the running effective weight, row-major w[o*in+i]. For each adapter:
     //   delta = B@A  (standard)  or  U@M_xs@V^T  (-xs);  V = W + (alpha/rank)*strength*delta;
     //   then a per-type post-transform (additive / dora-rows / dora-cols / bora). Spec: lora_spec_test.py.
@@ -173,10 +196,24 @@ inline LoraStack apply_loras(GgufModel& base, std::vector<LoraAdapter>& adapters
                 fprintf(stderr, "[lora] unknown adapter_type '%s'\n", ty.c_str()); exit(1);
             }
         }
-        write_from_f32(outs[ti], w);                                         // store W_eff at base dtype (f16/f32)
-        base.overrides[wname] = outs[ti];
+        write_from_f32(W0, w);                                               // write W_eff back over W0 (in place)
     }
-    return st;
+    return LoraStack{};
+}
+
+// Apply `adapters` (in order) to `base`, filling base.overrides with W_eff for every targeted
+// weight. Dispatches to the GPU/graph path for additive+dora-rows, else the host fallback.
+inline LoraStack apply_loras(GgufModel& base, std::vector<LoraAdapter>& adapters) {
+    std::vector<std::string> targets;
+    for (auto& kv : base.tensors) {
+        const std::string& wname = kv.first;
+        if (wname.size() < 7 || wname.compare(wname.size()-7, 7, ".weight") != 0) continue;
+        std::string stem = wname.substr(0, wname.size()-7);
+        for (auto& a : adapters)
+            if (a.gguf.has(stem + ".lora_A") || a.gguf.has(stem + ".M_xs")) { targets.push_back(wname); break; }
+    }
+    return lora_graph_ok(adapters) ? apply_loras_graph(base, adapters, targets)
+                                   : apply_loras_host(base, adapters, targets);
 }
 
 } // namespace sa3

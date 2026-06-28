@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
 
     std::vector<sa3::LoraAdapter> adapters;
     sa3::LoraStack lstack;
-    for (auto& ls : lora_specs) adapters.push_back(sa3::load_lora(ls.first.c_str(), ls.second));
+    for (auto& ls : lora_specs) adapters.push_back(sa3::load_lora(ls.first.c_str(), ls.second, W.backend));
     if (!adapters.empty()) {
         lstack = sa3::apply_loras(W, adapters);
         printf("applied %zu lora(s) -> %zu overrides:\n", adapters.size(), W.overrides.size());

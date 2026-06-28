@@ -118,7 +118,7 @@ int main(int argc, char** argv) {
     // ---------- LoRA/DoRA adapters: recompute W_eff in weight space (chained in flag order) ----------
     std::vector<sa3::LoraAdapter> adapters;
     sa3::LoraStack lstack;
-    for (auto& ls : lora_specs) adapters.push_back(sa3::load_lora(ls.first.c_str(), ls.second));
+    for (auto& ls : lora_specs) adapters.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
     if (!adapters.empty()) {
         lstack = sa3::apply_loras(DIT, adapters);
         printf("lora: applied %zu adapter(s) -> %zu overridden weights:\n", adapters.size(), DIT.overrides.size());
