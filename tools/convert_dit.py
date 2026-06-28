@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 from safetensors import safe_open
 from gguf import GGUFWriter
+import gguf_meta
 
 PREF = "model.model."
 TR   = "transformer."
@@ -80,12 +81,13 @@ def main():
     ap.add_argument("--src", required=True)
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--variant", default="medium", choices=list(gguf_meta.VARIANTS),
+                    help="model family this DiT belongs to (sets general.* metadata)")
     args = ap.parse_args()
 
     cfg = json.loads(Path(args.config).read_text())["model"]["diffusion"]["config"]
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     w = GGUFWriter(str(out), arch="sa3-dit")
-    w.add_name("stable-audio-3-medium DiT")
 
     dim = cfg["embed_dim"]
     w.add_uint32("dit.io",        cfg["io_channels"])      # 256
@@ -105,7 +107,7 @@ def main():
     w.add_float32("dit.time_min_freq", 0.5)
     w.add_float32("dit.time_max_freq", 10000.0)
 
-    n, skip = 0, 0
+    n, skip, nparams = 0, 0, 0
     with safe_open(args.src, framework="numpy") as f:
         for k in sorted(f.keys()):
             if not k.startswith(PREF):
@@ -119,8 +121,11 @@ def main():
             if name == "dit.memory_tokens":
                 t = np.ascontiguousarray(t)   # [64,1536]
             w.add_tensor(name, t)
-            n += 1
+            n += 1; nparams += t.size
 
+    gguf_meta.add_general(w, basename=f"stable-audio-3-{args.variant}-dit",
+                          name=f"stable-audio-3-{args.variant} DiT",
+                          finetune=args.variant, n_params=nparams)
     w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
     print(f"wrote {out}  ({n} tensors, skipped {skip})  dim={dim} depth={cfg['depth']} "
           f"heads={cfg['num_heads']}x{dim//cfg['num_heads']} mem={cfg['num_memory_tokens']}")

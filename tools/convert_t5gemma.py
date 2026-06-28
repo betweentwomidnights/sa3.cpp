@@ -14,6 +14,7 @@ import argparse, json, struct, sys
 from pathlib import Path
 import numpy as np
 from gguf import GGUFWriter
+import gguf_meta
 
 PREF = "model.encoder."
 
@@ -77,14 +78,11 @@ def main():
     ap.add_argument("--src", required=True)
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--cond_src", help="medium model.safetensors (for conditioner.* tensors)")
-    ap.add_argument("--sa3_config", help="medium model_config.json (for seconds_total min/max)")
     args = ap.parse_args()
 
     cfg = json.loads(Path(args.config).read_text())["encoder"]
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     w = GGUFWriter(str(out), arch="sa3-t5gemma")
-    w.add_name("t5gemma-b-b-ul2 encoder")
 
     dim = cfg["hidden_size"]
     w.add_uint32("t5g.dim",          dim)
@@ -98,8 +96,11 @@ def main():
     w.add_float32("t5g.attn_softcap",cfg["attn_logit_softcapping"])
     w.add_float32("t5g.query_scalar",cfg["query_pre_attn_scalar"])
     w.add_float32("t5g.normalizer",  float(dim) ** 0.5)
+    w.add_uint32("t5g.max_length",   256)      # prompt tokenization length (shared, encoder-side)
 
-    n_written = 0
+    # Pure encoder weights only. The per-variant conditioner (learned prompt padding +
+    # seconds_total NumberConditioner) is a separate sidecar gguf — see convert_conditioner.py.
+    n_written, nparams = 0, 0
     with open(args.src, "rb") as f:
         header, data_start = read_safetensors_header(f)
         for k in sorted(header):
@@ -112,29 +113,10 @@ def main():
             if kind == "norm":
                 t = t + 1.0    # bake Gemma's (1 + weight)
             w.add_tensor(name, np.ascontiguousarray(t))
-            n_written += 1
+            n_written += 1; nparams += t.size
 
-    # conditioner tensors (learned padding + seconds_total NumberConditioner) from the main checkpoint
-    if args.cond_src:
-        sa3cfg = json.loads(Path(args.sa3_config).read_text()) if args.sa3_config else {}
-        secs = {}
-        for c in sa3cfg.get("model", {}).get("conditioning", {}).get("configs", []):
-            if c["id"] == "seconds_total": secs = c["config"]
-        w.add_float32("t5g.secs_min", float(secs.get("min_val", 0)))
-        w.add_float32("t5g.secs_max", float(secs.get("max_val", 384)))
-        w.add_uint32("t5g.secs_dim", 256)        # NumberEmbedder default dim
-        w.add_uint32("t5g.max_length", 256)      # prompt tokenization max_length
-        cmap = {
-            "conditioner.conditioners.prompt.padding_embedding": "te.padding_embedding",
-            "conditioner.conditioners.seconds_total.embedder.embedding.1.weight": "te.secs.weight",
-            "conditioner.conditioners.seconds_total.embedder.embedding.1.bias": "te.secs.bias",
-        }
-        with open(args.cond_src, "rb") as f:
-            header, data_start = read_safetensors_header(f)
-            for src_name, dst in cmap.items():
-                w.add_tensor(dst, load_f32(f, data_start, header[src_name]).astype(np.float32))
-                n_written += 1
-
+    gguf_meta.add_general(w, basename="t5gemma-b-b-ul2-encoder",
+                          name="t5gemma-b-b-ul2 encoder", n_params=nparams)   # shared: no finetune
     w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
     print(f"wrote {out}  ({n_written} tensors)  dim={dim} layers={cfg['num_hidden_layers']} "
           f"heads={cfg['num_attention_heads']}x{cfg['head_dim']} softcap={cfg['attn_logit_softcapping']}")

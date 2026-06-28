@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 from safetensors import safe_open
 from gguf import GGUFWriter
+import gguf_meta
 
 SRC_PREFIX = "pretransform.model."
 
@@ -64,6 +65,8 @@ def main():
     ap.add_argument("--src", required=True, help="medium model.safetensors")
     ap.add_argument("--config", required=True, help="model_config.json")
     ap.add_argument("--out", required=True, help="output .gguf")
+    ap.add_argument("--variant", default="medium", choices=list(gguf_meta.VARIANTS),
+                    help="model family this autoencoder belongs to (sets general.* metadata)")
     args = ap.parse_args()
 
     cfg = json.loads(Path(args.config).read_text())
@@ -73,7 +76,10 @@ def main():
 
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     w = GGUFWriter(str(out), arch="sa3-ae")
-    w.add_name("stable-audio-3-medium SAME-L decoder")
+    ae_suffix = gguf_meta.VARIANTS[args.variant][0]   # same-l (medium) / same-s (small)
+    gguf_meta.add_general(w, basename=f"stable-audio-3-{args.variant}-{ae_suffix}",
+                          name=f"stable-audio-3-{args.variant} {ae_suffix.upper()}",
+                          finetune=args.variant)        # autoencoder is size_label-exempt
 
     # --- config as KV metadata (single source of truth for the C++ graph) ---
     dim = dec["channels"] * dec["c_mults"][0]      # 256 * 6 = 1536

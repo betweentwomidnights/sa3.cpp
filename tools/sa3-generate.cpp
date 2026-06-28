@@ -63,6 +63,7 @@ int main(int argc, char** argv) {
     const bool prof = profile_enabled();
     const double t_total0 = wall_time_s();
     const char* tok_p = nullptr; const char* t5_p = nullptr; const char* dit_p = nullptr; const char* same_p = nullptr;
+    const char* cond_p = nullptr;            // per-variant conditioner sidecar gguf (optional; falls back to --t5 if bundled)
     std::string prompt = "Upbeat funk groove with slap bass, bright horns, tight drums";
     const char* wav_p = "song.wav";
     const char* init_p = nullptr;            // audio2audio / inpaint: source WAV (encoded to z_init)
@@ -76,6 +77,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--t5")     && i+1 < argc) t5_p = argv[++i];
         else if (!strcmp(argv[i], "--dit")    && i+1 < argc) dit_p = argv[++i];
         else if (!strcmp(argv[i], "--same")   && i+1 < argc) same_p = argv[++i];
+        else if (!strcmp(argv[i], "--cond")   && i+1 < argc) cond_p = argv[++i];
         else if (!strcmp(argv[i], "--prompt") && i+1 < argc) prompt = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i+1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--steps")  && i+1 < argc) steps = atoi(argv[++i]);
@@ -110,6 +112,9 @@ int main(int argc, char** argv) {
     t0 = wall_time_s();
     sa3::GgufModel AE = sa3::load_gguf(same_p);
     profile_log(prof, "load_same", wall_time_s() - t0);
+    // Per-variant conditioner: separate sidecar gguf when given, else read from the (bundled) encoder.
+    sa3::GgufModel* cond_model = cond_p ? new sa3::GgufModel(sa3::load_gguf(cond_p)) : nullptr;
+    const sa3::GgufModel& CD = cond_model ? *cond_model : TE;
     const sa3::T5GemmaConfig tc = sa3::T5GemmaConfig::from(TE);
     const sa3::DitConfig     dc = sa3::DitConfig::from(DIT);
     const sa3::SameConfig    sc = sa3::SameConfig::from(AE);
@@ -210,18 +215,18 @@ int main(int argc, char** argv) {
     // ---------- conditioning assembly (host) ----------
     t0 = wall_time_s();
     // learned padding: replace padded token columns with the padding embedding
-    std::vector<float> pad_emb = tensor_to_host(TE, "te.padding_embedding");   // [cond_dim]
+    std::vector<float> pad_emb = tensor_to_host(CD, "te.padding_embedding");   // [cond_dim]
     for (int p = 0; p < max_len; p++)
         if (!attn[p]) memcpy(&hidden[(size_t)p*cond_dim], pad_emb.data(), cond_dim*sizeof(float));
     // seconds_total NumberConditioner: expo(clamp(secs)/range) -> Linear(secs_dim->cond_dim)
     const float secs = (float)T * (sc.patch_size * sc.output_seg) / 44100.0f;
-    const float smin = TE.f32("t5g.secs_min"), smax = TE.f32("t5g.secs_max");
-    const int sdim = (int)TE.u32("t5g.secs_dim");
+    const float smin = CD.f32("t5g.secs_min"), smax = CD.f32("t5g.secs_max");
+    const int sdim = (int)CD.u32("t5g.secs_dim");
     float sclamp = secs < smin ? smin : (secs > smax ? smax : secs);
     float snorm = (sclamp - smin) / (smax - smin);
     std::vector<float> ef; expo_features(snorm, ef, sdim, 0.5f, 10000.0f);
-    std::vector<float> sw = tensor_to_host(TE, "te.secs.weight");   // ggml [sdim, cond_dim]
-    std::vector<float> sb = tensor_to_host(TE, "te.secs.bias");     // [cond_dim]
+    std::vector<float> sw = tensor_to_host(CD, "te.secs.weight");   // ggml [sdim, cond_dim]
+    std::vector<float> sb = tensor_to_host(CD, "te.secs.bias");     // [cond_dim]
     std::vector<float> secs_embed(cond_dim);
     for (int d = 0; d < cond_dim; d++) {
         float acc = sb[d];
