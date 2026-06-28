@@ -4,6 +4,7 @@ refs/
 # Build artifacts
 build/
 build-cuda/
+build-vulkan/
 *.o
 *.obj
 *.exe

@@ -8,9 +8,11 @@ to load PyTorch-compatible LoRA adapters. Model: acestep.cpp.
 > inpaint/continuation, BOTH sizes (medium SAME-L + small-music SAME-S), and lora/dora/bora(+xs)
 > adapters are all validated vs PyTorch at cossim ~1.0. Runs on CPU and CUDA; f16 quantization done;
 > medium generation ~3.5s on an 8GB 5070 with the sliding-window decoder scaling linearly to multi-minute
-> output. Benchmarks: BENCHMARKS.md. **NEXT: Vulkan backend, then Metal.** (The backend is selected via
-> ggml's device registry, so a Vulkan build should largely "just work" — main risk is ggml-vulkan op
-> coverage.) NOTE: Phase 6 below ("static merge") is **superseded** — the real adapters are **DoRA**
+> output. Benchmarks: BENCHMARKS.md. **Vulkan backend DONE (Phase 7b): VULKAN.md** — whole stack runs with
+> zero custom ops, ~4.1s on the 5070, op-level parity ~1.0 (end-to-end differs as a different-but-valid
+> sample due to tensor-core accumulation; perceptually identical). **NEXT: Metal.** (The backend is selected
+> via ggml's device registry, so the Vulkan build did "just work" — no graph changes.) NOTE: Phase 6 below
+> ("static merge") is **superseded** — the real adapters are **DoRA**
 > (non-linear in strength, non-additive across adapters), applied at runtime in weight space via an
 > in-place ggml graph (src/lora.h), NOT statically merged. The richer state lives in the goal memory.
 
@@ -66,8 +68,9 @@ inward-out along the *output* path so each phase produces something audible.
 - **Exit:** ✅ a known DoRA changes output the same way it does in PyTorch (incl. adjustable strength).
 
 ## Phase 7 — Productionize
-- ✅ f16 quantization (`tools/quantize_gguf.py`); ✅ CUDA backend; ✅ benchmarks (BENCHMARKS.md).
-- **NEXT:** Vulkan backend, then Metal. (Optional later: integer quant Q8/Q6/Q4 + quality table;
+- ✅ f16 quantization (`tools/quantize_gguf.py`); ✅ CUDA backend; ✅ benchmarks (BENCHMARKS.md);
+  ✅ Vulkan backend (VULKAN.md).
+- **NEXT:** Metal backend. (Optional later: integer quant Q8/Q6/Q4 + quality table;
   CLI/HTTP server; broader examples.)
 
 ---
