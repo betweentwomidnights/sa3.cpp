@@ -51,6 +51,12 @@ sa3-generate --tok models/t5gemma-b-b-ul2-v1.0-vocab.gguf \
     --prompt "lo-fi hip hop beat, warm vinyl, mellow keys" --frames 128 --steps 8 --out song.wav
 ```
 
+## Performance
+
+Roughly **1.7s for a 12s clip** at f16 on an 8GB laptop GPU (RTX 5070) — about 2× faster than the medium
+model. The sliding-window decoder keeps long generations linear. Full numbers + levers:
+[docs/BENCHMARKS.md](https://github.com/betweentwomidnights/sa3.cpp/blob/main/docs/BENCHMARKS.md).
+
 ## License
 
 These are format conversions of [stabilityai/stable-audio-3-small-music](https://huggingface.co/stabilityai/stable-audio-3-small-music),

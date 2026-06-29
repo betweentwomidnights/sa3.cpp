@@ -53,6 +53,13 @@ sa3-generate --tok models/t5gemma-b-b-ul2-v1.0-vocab.gguf \
     --prompt "upbeat funk groove with slap bass" --frames 128 --steps 8 --out song.wav
 ```
 
+## Performance
+
+Roughly **3s for a 12s clip** at f16 on an 8GB laptop GPU (RTX 5070), and ~6s on an Apple M4 — end to end,
+including model load. The sliding-window decoder keeps long generations linear (a 2-minute clip is ~9s on
+the 5070). CPU works but is ~10× slower. Full numbers + the f16 / flash-attention levers:
+[docs/BENCHMARKS.md](https://github.com/betweentwomidnights/sa3.cpp/blob/main/docs/BENCHMARKS.md).
+
 ## License
 
 These are format conversions of [stabilityai/stable-audio-3-medium](https://huggingface.co/stabilityai/stable-audio-3-medium),
