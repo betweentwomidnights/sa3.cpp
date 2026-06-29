@@ -130,7 +130,14 @@ int main(int argc, char** argv) {
     const sa3::T5GemmaConfig tc = sa3::T5GemmaConfig::from(TE);
     const sa3::DitConfig     dc = sa3::DitConfig::from(DIT);
     const sa3::SameConfig    sc = sa3::SameConfig::from(AE);
-    const int same_l_flash_mode = sc.chunk ? 0 : sa3::nn::same_flash_attn_mode();
+    int same_l_flash_mode = sc.chunk ? 0 : sa3::nn::same_flash_attn_mode();
+    if (same_l_flash_mode == 2) {   // compact 'local' flash: only Apple Metal handles the 3-block shape;
+        const char* bn = ggml_backend_name(shared_backend);   // ggml's CUDA flash kernel aborts on it.
+        if (bn && strstr(bn, "CUDA")) {
+            fprintf(stderr, "[sa3] SA3_SAME_FLASH_ATTN=local is unsupported on CUDA; falling back to full\n");
+            same_l_flash_mode = 1;
+        }
+    }
     const bool same_l_flash_attn = same_l_flash_mode != 0;
     if (decode_chunk_size < 0) { fprintf(stderr, "--decode-chunk-size must be >= 0\n"); return 1; }
     if (decode_overlap < 0) { fprintf(stderr, "--decode-overlap must be >= 0\n"); return 1; }

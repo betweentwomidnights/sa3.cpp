@@ -79,3 +79,28 @@ generation is basically a base generation plus ~0.1s per adapter. the in-place p
 a separate copy of the dora'd dit (~2.9gb) would push vram back over 8gb and thrash. on the
 host loops this same apply was ~14s.
 
+## flash attention (opt-in)
+
+`ggml_flash_attn_ext` is a fused attention op every gpu backend implements, so the same flag
+works across cuda/vulkan/metal (skip it on cpu). it's **off by default** — it accumulates in
+f16, so the output drifts slightly from the bit-exact reference path (raw waveform cosine ~0.95
+vs no-flash, but log-mag spectrogram ~0.996 — perceptually identical). turn it on for speed:
+
+- `SA3_FLASH_ATTN=1` — flashes the DiT (and, unless overridden, the SAME-L decoder too).
+- `SA3_SAME_FLASH_ATTN=full` (default when flash is on) / `=local` / `=0` — controls just the
+  SAME-L decoder. **use `full`.** `local` (compact 3-block neighborhoods) is an Apple-Metal
+  experiment that's *slower* even there, gives no win on Vulkan, and isn't supported by ggml's
+  CUDA flash kernel (sa3-generate falls back to `full` with a warning on CUDA).
+
+decode is where it pays off (medium f16, 12s, this 5070 laptop):
+
+| backend | dit_compute | dec_compute |
+|---|---|---|
+| CUDA, no flash | ~486 ms | ~221 ms |
+| CUDA, flash (full) | ~442 ms | **~166 ms (−25%)** |
+| Vulkan, no flash | ~435 ms | ~245 ms |
+| Vulkan, flash (full) | ~454 ms | **~166 ms (−32%)** |
+
+the DiT gain is modest/within-noise; the decoder is the real win. on metal it helped through
+120s (see docs/METAL.md). vulkan pays a one-time shader compile on the first flash run.
+
