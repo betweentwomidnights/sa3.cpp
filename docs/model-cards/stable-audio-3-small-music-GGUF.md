@@ -1,10 +1,9 @@
-<!-- v1 draft model card — may revise after Stability review. -->
 ---
 language:
 - en
 license: other
 license_name: stable-audio-community
-license_link: https://stability.ai/license
+license_link: LICENSE.md
 pipeline_tag: text-to-audio
 base_model: stabilityai/stable-audio-3-small-music
 tags:

@@ -1,9 +1,8 @@
-<!-- v1 draft model card — may revise after Stability review. -->
 ---
 language:
 - en
 license: gemma
-license_link: https://ai.google.dev/gemma/terms
+license_link: LICENSE.md
 pipeline_tag: text-to-audio
 base_model: google/t5gemma-b-b-ul2
 tags:
