@@ -21,7 +21,9 @@ int main() {
         switch (ggml_backend_dev_type(dev)) {
             case GGML_BACKEND_DEVICE_TYPE_CPU:   kind = "CPU";   break;
             case GGML_BACKEND_DEVICE_TYPE_GPU:   kind = "GPU";   break;
+            case GGML_BACKEND_DEVICE_TYPE_IGPU:  kind = "IGPU";  break;
             case GGML_BACKEND_DEVICE_TYPE_ACCEL: kind = "ACCEL"; break;
+            case GGML_BACKEND_DEVICE_TYPE_META:  kind = "META";  break;
         }
         printf("  [%zu] %-5s %-20s %s (%.1f/%.1f GiB free)\n",
                i, kind, ggml_backend_dev_name(dev), ggml_backend_dev_description(dev),

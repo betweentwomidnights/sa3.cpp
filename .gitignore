@@ -5,6 +5,9 @@ refs/
 build/
 build-cuda/
 build-vulkan/
+build-hip/
+build-metal/
+build-all/
 *.o
 *.obj
 *.exe
@@ -12,6 +15,7 @@ build-vulkan/
 # Reference activation dumps (regenerate via tools/dump_refs.py) + C++ checkpoint dumps
 refdata*/
 cppout*/
+bench/
 
 # LoRA/DoRA adapter checkpoints + exports (large; convert to gguf via tools/convert_lora.py)
 loras/

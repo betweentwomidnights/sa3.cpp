@@ -13,8 +13,8 @@ cd sa3.cpp
 # 1. build a backend (own dir each, so they coexist)
 ./build.sh cuda        # or: cpu | vulkan | hip | metal | all     (windows: build.cmd cuda)
 
-# 2. download a model set into ./models  (needs: pip install huggingface_hub)
-python tools/download_models.py --variant medium --encoding f16
+# 2. download a model set into ./models  (needs: python3 -m pip install huggingface_hub)
+python3 tools/download_models.py --variant medium --encoding f16
 
 # 3. generate
 ./build-cuda/bin/sa3-generate --tok models/t5gemma-b-b-ul2-v1.0-vocab.gguf \
@@ -28,7 +28,7 @@ python tools/download_models.py --variant medium --encoding f16
 build needs cmake + a c++17 compiler (Visual Studio 2022 on windows). cuda needs the CUDA
 Toolkit; vulkan needs the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home); metal is macOS-only.
 backend + packaging details: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) ·
-[docs/VULKAN.md](docs/VULKAN.md).
+[docs/VULKAN.md](docs/VULKAN.md) · [docs/METAL.md](docs/METAL.md).
 
 what works:
 
@@ -48,7 +48,8 @@ what's next:
 - [x] cuda backend + fp16
 - [x] benchmark generation times and stuff ([docs/BENCHMARKS.md](docs/BENCHMARKS.md))
 - [x] vulkan backend ([docs/VULKAN.md](docs/VULKAN.md))
-- [ ] metal backend (next), hip/rocm for amd
+- [x] metal backend builds + smoke-tests on Apple M4
+- [ ] hip/rocm for amd
 
 > note: still want to do more testing to confirm the adapters are working just like the pytorch version
 > (dora-rows is validated end-to-end at cossim 1.0; the other adapter types are formula-validated but

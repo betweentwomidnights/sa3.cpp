@@ -14,6 +14,18 @@ inline bool flash_attn_enabled() {
     return p && strcmp(p, "0") != 0;
 }
 
+inline int same_flash_attn_mode() {
+    const char* p = getenv("SA3_SAME_FLASH_ATTN");
+    if (!p) return flash_attn_enabled() ? 1 : 0; // legacy global flag: full-mask flash
+    if (!strcmp(p, "0")) return 0;
+    if (!strcmp(p, "local") || !strcmp(p, "window") || !strcmp(p, "compact")) return 2;
+    return 1; // non-zero / "full"
+}
+
+inline bool same_flash_attn_enabled() {
+    return same_flash_attn_mode() != 0;
+}
+
 // DynamicTanh: y = tanh(alpha * x) * gamma + beta.
 // alpha is [1] (broadcast); gamma/beta are [ne0] (broadcast over the rest).
 inline ggml_tensor* dyt(ggml_context* ctx, ggml_tensor* x,
@@ -87,15 +99,43 @@ inline ggml_tensor* attn_sliding(ggml_context* ctx, ggml_tensor* q, ggml_tensor*
     return ggml_reshape_3d(ctx, o, d, N, H);
 }
 
+// Same compact sliding-window attention as attn_sliding(), but the per-block attention
+// itself is computed by ggml_flash_attn_ext. q,k,v [d,N,H], bias [3b,b,nb] F16.
+inline ggml_tensor* attn_sliding_flash_ext(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_tensor* v,
+                                           int b, ggml_tensor* bias, float scale) {
+    const int64_t d = q->ne[0], N = q->ne[1], H = q->ne[2], nb = N / b;
+    auto blk = [&](ggml_tensor* t){ return ggml_reshape_4d(ctx, t, d, b, nb, H); };   // [d, b, nb, H]
+    auto pad = [&](ggml_tensor* xb){
+        ggml_tensor* z = ggml_scale(ctx, ggml_cont(ctx,
+            ggml_view_4d(ctx, xb, d, b, 1, H, xb->nb[1], xb->nb[2], xb->nb[3], 0)), 0.0f);
+        return ggml_concat(ctx, ggml_concat(ctx, z, xb, 2), z, 2);
+    };
+    auto neigh = [&](ggml_tensor* xp){
+        auto sl = [&](int off){ return ggml_cont(ctx, ggml_view_4d(ctx, xp, d, b, nb, H,
+            xp->nb[1], xp->nb[2], xp->nb[3], (size_t)off*xp->nb[2])); };
+        return ggml_concat(ctx, ggml_concat(ctx, sl(0), sl(1), 1), sl(2), 1);          // [d, 3b, nb, H]
+    };
+
+    ggml_tensor* out = ggml_flash_attn_ext(ctx, blk(q), neigh(pad(blk(k))), neigh(pad(blk(v))), bias, scale, 0.0f, 0.0f);
+    ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);                                  // [d, nb, b, H]
+    out = ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));                          // [d, b, nb, H]
+    return ggml_reshape_3d(ctx, out, d, N, H);
+}
+
 // Scaled-dot-product attention with an additive mask.
 // q,k,v: [d, N, H]; mask: [Nk, Nq] (0 / -inf). Returns [d, Nq, H].
+inline ggml_tensor* sdpa_flash_ext(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_tensor* v,
+                                   ggml_tensor* mask, float scale) {
+    ggml_tensor* out = ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f);
+    ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
+    out = ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3)); // [d, Nq, H, 1]
+    return ggml_reshape_3d(ctx, out, q->ne[0], q->ne[1], q->ne[2]);
+}
+
 inline ggml_tensor* sdpa(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_tensor* v,
                          ggml_tensor* mask, float scale) {
     if (flash_attn_enabled() && (!mask || mask->type == GGML_TYPE_F16)) {
-        ggml_tensor* out = ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
-        out = ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3)); // [d, Nq, H, 1]
-        return ggml_reshape_3d(ctx, out, q->ne[0], q->ne[1], q->ne[2]);
+        return sdpa_flash_ext(ctx, q, k, v, mask, scale);
     }
     ggml_tensor* kq = ggml_mul_mat(ctx, k, q);                 // [Nk, Nq, H]
     kq = ggml_soft_max_ext(ctx, kq, mask, scale, 0.0f);        // softmax over Nk

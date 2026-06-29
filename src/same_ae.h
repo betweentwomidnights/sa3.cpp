@@ -76,6 +76,36 @@ inline std::vector<float> build_swa_bias(const SameConfig& c, int64_t N) {
     return bias;
 }
 
+inline std::vector<ggml_fp16_t> build_swa_bias_f16(const SameConfig& c, int64_t N) {
+    const int b = c.sub_chunk, tb = 3*b, w = c.sliding_window;
+    const int nb = (int)(N / b);
+    const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
+    const ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+    std::vector<ggml_fp16_t> bias((size_t)tb * b * nb);
+    for (int i = 0; i < nb; i++) for (int p = 0; p < b; p++) for (int j = 0; j < tb; j++) {
+        const int gq = i*b + p, gk = (i-1)*b + j;
+        const bool ok = std::abs(gq - gk) <= w && gk >= 0 && gk < (int)N;
+        bias[(size_t)i*b*tb + (size_t)p*tb + j] = ok ? zero : neg_inf;
+    }
+    return bias;
+}
+
+// Full F16 additive band mask for ggml_flash_attn_ext: [key=N, query=N, 1, 1].
+// This is intentionally separate from build_swa_bias() because flash_attn_ext consumes the
+// natural full K/V sequence, while the default SAME-L path uses compact 3-block neighborhoods.
+inline std::vector<ggml_fp16_t> build_swa_full_bias_f16(const SameConfig& c, int64_t N) {
+    const int w = c.sliding_window;
+    std::vector<ggml_fp16_t> bias((size_t)N * N);
+    const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
+    const ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+    for (int64_t q = 0; q < N; q++) {
+        for (int64_t k = 0; k < N; k++) {
+            bias[(size_t)q * N + k] = (llabs(q - k) <= w) ? zero : neg_inf;
+        }
+    }
+    return bias;
+}
+
 // One SAME TransformerBlock over a packed sequence x:[dim, N]:
 //   x = x + diff_attn(dyt(x))   then   x = x + swiglu_ff(dyt(x))
 // Differential attention = sdpa(q,k,v) - sdpa(q_diff,k_diff,v) with a band mask;
@@ -111,12 +141,23 @@ inline ggml_tensor* same_block(ggml_context* ctx, const GgufModel& W, const std:
     auto toAttn = [&](ggml_tensor* a){ return ggml_cont(ctx, ggml_permute(ctx, a, 0, 2, 1, 3)); }; // [dh,nh,N]->[dh,N,nh]
     q=toAttn(q); k=toAttn(k); v=toAttn(v); qd=toAttn(qd); kd=toAttn(kd);
 
-    // differential attention, both via sparse local paths (mask param carries the bias):
+    // differential attention (mask param carries the bias):
     //   SAME-S (chunked): block-diagonal self-attention over eff_chunk blocks (mask unused).
     //   SAME-L (sliding window): overlapping-block banded attention; `mask` = [3*sub_chunk, sub_chunk, nb] SWA bias.
+    //   SAME-L flash opt-in: full F16 [N,N] band mask or compact F16 [3b,b,nb] mask + ggml_flash_attn_ext.
+    auto same_l_attn = [&](ggml_tensor* qq, ggml_tensor* kk) {
+        const int flash_mode = nn::same_flash_attn_mode();
+        if (flash_mode == 2 && mask && mask->type == GGML_TYPE_F16) {
+            return nn::attn_sliding_flash_ext(ctx, qq, kk, v, c.sub_chunk, mask, scale);
+        }
+        if (flash_mode == 1 && mask && mask->type == GGML_TYPE_F16) {
+            return nn::sdpa_flash_ext(ctx, qq, kk, v, mask, scale);
+        }
+        return nn::attn_sliding(ctx, qq, kk, v, c.sub_chunk, mask, scale);
+    };
     ggml_tensor* o = c.chunk
         ? ggml_sub(ctx, nn::attn_blockdiag(ctx,q,k,v,c.eff_chunk,scale), nn::attn_blockdiag(ctx,qd,kd,v,c.eff_chunk,scale))
-        : ggml_sub(ctx, nn::attn_sliding(ctx,q,k,v,c.sub_chunk,mask,scale), nn::attn_sliding(ctx,qd,kd,v,c.sub_chunk,mask,scale)); // [dh,N,nh]
+        : ggml_sub(ctx, same_l_attn(q,k), same_l_attn(qd,kd)); // [dh,N,nh]
     o = ggml_cont(ctx, ggml_permute(ctx, o, 0, 2, 1, 3));            // [dh,nh,N]
     o = ggml_reshape_2d(ctx, o, dim, N);
     o = ggml_mul_mat(ctx, W.get(p+"self_attn.to_out.weight"), o);

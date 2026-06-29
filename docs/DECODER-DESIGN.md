@@ -14,8 +14,13 @@ This is what the GGML decoder must reproduce. Latent `z`: `(B, 256, T)` at ≈10
 3. **Unpatchify** (`PatchedPretransform.decode`): `rearrange("b (c h) l -> b c (l h)", h=256)`:
    `(B,512,L) → (B,2,L·256)`. i.e. `out[b, c, l*256+h] = x[b, c*256+h, l]`. No postfilter, no oversampling.
 4. `soft_clip = False` → no final tanh.
-(`decode_audio` adds chunked overlap tiling for long audio — implement as outer tiling; validate
-short clips un-chunked first.)
+(`decode_audio` adds chunked overlap tiling for long audio. `sa3-generate` mirrors this as optional
+outer tiling with `--chunked-decode`, but the GGML default remains monolithic because SAME-L attention
+is already computed as linear sliding-window blocks internally.)
+For Metal, `SA3_SAME_FLASH_ATTN=1` can replace the compact sliding-window attention subgraph with
+`GGML_OP_FLASH_ATTN_EXT` plus a full F16 band mask; this is faster on Apple M4 through 120s, but uses
+quadratic mask memory, so it remains opt-in. `SA3_SAME_FLASH_ATTN=local` keeps the compact local
+neighborhood shape and is numerically correct, but is slower on the current ggml Metal kernels.
 
 ## TransformerResamplingBlock — DECODER, variable-stride, sliding-window
 Config: `stride=16`, `variable_stride=True`, `sliding_window=[1,1]`, `transformer_depth=12`,

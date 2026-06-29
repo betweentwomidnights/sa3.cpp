@@ -5,9 +5,9 @@ Fetches one model variant (DiT + SAME + conditioner) plus the shared T5Gemma enc
 + tokenizer, following the naming/repo layout in docs/DISTRIBUTION.md. Cross-platform
 (Windows + macOS/Linux), unlike a bash models.sh.
 
-  pip install huggingface_hub
-  python tools/download_models.py --variant medium --encoding f16
-  HF_TOKEN=hf_... python tools/download_models.py --variant small-sfx   # if a repo is gated
+  python3 -m pip install huggingface_hub
+  python3 tools/download_models.py --variant medium --encoding f16
+  HF_TOKEN=hf_... python3 tools/download_models.py --variant small-sfx   # if a repo is gated
 
 The HF namespace is not final yet (pending Stability packaging) — override with --namespace.
 """
@@ -36,8 +36,9 @@ def main():
 
     try:
         from huggingface_hub import hf_hub_download
+        from huggingface_hub.utils import get_token
     except ImportError:
-        sys.exit("missing dependency: pip install huggingface_hub")
+        sys.exit("missing dependency: python3 -m pip install huggingface_hub")
 
     enc = args.encoding.upper()                 # F16 / F32
     dit_size, same = VARIANTS[args.variant]
@@ -55,10 +56,16 @@ def main():
     ]
 
     os.makedirs(args.out, exist_ok=True)
-    token = os.environ.get("HF_TOKEN")
+    token = os.environ.get("HF_TOKEN") or get_token()
     for repo, fname in wanted:
         print(f"[download] {repo}/{fname}")
-        hf_hub_download(repo_id=repo, filename=fname, local_dir=args.out, token=token)
+        try:
+            hf_hub_download(repo_id=repo, filename=fname, local_dir=args.out, token=token)
+        except Exception as e:
+            print(f"\n[error] could not download {repo}/{fname}", file=sys.stderr)
+            print("        If the repo is private, make sure the active token can read that namespace.", file=sys.stderr)
+            print("        Fine-grained Hugging Face tokens must include repo.content.read for the org/user that owns the repo.", file=sys.stderr)
+            raise
     print(f"[done] {args.variant} ({args.encoding}) -> {args.out}/")
     print("run: sa3-generate --tok <vocab> --t5 <encoder> --cond <conditioner> "
           "--dit <dit> --same <same> --prompt \"...\" --out song.wav")

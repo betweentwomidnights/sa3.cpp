@@ -87,6 +87,7 @@ struct GgufModel {
     ggml_context*         ctx     = nullptr;
     gguf_context*         gguf    = nullptr;
     ggml_backend_t        backend = nullptr;
+    bool                  owns_backend = true;
     ggml_backend_buffer_t buf     = nullptr;
     std::map<std::string, ggml_tensor*> tensors;
     std::map<std::string, ggml_tensor*> overrides;   // LoRA-effective weights (see lora.h)
@@ -122,7 +123,9 @@ struct GgufModel {
         if (buf)     ggml_backend_buffer_free(buf);
         if (gguf)    gguf_free(gguf);
         if (ctx)     ggml_free(ctx);
-        if (backend) ggml_backend_free(backend);
+        if (backend && owns_backend) ggml_backend_free(backend);
+        buf = nullptr; gguf = nullptr; ctx = nullptr; backend = nullptr;
+        tensors.clear(); overrides.clear(); owns_backend = true;
     }
 };
 
@@ -131,6 +134,7 @@ struct GgufModel {
 inline GgufModel load_gguf(const char* path, ggml_backend_t backend = nullptr) {
     GgufModel m;
     m.backend = backend ? backend : make_backend();
+    m.owns_backend = backend == nullptr;
 
     gguf_init_params gp = { /*no_alloc=*/true, /*ctx=*/&m.ctx };
     m.gguf = gguf_init_from_file(path, gp);

@@ -54,9 +54,15 @@ static std::vector<float> tensor_to_host(const sa3::GgufModel& M, const std::str
 
 // SAME-L sliding-window bias upload; no-op when the mask tensor is unused (SAME-S block-diagonal).
 static void set_swa_bias(ggml_tensor* mt, const sa3::SameConfig& sc, int64_t N) {
-    if (!mt->buffer) return;
-    std::vector<float> bias = sa3::build_swa_bias(sc, N);
-    ggml_backend_tensor_set(mt, bias.data(), 0, bias.size() * sizeof(float));
+    if (!mt->buffer || sc.chunk) return;
+    if (mt->type == GGML_TYPE_F16) {
+        const bool compact = mt->ne[0] == 3*sc.sub_chunk && mt->ne[1] == sc.sub_chunk;
+        std::vector<ggml_fp16_t> bias = compact ? sa3::build_swa_bias_f16(sc, N) : sa3::build_swa_full_bias_f16(sc, N);
+        ggml_backend_tensor_set(mt, bias.data(), 0, bias.size() * sizeof(ggml_fp16_t));
+    } else {
+        std::vector<float> bias = sa3::build_swa_bias(sc, N);
+        ggml_backend_tensor_set(mt, bias.data(), 0, bias.size() * sizeof(float));
+    }
 }
 
 int main(int argc, char** argv) {
@@ -71,6 +77,7 @@ int main(int argc, char** argv) {
     float inpaint_start = -1.0f, inpaint_end = -1.0f;   // inpaint: regenerate this [start,end] sec region
     std::vector<std::pair<std::string,float>> lora_specs;   // (gguf, strength) applied in flag order
     bool keep_models = false;        // --keep-models: don't free TE/DIT early (keep all resident)
+    int decode_chunk_size = 0, decode_overlap = 32;     // outer SAME-L decode tiling; 0 = monolithic
     int frames = 128, steps = 8; uint64_t seed = 0;
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--tok")    && i+1 < argc) tok_p = argv[++i];
@@ -92,6 +99,9 @@ int main(int argc, char** argv) {
             if (lora_specs.empty()) { fprintf(stderr, "--lora-strength must follow a --lora\n"); return 1; }
             lora_specs.back().second = (float)atof(argv[++i]);
         }
+        else if (!strcmp(argv[i], "--chunked-decode")) decode_chunk_size = 128;
+        else if (!strcmp(argv[i], "--decode-chunk-size") && i+1 < argc) decode_chunk_size = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--decode-overlap") && i+1 < argc) decode_overlap = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--keep-models")) keep_models = true;   // disable progressive VRAM frees
     }
     const bool inpaint = (inpaint_start >= 0.0f || inpaint_end >= 0.0f);   // inpaint mode (needs --init source)
@@ -100,24 +110,34 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    ggml_backend_t shared_backend = sa3::make_backend();
+
     double t0 = wall_time_s();
     sa3::Tokenizer tok = sa3::Tokenizer::load(tok_p);
     profile_log(prof, "load_tokenizer", wall_time_s() - t0);
     t0 = wall_time_s();
-    sa3::GgufModel TE = sa3::load_gguf(t5_p);
+    sa3::GgufModel TE = sa3::load_gguf(t5_p, shared_backend);
     profile_log(prof, "load_t5", wall_time_s() - t0);
     t0 = wall_time_s();
-    sa3::GgufModel DIT = sa3::load_gguf(dit_p);
+    sa3::GgufModel DIT = sa3::load_gguf(dit_p, shared_backend);
     profile_log(prof, "load_dit", wall_time_s() - t0);
     t0 = wall_time_s();
-    sa3::GgufModel AE = sa3::load_gguf(same_p);
+    sa3::GgufModel AE = sa3::load_gguf(same_p, shared_backend);
     profile_log(prof, "load_same", wall_time_s() - t0);
     // Per-variant conditioner: separate sidecar gguf when given, else read from the (bundled) encoder.
-    sa3::GgufModel* cond_model = cond_p ? new sa3::GgufModel(sa3::load_gguf(cond_p)) : nullptr;
+    sa3::GgufModel* cond_model = cond_p ? new sa3::GgufModel(sa3::load_gguf(cond_p, shared_backend)) : nullptr;
     const sa3::GgufModel& CD = cond_model ? *cond_model : TE;
     const sa3::T5GemmaConfig tc = sa3::T5GemmaConfig::from(TE);
     const sa3::DitConfig     dc = sa3::DitConfig::from(DIT);
     const sa3::SameConfig    sc = sa3::SameConfig::from(AE);
+    const int same_l_flash_mode = sc.chunk ? 0 : sa3::nn::same_flash_attn_mode();
+    const bool same_l_flash_attn = same_l_flash_mode != 0;
+    if (decode_chunk_size < 0) { fprintf(stderr, "--decode-chunk-size must be >= 0\n"); return 1; }
+    if (decode_overlap < 0) { fprintf(stderr, "--decode-overlap must be >= 0\n"); return 1; }
+    if (decode_chunk_size > 0 && decode_overlap >= decode_chunk_size) {
+        fprintf(stderr, "--decode-overlap must be smaller than --decode-chunk-size\n");
+        return 1;
+    }
     const int ds = sc.patch_size * sc.output_seg;          // downsampling ratio (4096 samples/frame)
 
     // ---------- LoRA/DoRA adapters: recompute W_eff in weight space (chained in flag order) ----------
@@ -158,6 +178,13 @@ int main(int argc, char** argv) {
     const int T = frames, max_len = (int)TE.u32("t5g.max_length");
     const int cond_dim = tc.dim, ctx_len = max_len + 1;     // t5gemma tokens + 1 seconds token
     const int N = T * dc.io;
+    if (same_l_flash_attn) {
+        const int64_t n_same = (int64_t)T * sc.sub_chunk;
+        const int64_t mask_elems = same_l_flash_mode == 2 ? (int64_t)3 * sc.sub_chunk * n_same : n_same * n_same;
+        const double mask_mib = (double)mask_elems * sizeof(ggml_fp16_t) / (1024.0 * 1024.0);
+        fprintf(stderr, "[sa3] SAME-L %s flash attention enabled: F16 band mask %.1f MiB\n",
+                same_l_flash_mode == 2 ? "local" : "full", mask_mib);
+    }
     // inpaint runs from pure noise (sigma_max=1) + local_add_cond; audio2audio mixes init at sigma_max<1
     const float sigma_max = (init_p && !inpaint) ? init_noise_level : 1.0f;
     if (inpaint && (!init_p || dc.local_dim <= 0)) {
@@ -265,7 +292,9 @@ int main(int argc, char** argv) {
         ggml_tensor* a_in   = ggml_new_tensor_2d(enctx, GGML_TYPE_F32, init_L, sc.out_channels / sc.patch_size);
         ggml_tensor* pos_a  = ggml_new_tensor_1d(enctx, GGML_TYPE_I32, Nenc);
         ggml_tensor* mask_a = sc.chunk ? ggml_new_tensor_2d(enctx, GGML_TYPE_F32, Nenc, Nenc)
-                                       : ggml_new_tensor_3d(enctx, GGML_TYPE_F32, 3*sc.sub_chunk, sc.sub_chunk, Nenc/sc.sub_chunk);
+                            : same_l_flash_mode == 1 ? ggml_new_tensor_4d(enctx, GGML_TYPE_F16, Nenc, Nenc, 1, 1)
+                            : same_l_flash_mode == 2 ? ggml_new_tensor_3d(enctx, GGML_TYPE_F16, 3*sc.sub_chunk, sc.sub_chunk, Nenc/sc.sub_chunk)
+                                                     : ggml_new_tensor_3d(enctx, GGML_TYPE_F32, 3*sc.sub_chunk, sc.sub_chunk, Nenc/sc.sub_chunk);
         ggml_set_input(a_in); ggml_set_input(pos_a); ggml_set_input(mask_a);
         ggml_tensor *pos_a2 = nullptr, *mask_a2 = nullptr;
         if (sc.chunk) {                                       // SAME-S shifted half: pos_a2 used, mask_a2 unused
@@ -379,55 +408,156 @@ int main(int argc, char** argv) {
     if (!keep_models) DIT.free();   // free the DiT before the SAME decode (skip with --keep-models)
 
     // ---------- decode -> WAV ----------
-    const int Ndec = T * sc.sub_chunk;
     const double t_dec_total = wall_time_s();
-    double tp_dec = wall_time_s();
-    ggml_init_params eip = { (size_t)512*1024*1024, nullptr, true };
-    ggml_context* ectx = ggml_init(eip);
-    ggml_tensor* z = ggml_new_tensor_2d(ectx, GGML_TYPE_F32, sc.latent, T);
-    const int N2 = sc.chunk ? Ndec + 2*sc.shift : 0;       // SAME-S needs a shifted 2nd mask
-    ggml_tensor* pos_e = ggml_new_tensor_1d(ectx, GGML_TYPE_I32, Ndec);
-    ggml_tensor* mask_e = sc.chunk ? ggml_new_tensor_2d(ectx, GGML_TYPE_F32, Ndec, Ndec)
-                                   : ggml_new_tensor_3d(ectx, GGML_TYPE_F32, 3*sc.sub_chunk, sc.sub_chunk, Ndec/sc.sub_chunk);
-    ggml_set_input(z); ggml_set_input(pos_e); ggml_set_input(mask_e);
-    ggml_tensor *pos2_e = nullptr, *mask2_e = nullptr;
-    if (sc.chunk) {                                          // SAME-S shifted half: pos2_e used, mask2_e unused
-        pos2_e  = ggml_new_tensor_1d(ectx, GGML_TYPE_I32, N2);
-        mask2_e = ggml_new_tensor_2d(ectx, GGML_TYPE_F32, N2, N2);
-        ggml_set_input(pos2_e); ggml_set_input(mask2_e);
+    double dec_build = 0.0, dec_alloc = 0.0, dec_upload = 0.0, dec_compute = 0.0, dec_download = 0.0;
+
+    struct DecodeGraph {
+        int T = 0, Ndec = 0, N2 = 0, n_samp = 0, n_ch = 0;
+        ggml_context* ctx = nullptr;
+        ggml_tensor* z = nullptr;
+        ggml_tensor* pos = nullptr;
+        ggml_tensor* mask = nullptr;
+        ggml_tensor* pos2 = nullptr;
+        ggml_tensor* mask2 = nullptr;
+        ggml_tensor* audio = nullptr;
+        ggml_cgraph* graph = nullptr;
+        ggml_gallocr_t alloc = nullptr;
+    };
+
+    auto set_pos = [&](ggml_tensor* p, int n){
+        std::vector<int32_t> b(n);
+        for (int i = 0; i < n; i++) b[i] = i;
+        ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t));
+    };
+
+    auto build_decode_graph = [&](int run_T) {
+        DecodeGraph dg;
+        dg.T = run_T;
+        dg.Ndec = run_T * sc.sub_chunk;
+        dg.N2 = sc.chunk ? dg.Ndec + 2*sc.shift : 0;       // SAME-S needs a shifted 2nd mask
+        double ts = wall_time_s();
+        ggml_init_params eip = { (size_t)512*1024*1024, nullptr, true };
+        dg.ctx = ggml_init(eip);
+        dg.z = ggml_new_tensor_2d(dg.ctx, GGML_TYPE_F32, sc.latent, run_T);
+        dg.pos = ggml_new_tensor_1d(dg.ctx, GGML_TYPE_I32, dg.Ndec);
+        dg.mask = sc.chunk ? ggml_new_tensor_2d(dg.ctx, GGML_TYPE_F32, dg.Ndec, dg.Ndec)
+                : same_l_flash_mode == 1 ? ggml_new_tensor_4d(dg.ctx, GGML_TYPE_F16, dg.Ndec, dg.Ndec, 1, 1)
+                : same_l_flash_mode == 2 ? ggml_new_tensor_3d(dg.ctx, GGML_TYPE_F16, 3*sc.sub_chunk, sc.sub_chunk, dg.Ndec/sc.sub_chunk)
+                                         : ggml_new_tensor_3d(dg.ctx, GGML_TYPE_F32, 3*sc.sub_chunk, sc.sub_chunk, dg.Ndec/sc.sub_chunk);
+        ggml_set_input(dg.z); ggml_set_input(dg.pos); ggml_set_input(dg.mask);
+        if (sc.chunk) {                                      // SAME-S shifted half: pos2 used, mask2 unused
+            dg.pos2  = ggml_new_tensor_1d(dg.ctx, GGML_TYPE_I32, dg.N2);
+            dg.mask2 = ggml_new_tensor_2d(dg.ctx, GGML_TYPE_F32, dg.N2, dg.N2);
+            ggml_set_input(dg.pos2); ggml_set_input(dg.mask2);
+        }
+        dg.audio = ggml_cont(dg.ctx, sa3::same_decode(dg.ctx, AE, dg.z, sc, run_T, dg.pos, dg.mask, dg.pos2, dg.mask2).audio);
+        ggml_set_output(dg.audio);
+        dg.graph = ggml_new_graph_custom(dg.ctx, 32768, false);
+        ggml_build_forward_expand(dg.graph, dg.audio);
+        dec_build += wall_time_s() - ts;
+        ts = wall_time_s();
+        dg.alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(AE.backend));
+        ggml_gallocr_alloc_graph(dg.alloc, dg.graph);
+        dec_alloc += wall_time_s() - ts;
+        dg.n_samp = (int)dg.audio->ne[0];
+        dg.n_ch = (int)dg.audio->ne[1];
+        return dg;
+    };
+
+    auto free_decode_graph = [&](DecodeGraph& dg) {
+        ggml_gallocr_free(dg.alloc);
+        ggml_free(dg.ctx);
+        dg = DecodeGraph{};
+    };
+
+    auto run_decode_graph = [&](DecodeGraph& dg, const float* z_src, std::vector<float>& out) {
+        double ts = wall_time_s();
+        ggml_backend_tensor_set(dg.z, z_src, 0, (size_t)sc.latent*dg.T*sizeof(float));
+        set_pos(dg.pos, dg.Ndec);
+        set_swa_bias(dg.mask, sc, dg.Ndec);
+        if (sc.chunk) set_pos(dg.pos2, dg.N2);               // mask2 unused (block-diagonal)
+        dec_upload += wall_time_s() - ts;
+        ts = wall_time_s();
+        ggml_backend_graph_compute(AE.backend, dg.graph);
+        dec_compute += wall_time_s() - ts;
+        ts = wall_time_s();
+        out.resize((size_t)dg.n_samp*dg.n_ch);
+        ggml_backend_tensor_get(dg.audio, out.data(), 0, out.size()*sizeof(float));
+        dec_download += wall_time_s() - ts;
+    };
+
+    const bool can_chunk_decode = decode_chunk_size > 0 && !sc.chunk && T >= decode_chunk_size;
+    if (decode_chunk_size > 0 && sc.chunk)
+        fprintf(stderr, "warning: outer --chunked-decode is only enabled for SAME-L; using monolithic SAME-S decode\n");
+
+    const int n_ch = sc.out_channels / sc.patch_size;
+    const int n_samp = T * sc.patch_size * sc.output_seg;
+    std::vector<float> ab((size_t)n_samp*n_ch, 0.0f);
+    if (!can_chunk_decode) {
+        DecodeGraph dg = build_decode_graph(T);
+        run_decode_graph(dg, host_x.data(), ab);
+        free_decode_graph(dg);
+    } else {
+        const int hop = decode_chunk_size - decode_overlap;
+        std::vector<int> starts;
+        for (int s = 0; s <= T - decode_chunk_size; s += hop) starts.push_back(s);
+        const int final_start = T - decode_chunk_size;
+        if (starts.empty() || starts.back() != final_start) starts.push_back(final_start);
+        fprintf(stderr, "[sa3] chunked SAME-L decode: %zu chunks, size=%d overlap=%d\n",
+                starts.size(), decode_chunk_size, decode_overlap);
+
+        DecodeGraph dg = build_decode_graph(decode_chunk_size);
+        std::vector<float> zchunk((size_t)sc.latent * decode_chunk_size);
+        std::vector<float> chunk_audio;
+        const int chunk_samples = decode_chunk_size * ds;
+        const int half_overlap_samples = (decode_overlap / 2) * ds;
+        int cursor = 0;
+        for (size_t i = 0; i < starts.size(); i++) {
+            const int st = starts[i];
+            for (int t = 0; t < decode_chunk_size; t++)
+                memcpy(&zchunk[(size_t)t*sc.latent], &host_x[(size_t)(st + t)*sc.latent], sc.latent*sizeof(float));
+            run_decode_graph(dg, zchunk.data(), chunk_audio);
+
+            const bool first = i == 0, last = i + 1 == starts.size();
+            const int out_start = last ? n_samp - chunk_samples : st * ds;
+            const int left = first ? 0 : half_overlap_samples;
+            const int right = last ? chunk_samples : chunk_samples - half_overlap_samples;
+            const int target_start = out_start + left;
+            int target_end = out_start + right;
+            const int next_start = !last
+                ? ((i + 2 == starts.size() ? n_samp - chunk_samples : starts[i + 1] * ds)
+                   + half_overlap_samples)
+                : target_end;
+            target_end = std::min(target_end, next_start);
+            const int clipped_start = std::max(target_start, cursor);
+            if (target_end > clipped_start) {
+                const int copy_left = left + (clipped_start - target_start);
+                const int copy_count = target_end - clipped_start;
+                for (int c = 0; c < n_ch; c++)
+                    memcpy(&ab[(size_t)c*n_samp + clipped_start],
+                           &chunk_audio[(size_t)c*chunk_samples + copy_left],
+                           (size_t)copy_count*sizeof(float));
+                cursor = target_end;
+            }
+        }
+        free_decode_graph(dg);
     }
-    ggml_tensor* audio = ggml_cont(ectx, sa3::same_decode(ectx, AE, z, sc, T, pos_e, mask_e, pos2_e, mask2_e).audio);
-    ggml_set_output(audio);
-    ggml_cgraph* gf_dec = ggml_new_graph_custom(ectx, 32768, false);
-    ggml_build_forward_expand(gf_dec, audio);
-    profile_log(prof, "dec_build", wall_time_s() - tp_dec);
-    tp_dec = wall_time_s();
-    ggml_gallocr_t alloc_dec = ggml_gallocr_new(ggml_backend_get_default_buffer_type(AE.backend));
-    ggml_gallocr_alloc_graph(alloc_dec, gf_dec);
-    profile_log(prof, "dec_alloc", wall_time_s() - tp_dec);
-    tp_dec = wall_time_s();
-    ggml_backend_tensor_set(z, host_x.data(), 0, N*sizeof(float));
-    auto set_pos = [&](ggml_tensor* p, int n){ std::vector<int32_t> b(n); for (int i=0;i<n;i++) b[i]=i; ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t)); };
-    set_pos(pos_e, Ndec); set_swa_bias(mask_e, sc, Ndec);
-    if (sc.chunk) set_pos(pos2_e, N2);                       // mask2_e unused (block-diagonal)
-    profile_log(prof, "dec_upload", wall_time_s() - tp_dec);
-    tp_dec = wall_time_s();
-    ggml_backend_graph_compute(AE.backend, gf_dec);
-    profile_log(prof, "dec_compute", wall_time_s() - tp_dec);
-    tp_dec = wall_time_s();
-    const int n_samp = (int)audio->ne[0], n_ch = (int)audio->ne[1];
-    std::vector<float> ab((size_t)n_samp*n_ch);
-    ggml_backend_tensor_get(audio, ab.data(), 0, ab.size()*sizeof(float));
-    profile_log(prof, "dec_download", wall_time_s() - tp_dec);
-    tp_dec = wall_time_s();
+
+    profile_log(prof, "dec_build", dec_build);
+    profile_log(prof, "dec_alloc", dec_alloc);
+    profile_log(prof, "dec_upload", dec_upload);
+    profile_log(prof, "dec_compute", dec_compute);
+    profile_log(prof, "dec_download", dec_download);
+    double tp_dec = wall_time_s();
     sa3::write_wav_planar(wav_p, ab.data(), n_samp, n_ch, 44100);
     profile_log(prof, "write_wav", wall_time_s() - tp_dec);
     profile_log(prof, "dec_total", wall_time_s() - t_dec_total);
     printf("wrote %s  (%.2fs, seed %llu)\n", wav_p, (float)n_samp/44100.0f, (unsigned long long)seed);
 
-    ggml_gallocr_free(alloc_dec); ggml_free(ectx);
     if (keep_models) { TE.free(); DIT.free(); }   // freed early otherwise
     AE.free();
+    if (cond_model) { cond_model->free(); delete cond_model; }
+    ggml_backend_free(shared_backend);
     profile_log(prof, "total", wall_time_s() - t_total0);
     return 0;
 }
