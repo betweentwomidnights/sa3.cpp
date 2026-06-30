@@ -40,6 +40,7 @@ build needs cmake + a c++17 compiler (Visual Studio 2022 on windows). cuda needs
 Toolkit; vulkan needs the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home); metal is macOS-only.
 backend + packaging details: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) ·
 [docs/VULKAN.md](docs/VULKAN.md) · [docs/METAL.md](docs/METAL.md) · [docs/HIP.md](docs/HIP.md).
+there's also a small HTTP server (`./server.sh` / `server.cmd`) — see [docs/SERVER.md](docs/SERVER.md).
 
 what works:
 
