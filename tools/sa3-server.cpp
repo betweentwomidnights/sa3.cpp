@@ -588,6 +588,7 @@ int main(int argc, char** argv) {
                 params.init_audio = sa3::resample_planar_linear(params.init_audio, ns, nc, sr, 44100, resampled_ns);
                 fprintf(stderr, "[sa3-server] resampled init_path from %d Hz/%d samples to 44100 Hz/%d samples\n",
                         sr, ns, resampled_ns);
+                fflush(stderr);
                 ns = resampled_ns;
                 sr = 44100;
             }
@@ -602,8 +603,17 @@ int main(int argc, char** argv) {
             Job j; j.total_steps = params.steps; j.seed = seed_resolved; j.created = sa3::wall_time_s();
             jobs[sid] = std::move(j);
         }
+        fprintf(stderr,
+                "[sa3-server] queued %s frames=%d (~%.2fs) steps=%d keep_models=%s init_samples=%d init_ch=%d inpaint=%.2f..%.2f loras=%zu\n",
+                sid.c_str(), params.frames, (double)params.frames * 4096.0 / 44100.0, params.steps,
+                params.keep_models ? "true" : "false", params.init_n_samp, params.init_n_ch,
+                params.inpaint_start, params.inpaint_end, params.loras.size());
+        fflush(stderr);
         std::thread([sid, seed_resolved, params = std::move(params)]() mutable {
             params.on_progress = [sid](const sa3::Progress& p) {   // sampling->generating, decoding->encoding
+                fprintf(stderr, "[sa3-server] job %s %s %d/%d %.0f%%\n",
+                        sid.c_str(), p.stage, p.step, p.total, p.fraction * 100.0f);
+                fflush(stderr);
                 std::lock_guard<std::mutex> lk(jobs_mtx);
                 auto it = jobs.find(sid); if (it == jobs.end()) return;
                 it->second.progress = (int)(p.fraction * 100.0f);
@@ -614,11 +624,17 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lk(g_mtx);   // serialize: one generation at a time
             { std::lock_guard<std::mutex> jl(jobs_mtx); if (auto it = jobs.find(sid); it != jobs.end()) it->second.status = "generating"; }
             std::string err;
+            fprintf(stderr, "[sa3-server] job %s starting\n", sid.c_str());
+            fflush(stderr);
             if (!ensure_loaded(err)) {
+                fprintf(stderr, "[sa3-server] job %s failed to load model: %s\n", sid.c_str(), err.c_str());
+                fflush(stderr);
                 std::lock_guard<std::mutex> jl(jobs_mtx);
                 if (auto it = jobs.find(sid); it != jobs.end()) { it->second.status = "failed"; it->second.error = err; }
                 return;
             }
+            fprintf(stderr, "[sa3-server] job %s model ready\n", sid.c_str());
+            fflush(stderr);
             try {
                 sa3::GenResult r = g_pipe->generate(params);
                 std::string b64 = b64_encode(sa3::wav_planar_bytes(r.samples.data(), r.n_samp, r.n_ch, r.sample_rate));
@@ -628,7 +644,12 @@ int main(int argc, char** argv) {
                     it->second.status = "completed"; it->second.progress = 100;
                     it->second.finished = sa3::wall_time_s();
                 }
+                fprintf(stderr, "[sa3-server] job %s completed %.2fs seed=%llu\n",
+                        sid.c_str(), (double)r.n_samp / (double)r.sample_rate, (unsigned long long)seed_resolved);
+                fflush(stderr);
             } catch (const std::exception& e) {
+                fprintf(stderr, "[sa3-server] job %s failed: %s\n", sid.c_str(), e.what());
+                fflush(stderr);
                 std::lock_guard<std::mutex> jl(jobs_mtx);
                 if (auto it = jobs.find(sid); it != jobs.end()) {
                     it->second.status = "failed"; it->second.error = e.what(); it->second.finished = sa3::wall_time_s();
