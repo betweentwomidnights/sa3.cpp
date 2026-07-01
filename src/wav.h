@@ -2,6 +2,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -182,6 +183,46 @@ inline std::vector<float> read_wav_planar(const std::string& path, int& n_sample
         }
     }
     return planar;
+}
+
+inline std::vector<float> resample_planar_linear(const std::vector<float>& input,
+                                                 int n_samples,
+                                                 int n_ch,
+                                                 int src_rate,
+                                                 int dst_rate,
+                                                 int& out_samples) {
+    if (n_samples <= 0 || n_ch <= 0) {
+        out_samples = 0;
+        return {};
+    }
+    if (src_rate <= 0 || dst_rate <= 0) {
+        throw std::runtime_error("invalid sample rate for resampling");
+    }
+    if (src_rate == dst_rate) {
+        out_samples = n_samples;
+        return input;
+    }
+
+    out_samples = std::max(1, (int)std::llround((double)n_samples * (double)dst_rate / (double)src_rate));
+    std::vector<float> out((size_t)out_samples * n_ch);
+    const double src_step = (double)src_rate / (double)dst_rate;
+
+    for (int c = 0; c < n_ch; c++) {
+        const float* in_ch = input.data() + (size_t)c * n_samples;
+        float* out_ch = out.data() + (size_t)c * out_samples;
+        for (int s = 0; s < out_samples; s++) {
+            const double pos = (double)s * src_step;
+            int i0 = (int)std::floor(pos);
+            if (i0 >= n_samples - 1) {
+                out_ch[s] = in_ch[n_samples - 1];
+                continue;
+            }
+            const int i1 = i0 + 1;
+            const float frac = (float)(pos - (double)i0);
+            out_ch[s] = in_ch[i0] + (in_ch[i1] - in_ch[i0]) * frac;
+        }
+    }
+    return out;
 }
 
 } // namespace sa3

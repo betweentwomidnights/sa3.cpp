@@ -583,6 +583,14 @@ int main(int argc, char** argv) {
                 res.set_content(json_err(std::string("invalid init_path WAV: ") + e.what()), "application/json");
                 return;
             }
+            if (sr != 44100) {
+                int resampled_ns = 0;
+                params.init_audio = sa3::resample_planar_linear(params.init_audio, ns, nc, sr, 44100, resampled_ns);
+                fprintf(stderr, "[sa3-server] resampled init_path from %d Hz/%d samples to 44100 Hz/%d samples\n",
+                        sr, ns, resampled_ns);
+                ns = resampled_ns;
+                sr = 44100;
+            }
             params.init_n_samp = ns; params.init_n_ch = nc;
         }
 

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sa3 {
@@ -92,6 +93,19 @@ struct GgufModel {
     std::map<std::string, ggml_tensor*> tensors;
     std::map<std::string, ggml_tensor*> overrides;   // LoRA-effective weights (see lora.h)
 
+    GgufModel() = default;
+    ~GgufModel() { free(); }
+    GgufModel(const GgufModel&) = delete;
+    GgufModel& operator=(const GgufModel&) = delete;
+    GgufModel(GgufModel&& other) noexcept { move_from(other); }
+    GgufModel& operator=(GgufModel&& other) noexcept {
+        if (this != &other) {
+            free();
+            move_from(other);
+        }
+        return *this;
+    }
+
     bool has(const std::string& n) const { return tensors.count(n) != 0; }
 
     ggml_tensor* get(const std::string& n) const {
@@ -126,6 +140,25 @@ struct GgufModel {
         if (backend && owns_backend) ggml_backend_free(backend);
         buf = nullptr; gguf = nullptr; ctx = nullptr; backend = nullptr;
         tensors.clear(); overrides.clear(); owns_backend = true;
+    }
+
+private:
+    void move_from(GgufModel& other) noexcept {
+        ctx = other.ctx;
+        gguf = other.gguf;
+        backend = other.backend;
+        owns_backend = other.owns_backend;
+        buf = other.buf;
+        tensors = std::move(other.tensors);
+        overrides = std::move(other.overrides);
+
+        other.ctx = nullptr;
+        other.gguf = nullptr;
+        other.backend = nullptr;
+        other.owns_backend = true;
+        other.buf = nullptr;
+        other.tensors.clear();
+        other.overrides.clear();
     }
 };
 

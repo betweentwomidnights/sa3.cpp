@@ -79,6 +79,9 @@ completed audio once and immediately remove that job from server memory.
   "inpaint_end": 30.0            // also the total output duration (a short clip can extend)
 }
 ```
+`init_path` WAVs are decoded from common PCM/float formats and resampled to SA3's 44.1 kHz internal
+rate before audio2audio/inpaint processing.
+
 LoRA `name` resolves to `<adapters-dir>/lora-<name>-*.gguf`; a full `"path"` also works. Set
 `keep_models: true` to keep the model resident between requests (lower latency, more VRAM); the server
 reloads a clean DiT only when a request's adapter set changes, so strengths can vary per request either way.

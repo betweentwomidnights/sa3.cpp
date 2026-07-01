@@ -212,7 +212,13 @@ int main(int argc, char** argv) {
     if (init_p) {   // audio2audio / inpaint source WAV -> raw planar samples in the request
         int n_samp = 0, n_ch = 0, sr = 0;
         params.init_audio = sa3::read_wav_planar(init_p, n_samp, n_ch, sr);
-        if (sr != 44100) fprintf(stderr, "warning: init WAV is %d Hz, expected 44100\n", sr);
+        if (sr != 44100) {
+            int resampled_n_samp = 0;
+            params.init_audio = sa3::resample_planar_linear(params.init_audio, n_samp, n_ch, sr, 44100, resampled_n_samp);
+            fprintf(stderr, "resampled init WAV from %d Hz/%d samples to 44100 Hz/%d samples\n",
+                    sr, n_samp, resampled_n_samp);
+            n_samp = resampled_n_samp;
+        }
         params.init_n_samp = n_samp; params.init_n_ch = n_ch;
     }
 
