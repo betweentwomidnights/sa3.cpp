@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <random>
 #include <cmath>
 #include <cstdint>
@@ -259,6 +260,16 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
     return err.empty();
 }
 
+// Progress tick passed to GenParams::on_progress. `fraction` is a ready-to-use overall [0,1] (UIs do
+// fraction*100) so a consumer needs no knowledge of the internal stages; step/total/stage give detail.
+// Curve mirrors gary's poll_status: sampling spans 0..0.9, decode 0.9..1.0, then a final "done" at 1.0.
+struct Progress {
+    const char* stage;   // "sampling" | "decoding" | "done"
+    int   step;          // completed units in this stage
+    int   total;         // total units in this stage
+    float fraction;      // overall progress in [0,1]
+};
+
 // One generation request. Defaults reproduce the CLI's text2music defaults.
 struct GenParams {
     std::string prompt;
@@ -314,6 +325,10 @@ struct GenParams {
     // early-free: fits long-form on small VRAM at the cost of a reload next request. The one-shot CLI
     // sets this false by default (it frees before exit anyway).
     bool keep_models = true;
+
+    // Optional progress hook (transport-agnostic: a server can poll it or push SSE). Called on the
+    // generate() thread, one tick per sampling step + decode; see Progress for the ready fraction.
+    std::function<void(const Progress&)> on_progress;
 };
 
 struct GenResult {
@@ -767,8 +782,11 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             host_x[j] = (1.0f - tnext) * denoised + tnext * stepnoise[(size_t)i*N + j];
         }
         dit_download_update += wall_time_s() - ts;
-        printf("  step %d/%d  t=%.4f%s\n", i+1, steps, tcur,
-               (do_cfg && tcur >= cfg_interval_min && tcur <= cfg_interval_max) ? "  (cfg)" : "");
+        if (params.on_progress)   // sampling spans 0..0.9 of the overall bar; callback overrides the printf
+            params.on_progress({"sampling", i+1, steps, 0.9f * (float)(i+1) / (float)steps});
+        else
+            printf("  step %d/%d  t=%.4f%s\n", i+1, steps, tcur,
+                   (do_cfg && tcur >= cfg_interval_min && tcur <= cfg_interval_max) ? "  (cfg)" : "");
     }
     profile_log(prof, "dit_upload", dit_upload);
     profile_log(prof, "dit_compute", dit_compute);
@@ -859,6 +877,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     const int n_ch = sc.out_channels / sc.patch_size;
     const int n_samp = T * sc.patch_size * sc.output_seg;
     std::vector<float> ab((size_t)n_samp*n_ch, 0.0f);
+    if (params.on_progress) params.on_progress({"decoding", 0, 1, 0.9f});   // decode spans 0.9..1.0
     if (!can_chunk_decode) {
         DecodeGraph dg = build_decode_graph(T);
         run_decode_graph(dg, host_x.data(), ab);
@@ -882,6 +901,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             for (int t = 0; t < decode_chunk_size; t++)
                 memcpy(&zchunk[(size_t)t*sc.latent], &host_x[(size_t)(st + t)*sc.latent], sc.latent*sizeof(float));
             run_decode_graph(dg, zchunk.data(), chunk_audio);
+            if (params.on_progress)
+                params.on_progress({"decoding", (int)(i+1), (int)starts.size(),
+                                    0.9f + 0.1f * (float)(i+1) / (float)starts.size()});
             const bool first = i == 0, last = i + 1 == starts.size();
             const int out_start = last ? n_samp - chunk_samples : st * ds;
             const int left = first ? 0 : half_overlap_samples;
@@ -923,6 +945,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             memcpy(&tr[(size_t)c*out_n_samp], &ab[(size_t)c*n_samp], (size_t)out_n_samp*sizeof(float));
         ab = std::move(tr);
     }
+
+    if (params.on_progress) params.on_progress({"done", steps, steps, 1.0f});
 
     GenResult r;
     r.samples = std::move(ab);

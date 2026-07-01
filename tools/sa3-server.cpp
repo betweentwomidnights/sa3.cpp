@@ -1,44 +1,118 @@
-// sa3-server: a small HTTP server over the shared sa3 Pipeline.
-//   POST /generate {prompt, frames|seconds, steps, seed, loras[], keep_models, ...} -> audio/wav bytes
+// sa3-server: a small HTTP server over the shared sa3 Pipeline — a PROOF OF CONCEPT that mirrors
+// gary4local's async job model, so a gary4juce-style client can drive it as a drop-in (SA3 on :8006).
+//   POST /generate {prompt, frames|seconds, steps, seed, negative_prompt, cfg_*, dist_shift,
+//                   duration_padding_sec, loras[], init_path, keep_models}
+//                 -> {session_id, seed}   (generation runs in the background)
+//   GET  /poll_status/<session_id>
+//                 -> {success, generation_in_progress, progress, step, total_steps, status,
+//                     queue_status, audio_data (base64 wav, on "completed"), meta:{seed}}
 //   POST /unload   -> free the model (full VRAM release; orchestrator owns the unload policy)
-//   GET  /health   -> {status, model, loaded, device}
-//
-// Default is FRUGAL (keep_models=false): the model frees after each generation and reloads on the next
-// request. That keeps it VST/DAW-memory-safe and makes per-request LoRA strength changes correct for free.
-// A request may set "keep_models": true to keep it resident between calls (lower latency, more VRAM).
+//   GET  /health   -> {status, model, encoding, loaded}
+// The Pipeline carries the reusable primitives (incl. GenParams::on_progress); a synchronous or SSE
+// transport is left to real apps — this server only demonstrates the poll_status pattern.
 #include "sa3_pipeline.h"
 #include "wav.h"
 
 #include "httplib.h"
 #include "yyjson.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
+#include <thread>
+#include <unordered_map>
 
 namespace {
 
 std::mutex g_mtx;                         // serialize: one generation (one GPU graph) at a time
-std::unique_ptr<sa3::Pipeline> g_pipe;    // loaded lazily on first /generate; freed on /unload
+std::unique_ptr<sa3::Pipeline> g_pipe;    // loaded lazily on first generate; freed on /unload
+std::atomic<bool> g_loaded{false};        // lock-free view for /health (won't block during a gen)
 std::string g_variant   = "medium";
 std::string g_encoding  = "f16";
 std::string g_models_dir;
 std::string g_adapters_dir;
 
+// --- async job registry (mirrors gary4local /poll_status) ---
+struct Job {
+    std::string status = "queued";        // queued | generating | encoding | completed | failed
+    int      progress = 0;                // 0..100
+    int      step = 0, total_steps = 0;
+    std::string audio_b64;                // base64 wav, filled on completion
+    std::string error;
+    uint64_t seed = 0;
+    double   created = 0.0;
+};
+std::mutex jobs_mtx;
+std::unordered_map<std::string, Job> jobs;
+
 std::string json_err(const std::string& msg) { return "{\"error\":\"" + msg + "\"}"; }
 
-// (re)load the pipeline under the caller's lock. Returns false + message on failure.
+// minimal JSON string escaping (quotes/backslashes/control) for error text we splice into bodies
+std::string json_escape(const std::string& s) {
+    std::string o; o.reserve(s.size() + 8);
+    for (char c : s) {
+        if (c == '"' || c == '\\') { o += '\\'; o += c; }
+        else if (c == '\n') o += "\\n";
+        else if (c == '\r') o += "\\r";
+        else if (c == '\t') o += "\\t";
+        else if ((unsigned char)c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); o += b; }
+        else o += c;
+    }
+    return o;
+}
+
+std::string b64_encode(const std::string& in) {
+    static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out; out.reserve(((in.size() + 2) / 3) * 4);
+    size_t i = 0;
+    for (; i + 3 <= in.size(); i += 3) {
+        unsigned n = (unsigned char)in[i] << 16 | (unsigned char)in[i+1] << 8 | (unsigned char)in[i+2];
+        out += T[(n>>18)&63]; out += T[(n>>12)&63]; out += T[(n>>6)&63]; out += T[n&63];
+    }
+    if (i < in.size()) {
+        unsigned n = (unsigned char)in[i] << 16;
+        if (i + 1 < in.size()) n |= (unsigned char)in[i+1] << 8;
+        out += T[(n>>18)&63]; out += T[(n>>12)&63];
+        out += (i + 1 < in.size()) ? T[(n>>6)&63] : '=';
+        out += '=';
+    }
+    return out;
+}
+
+std::string new_session_id() {
+    static const char* H = "0123456789abcdef";
+    std::random_device rd;
+    uint64_t r = ((uint64_t)rd() << 32) ^ (uint64_t)rd();
+    std::string s(12, '0');
+    for (int i = 0; i < 12; i++) { s[i] = H[r & 0xF]; r >>= 4; }
+    return s;
+}
+
+// drop finished jobs older than 10 min so the registry doesn't grow unbounded (call under jobs_mtx).
+void jobs_prune() {
+    const double now = sa3::wall_time_s();
+    for (auto it = jobs.begin(); it != jobs.end(); ) {
+        const bool done = it->second.status == "completed" || it->second.status == "failed";
+        if (done && now - it->second.created > 600.0) it = jobs.erase(it);
+        else ++it;
+    }
+}
+
+// (re)load the pipeline under the caller's g_mtx. Returns false + message on failure.
 bool ensure_loaded(std::string& err) {
-    if (g_pipe && g_pipe->loaded()) return true;
+    if (g_pipe && g_pipe->loaded()) { g_loaded = true; return true; }
     sa3::ModelPaths mp;
     if (!sa3::ModelPaths::resolve(g_models_dir, g_variant, g_encoding, mp, err)) return false;
     try {
         g_pipe = std::make_unique<sa3::Pipeline>();
         g_pipe->load(mp);
-    } catch (const std::exception& e) { g_pipe.reset(); err = e.what(); return false; }
+    } catch (const std::exception& e) { g_pipe.reset(); g_loaded = false; err = e.what(); return false; }
+    g_loaded = true;
     return true;
 }
 
@@ -65,8 +139,7 @@ int main(int argc, char** argv) {
     httplib::Server svr;
 
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        std::lock_guard<std::mutex> lk(g_mtx);
-        const bool loaded = g_pipe && g_pipe->loaded();
+        const bool loaded = g_loaded.load();   // atomic: never blocks behind an in-flight generation
         std::string body = "{\"status\":\"ok\",\"model\":\"" + g_variant + "\",\"encoding\":\"" +
                            g_encoding + "\",\"loaded\":" + (loaded ? "true" : "false") + "}";
         res.set_content(body, "application/json");
@@ -75,12 +148,13 @@ int main(int argc, char** argv) {
     svr.Post("/unload", [](const httplib::Request&, httplib::Response& res) {
         std::lock_guard<std::mutex> lk(g_mtx);
         g_pipe.reset();   // Pipeline dtor frees nets + backend (full VRAM release)
+        g_loaded = false;
         res.set_content("{\"status\":\"unloaded\"}", "application/json");
     });
 
+    // POST /generate: parse + validate on the request thread, then run the generation on a background
+    // thread and return {session_id} immediately. The client polls /poll_status/<session_id>.
     svr.Post("/generate", [&adir](const httplib::Request& req, httplib::Response& res) {
-        std::lock_guard<std::mutex> lk(g_mtx);
-
         yyjson_doc* doc = yyjson_read(req.body.c_str(), req.body.size(), 0);
         if (!doc) { res.status = 400; res.set_content(json_err("invalid json"), "application/json"); return; }
         yyjson_val* root = yyjson_doc_get_root(doc);
@@ -152,18 +226,81 @@ int main(int argc, char** argv) {
             params.init_n_samp = ns; params.init_n_ch = nc;
         }
 
-        std::string err;
-        if (!ensure_loaded(err)) { res.status = 500; res.set_content(json_err(err), "application/json"); return; }
-        try {
-            sa3::GenResult r = g_pipe->generate(params);
-            res.set_header("X-Seed", std::to_string(seed_resolved));   // the seed used (resolved if -1)
-            res.set_content(sa3::wav_planar_bytes(r.samples.data(), r.n_samp, r.n_ch, r.sample_rate), "audio/wav");
-        } catch (const std::exception& e) {
-            res.status = 500; res.set_content(json_err(e.what()), "application/json");
+        // register the job, then hand off to a worker thread and reply immediately
+        const std::string sid = new_session_id();
+        {
+            std::lock_guard<std::mutex> lk(jobs_mtx);
+            jobs_prune();
+            Job j; j.total_steps = params.steps; j.seed = seed_resolved; j.created = sa3::wall_time_s();
+            jobs[sid] = std::move(j);
         }
+        std::thread([sid, seed_resolved, params = std::move(params)]() mutable {
+            params.on_progress = [sid](const sa3::Progress& p) {   // sampling->generating, decoding->encoding
+                std::lock_guard<std::mutex> lk(jobs_mtx);
+                auto it = jobs.find(sid); if (it == jobs.end()) return;
+                it->second.progress = (int)(p.fraction * 100.0f);
+                it->second.step     = p.step;
+                if      (!strcmp(p.stage, "sampling")) it->second.status = "generating";
+                else if (!strcmp(p.stage, "decoding")) it->second.status = "encoding";
+            };
+            std::lock_guard<std::mutex> lk(g_mtx);   // serialize: one generation at a time
+            { std::lock_guard<std::mutex> jl(jobs_mtx); if (auto it = jobs.find(sid); it != jobs.end()) it->second.status = "generating"; }
+            std::string err;
+            if (!ensure_loaded(err)) {
+                std::lock_guard<std::mutex> jl(jobs_mtx);
+                if (auto it = jobs.find(sid); it != jobs.end()) { it->second.status = "failed"; it->second.error = err; }
+                return;
+            }
+            try {
+                sa3::GenResult r = g_pipe->generate(params);
+                std::string b64 = b64_encode(sa3::wav_planar_bytes(r.samples.data(), r.n_samp, r.n_ch, r.sample_rate));
+                std::lock_guard<std::mutex> jl(jobs_mtx);
+                if (auto it = jobs.find(sid); it != jobs.end()) {
+                    it->second.audio_b64 = std::move(b64);
+                    it->second.status = "completed"; it->second.progress = 100;
+                }
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> jl(jobs_mtx);
+                if (auto it = jobs.find(sid); it != jobs.end()) { it->second.status = "failed"; it->second.error = e.what(); }
+            }
+        }).detach();
+
+        res.set_content("{\"session_id\":\"" + sid + "\",\"seed\":" + std::to_string(seed_resolved) + "}", "application/json");
     });
 
-    fprintf(stderr, "[sa3-server] http://%s:%d  model=%s/%s  models=%s  adapters=%s  (frugal default)\n",
+    // GET /poll_status/<session_id>: progress + (on completion) the base64 wav. Matches gary4local.
+    svr.Get(R"(/poll_status/(.+))", [](const httplib::Request& req, httplib::Response& res) {
+        const std::string sid = req.matches[1];
+        std::lock_guard<std::mutex> lk(jobs_mtx);
+        auto it = jobs.find(sid);
+        if (it == jobs.end()) {
+            res.status = 404;
+            res.set_content("{\"success\":false,\"error\":\"unknown session: " + json_escape(sid) + "\"}", "application/json");
+            return;
+        }
+        const Job& j = it->second;
+        const bool in_prog = j.status == "queued" || j.status == "generating" || j.status == "encoding";
+        std::string qs = j.status == "queued"
+            ? "{\"status\":\"queued\",\"position\":1,\"total_queued\":1,\"message\":\"queued locally\",\"estimated_seconds\":5}"
+            : in_prog ? "{\"status\":\"ready\"}" : "{}";
+        std::string body = "{";
+        body += "\"success\":" + std::string(j.status == "failed" ? "false" : "true") + ",";
+        body += "\"generation_in_progress\":" + std::string(in_prog ? "true" : "false") + ",";
+        body += "\"transform_in_progress\":false,";
+        body += "\"progress\":" + std::to_string(j.progress) + ",";
+        body += "\"step\":" + std::to_string(j.step) + ",";
+        body += "\"total_steps\":" + std::to_string(j.total_steps) + ",";
+        body += "\"status\":\"" + j.status + "\",";
+        body += "\"queue_status\":" + qs;
+        if (j.status == "completed")
+            body += ",\"audio_data\":\"" + j.audio_b64 + "\",\"meta\":{\"seed\":" + std::to_string(j.seed) + "}";
+        if (j.status == "failed")
+            body += ",\"error\":\"" + json_escape(j.error) + "\"";
+        body += "}";
+        res.set_content(body, "application/json");
+    });
+
+    fprintf(stderr, "[sa3-server] http://%s:%d  model=%s/%s  models=%s  adapters=%s  (async /poll_status; frugal default)\n",
             host.c_str(), port, g_variant.c_str(), g_encoding.c_str(), g_models_dir.c_str(), adir.c_str());
     if (!svr.listen(host.c_str(), port)) {
         fprintf(stderr, "[sa3-server] failed to bind %s:%d\n", host.c_str(), port);

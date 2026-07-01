@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
     params.cfg_scale = cfg_scale; params.cfg_rescale = cfg_rescale; params.apg_scale = apg_scale;
     params.cfg_norm_threshold = cfg_norm_threshold;
     params.cfg_interval_min = cfg_interval_min; params.cfg_interval_max = cfg_interval_max;
-    params.keep_models       = keep_models;
+    params.keep_models       = keep_models;   // no on_progress -> the pipeline prints the step lines itself
     for (auto& ls : lora_specs) params.loras.push_back(ls);
 
     if (init_p) {   // audio2audio / inpaint source WAV -> raw planar samples in the request

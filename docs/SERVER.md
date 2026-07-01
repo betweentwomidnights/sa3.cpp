@@ -1,8 +1,11 @@
 # sa3-server — HTTP over the pipeline
 
 A small local HTTP server that wraps the same generation pipeline the CLI uses. Built by any of the
-`build` scripts (it's a normal target). Meant to be spawned by a host app (a JUCE/IPlug2 plugin, a
-gary4local-style backend) which then POSTs to it — the host never touches the CLI.
+`build` scripts (it's a normal target). It's a **proof of concept that mirrors gary4local's async job
+model** — `POST /generate` returns a `session_id` immediately and the client polls `/poll_status/<id>`
+for progress and, on completion, the base64 audio. That makes it a drop-in for a gary4juce-style client
+(SA3 on `:8006`). The reusable primitives live in the pipeline (`src/sa3_pipeline.h`, incl.
+`GenParams::on_progress`); a synchronous or SSE transport is left to real apps.
 
 ## Run
 
@@ -18,9 +21,14 @@ It binds to `127.0.0.1` by default (local only). The model loads lazily on the f
 
 | method | path | body / result |
 |---|---|---|
-| `GET`  | `/health`   | `{status, model, encoding, loaded}` |
-| `POST` | `/generate` | JSON request (below) → **`audio/wav`** bytes (or `{error}` + 4xx/5xx) |
+| `GET`  | `/health`   | `{status, model, encoding, loaded}` (lock-free — never blocks behind a gen) |
+| `POST` | `/generate` | JSON request (below) → **`{session_id, seed}`** immediately; generation runs in the background |
+| `GET`  | `/poll_status/<session_id>` | `{success, generation_in_progress, progress, step, total_steps, status, queue_status, ...}`; on `status:"completed"` also `audio_data` (base64 wav) + `meta:{seed}` |
 | `POST` | `/unload`   | frees the model (full VRAM release) → `{status:"unloaded"}` |
+
+`status` runs `queued → generating → encoding → completed` (or `failed`); `progress` is `0..100`
+(sampling `0→90`, decode `→100`). Poll until `status == "completed"`, then base64-decode `audio_data`.
+Finished jobs are pruned after 10 min.
 
 **`/generate` request:**
 ```json
@@ -64,18 +72,22 @@ LoRA `name` resolves to `<adapters-dir>/lora-<name>-*.gguf`; a full `"path"` als
 `keep_models: true` to keep the model resident between requests (lower latency, more VRAM); the server
 reloads a clean DiT only when a request's adapter set changes, so strengths can vary per request either way.
 
-## Calling it (platform-correct)
+## Calling it (async flow)
 
 **PowerShell** — `curl` is an alias for `Invoke-WebRequest`, so use `Invoke-RestMethod`:
 ```powershell
 $body = '{"prompt":"breakcore 140bpm","seconds":12,"loras":[{"name":"kev","strength":1.0}]}'
-Invoke-RestMethod http://localhost:8086/generate -Method Post -ContentType application/json -Body $body -OutFile song.wav
+$sid = (Invoke-RestMethod http://localhost:8086/generate -Method Post -ContentType application/json -Body $body).session_id
+do { Start-Sleep 1; $p = Invoke-RestMethod "http://localhost:8086/poll_status/$sid"; $p.progress } while ($p.status -ne "completed")
+[IO.File]::WriteAllBytes("song.wav", [Convert]::FromBase64String($p.audio_data))
 ```
 
-**Git Bash / cmd / macOS / Linux** — real `curl`:
+**Git Bash / cmd / macOS / Linux** — real `curl` (+ `jq`):
 ```bash
-curl -s -X POST http://localhost:8086/generate -H "Content-Type: application/json" \
-  -d '{"prompt":"breakcore 140bpm","seconds":12}' -o song.wav
+sid=$(curl -s -X POST http://localhost:8086/generate -H "Content-Type: application/json" \
+  -d '{"prompt":"breakcore 140bpm","seconds":12}' | jq -r .session_id)
+until [ "$(curl -s localhost:8086/poll_status/$sid | jq -r .status)" = completed ]; do sleep 1; done
+curl -s localhost:8086/poll_status/$sid | jq -r .audio_data | base64 -d > song.wav
 ```
 (To use `curl.exe` *from PowerShell*, pass the body from a file — `-d "@body.json"` — inline JSON quoting
 is mangled by PowerShell's native-argument handling.)
