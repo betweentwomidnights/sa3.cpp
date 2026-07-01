@@ -17,6 +17,12 @@ for progress and, on completion, the base64 audio. That makes it a drop-in for a
 #       --source-loras-dir DIR (or SA3_SOURCE_LORAS_DIR)
 ```
 
+On Windows, after `.\build.cmd cuda`, this keeps the server in the terminal you can close or Ctrl+C:
+
+```powershell
+.\scripts\run-server.ps1
+```
+
 It binds to `127.0.0.1` by default (local only). The model loads lazily on the first `/generate`.
 
 ## Endpoints
@@ -32,7 +38,8 @@ It binds to `127.0.0.1` by default (local only). The model loads lazily on the f
 
 `status` runs `queued → generating → encoding → completed` (or `failed`); `progress` is `0..100`
 (sampling `0→90`, decode `→100`). Poll until `status == "completed"`, then base64-decode `audio_data`.
-Finished jobs are pruned after 10 min.
+Finished jobs are pruned after 2 min. Clients can poll `/poll_status/<id>?consume=1` to return the
+completed audio once and immediately remove that job from server memory.
 
 **`/generate` request:**
 ```json

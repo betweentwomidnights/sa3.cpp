@@ -56,6 +56,7 @@ struct Job {
     std::string error;
     uint64_t seed = 0;
     double   created = 0.0;
+    double   finished = 0.0;
 };
 std::mutex jobs_mtx;
 std::unordered_map<std::string, Job> jobs;
@@ -380,12 +381,16 @@ std::string new_session_id() {
     return s;
 }
 
-// drop finished jobs older than 10 min so the registry doesn't grow unbounded (call under jobs_mtx).
+// Drop finished jobs so the registry does not keep large base64 WAV payloads indefinitely
+// (call under jobs_mtx). The preferred client path is /poll_status/<id>?consume=1, which
+// removes completed jobs immediately after the successful audio fetch.
 void jobs_prune() {
+    constexpr double kFinishedJobTtlS = 120.0;
     const double now = sa3::wall_time_s();
     for (auto it = jobs.begin(); it != jobs.end(); ) {
         const bool done = it->second.status == "completed" || it->second.status == "failed";
-        if (done && now - it->second.created > 600.0) it = jobs.erase(it);
+        const double since = now - (it->second.finished > 0.0 ? it->second.finished : it->second.created);
+        if (done && since > kFinishedJobTtlS) it = jobs.erase(it);
         else ++it;
     }
 }
@@ -613,10 +618,13 @@ int main(int argc, char** argv) {
                 if (auto it = jobs.find(sid); it != jobs.end()) {
                     it->second.audio_b64 = std::move(b64);
                     it->second.status = "completed"; it->second.progress = 100;
+                    it->second.finished = sa3::wall_time_s();
                 }
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> jl(jobs_mtx);
-                if (auto it = jobs.find(sid); it != jobs.end()) { it->second.status = "failed"; it->second.error = e.what(); }
+                if (auto it = jobs.find(sid); it != jobs.end()) {
+                    it->second.status = "failed"; it->second.error = e.what(); it->second.finished = sa3::wall_time_s();
+                }
             }
         }).detach();
 
@@ -626,31 +634,58 @@ int main(int argc, char** argv) {
     // GET /poll_status/<session_id>: progress + (on completion) the base64 wav. Matches gary4local.
     svr.Get(R"(/poll_status/(.+))", [](const httplib::Request& req, httplib::Response& res) {
         const std::string sid = req.matches[1];
-        std::lock_guard<std::mutex> lk(jobs_mtx);
-        auto it = jobs.find(sid);
-        if (it == jobs.end()) {
-            res.status = 404;
-            res.set_content("{\"success\":false,\"error\":\"unknown session: " + json_escape(sid) + "\"}", "application/json");
-            return;
+        const bool consume = req.has_param("consume") && req.get_param_value("consume") != "0";
+
+        std::string status;
+        int progress = 0, step = 0, total_steps = 0;
+        uint64_t seed = 0;
+        std::string audio_b64;
+        std::string error;
+        {
+            std::lock_guard<std::mutex> lk(jobs_mtx);
+            jobs_prune();
+            auto it = jobs.find(sid);
+            if (it == jobs.end()) {
+                res.status = 404;
+                res.set_content("{\"success\":false,\"error\":\"unknown session: " + json_escape(sid) + "\"}", "application/json");
+                return;
+            }
+
+            Job& j = it->second;
+            status = j.status;
+            progress = j.progress;
+            step = j.step;
+            total_steps = j.total_steps;
+            seed = j.seed;
+            error = j.error;
+
+            if (j.status == "completed") {
+                if (consume) {
+                    audio_b64.swap(j.audio_b64);
+                    jobs.erase(it);
+                } else {
+                    audio_b64 = j.audio_b64;
+                }
+            }
         }
-        const Job& j = it->second;
-        const bool in_prog = j.status == "queued" || j.status == "generating" || j.status == "encoding";
-        std::string qs = j.status == "queued"
+
+        const bool in_prog = status == "queued" || status == "generating" || status == "encoding";
+        std::string qs = status == "queued"
             ? "{\"status\":\"queued\",\"position\":1,\"total_queued\":1,\"message\":\"queued locally\",\"estimated_seconds\":5}"
             : in_prog ? "{\"status\":\"ready\"}" : "{}";
         std::string body = "{";
-        body += "\"success\":" + std::string(j.status == "failed" ? "false" : "true") + ",";
+        body += "\"success\":" + std::string(status == "failed" ? "false" : "true") + ",";
         body += "\"generation_in_progress\":" + std::string(in_prog ? "true" : "false") + ",";
         body += "\"transform_in_progress\":false,";
-        body += "\"progress\":" + std::to_string(j.progress) + ",";
-        body += "\"step\":" + std::to_string(j.step) + ",";
-        body += "\"total_steps\":" + std::to_string(j.total_steps) + ",";
-        body += "\"status\":\"" + j.status + "\",";
+        body += "\"progress\":" + std::to_string(progress) + ",";
+        body += "\"step\":" + std::to_string(step) + ",";
+        body += "\"total_steps\":" + std::to_string(total_steps) + ",";
+        body += "\"status\":\"" + status + "\",";
         body += "\"queue_status\":" + qs;
-        if (j.status == "completed")
-            body += ",\"audio_data\":\"" + j.audio_b64 + "\",\"meta\":{\"seed\":" + std::to_string(j.seed) + "}";
-        if (j.status == "failed")
-            body += ",\"error\":\"" + json_escape(j.error) + "\"";
+        if (status == "completed")
+            body += ",\"audio_data\":\"" + audio_b64 + "\",\"meta\":{\"seed\":" + std::to_string(seed) + "}";
+        if (status == "failed")
+            body += ",\"error\":\"" + json_escape(error) + "\"";
         body += "}";
         res.set_content(body, "application/json");
     });
