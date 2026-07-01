@@ -1,6 +1,6 @@
 # stable-audio-3 in c++
 
-trying to make this as composable and extensible as i can without over-engineering it to much. my hope is that this might eventually replace the sa3 backend i already use in https://github.com/betweentwomidnights/gary-localhost-installer. 
+trying to make this as composable and extensible as i can without over-engineering it too much. my hope is that this might eventually replace the sa3 backend i already use in https://github.com/betweentwomidnights/gary-localhost-installer. 
 
 it might allow me to start unifying gary4local for mac and pc. 
 
