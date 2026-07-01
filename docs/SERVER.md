@@ -76,11 +76,18 @@ completed audio once and immediately remove that job from server memory.
   "init_path": "in.wav",         // audio2audio source; output length follows it
   "init_noise_level": 0.5,       // a2a strength (sigma_max); 1.0 == text2music
   "inpaint_start": 4.0,          // continuation/inpaint: regenerate [start,end] seconds, keep the rest
-  "inpaint_end": 30.0            // also the total output duration (a short clip can extend)
+  "inpaint_end": 30.0,           // also the total output duration (a short clip can extend)
+
+  // optional SAME-L autoencoder tiling for long DAW selections; 0 = monolithic
+  "encode_chunk_size": 128,
+  "encode_overlap": 32,
+  "decode_chunk_size": 128,
+  "decode_overlap": 32
 }
 ```
 `init_path` WAVs are decoded from common PCM/float formats and resampled to SA3's 44.1 kHz internal
-rate before audio2audio/inpaint processing.
+rate before audio2audio/inpaint processing. Chunked encode/decode is only used by SAME-L; SAME-S stays
+monolithic because its internal block structure is already chunked.
 
 LoRA `name` resolves to `<adapters-dir>/lora-<name>-*.gguf`; a full `"path"` also works. Set
 `keep_models: true` to keep the model resident between requests (lower latency, more VRAM); the server

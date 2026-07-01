@@ -531,6 +531,10 @@ int main(int argc, char** argv) {
         params.inpaint_start    = (float)D("inpaint_start", -1.0);   // inpaint/continuation region (sec)
         params.inpaint_end      = (float)D("inpaint_end", -1.0);
         params.duration_padding_sec = (float)D("duration_padding_sec", 6.0);   // text2music schedule headroom (0 = let it end)
+        params.encode_chunk_size = I("encode_chunk_size", 0);
+        params.encode_overlap    = I("encode_overlap", 32);
+        params.decode_chunk_size = I("decode_chunk_size", 0);
+        params.decode_overlap    = I("decode_overlap", 32);
         // classifier-free guidance (all inert unless cfg_scale != 1.0)
         params.negative_prompt   = S("negative_prompt", "");
         params.cfg_scale         = (float)D("cfg_scale", 1.0);
@@ -604,10 +608,11 @@ int main(int argc, char** argv) {
             jobs[sid] = std::move(j);
         }
         fprintf(stderr,
-                "[sa3-server] queued %s frames=%d (~%.2fs) steps=%d keep_models=%s init_samples=%d init_ch=%d inpaint=%.2f..%.2f loras=%zu\n",
+                "[sa3-server] queued %s frames=%d (~%.2fs) steps=%d keep_models=%s init_samples=%d init_ch=%d inpaint=%.2f..%.2f loras=%zu ae_chunks=enc%d/%d dec%d/%d\n",
                 sid.c_str(), params.frames, (double)params.frames * 4096.0 / 44100.0, params.steps,
                 params.keep_models ? "true" : "false", params.init_n_samp, params.init_n_ch,
-                params.inpaint_start, params.inpaint_end, params.loras.size());
+                params.inpaint_start, params.inpaint_end, params.loras.size(),
+                params.encode_chunk_size, params.encode_overlap, params.decode_chunk_size, params.decode_overlap);
         fflush(stderr);
         std::thread([sid, seed_resolved, params = std::move(params)]() mutable {
             params.on_progress = [sid](const sa3::Progress& p) {   // sampling->generating, decoding->encoding
@@ -619,7 +624,7 @@ int main(int argc, char** argv) {
                 it->second.progress = (int)(p.fraction * 100.0f);
                 it->second.step     = p.step;
                 if      (!strcmp(p.stage, "sampling")) it->second.status = "generating";
-                else if (!strcmp(p.stage, "decoding")) it->second.status = "encoding";
+                else if (!strcmp(p.stage, "encoding") || !strcmp(p.stage, "decoding")) it->second.status = "encoding";
             };
             std::lock_guard<std::mutex> lk(g_mtx);   // serialize: one generation at a time
             { std::lock_guard<std::mutex> jl(jobs_mtx); if (auto it = jobs.find(sid); it != jobs.end()) it->second.status = "generating"; }

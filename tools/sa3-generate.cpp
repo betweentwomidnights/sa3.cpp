@@ -74,6 +74,7 @@ int main(int argc, char** argv) {
     float inpaint_start = -1.0f, inpaint_end = -1.0f;   // inpaint: regenerate this [start,end] sec region
     std::vector<std::pair<std::string,float>> lora_specs;   // (gguf, strength) applied in flag order
     bool keep_models = false;        // --keep-models: don't free TE/DIT early (keep all resident)
+    int encode_chunk_size = 0, encode_overlap = 32;     // outer SAME-L encode tiling; 0 = monolithic
     int decode_chunk_size = 0, decode_overlap = 32;     // outer SAME-L decode tiling; 0 = monolithic
     int frames = 128, steps = 8; long long seed = 0;   // seed < 0 (e.g. -1) => random (resolved below)
     std::string dist_shift = "LogSNR";                  // schedule warp: LogSNR|Flux|Full|None
@@ -128,6 +129,9 @@ int main(int argc, char** argv) {
             }
         }
         else if (!strcmp(argv[i], "--chunked-decode")) decode_chunk_size = 128;
+        else if (!strcmp(argv[i], "--chunked-encode")) encode_chunk_size = 128;
+        else if (!strcmp(argv[i], "--encode-chunk-size") && i+1 < argc) encode_chunk_size = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--encode-overlap") && i+1 < argc) encode_overlap = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--decode-chunk-size") && i+1 < argc) decode_chunk_size = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--decode-overlap") && i+1 < argc) decode_overlap = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--keep-models")) keep_models = true;   // disable progressive VRAM frees
@@ -177,9 +181,11 @@ int main(int argc, char** argv) {
                         "                     [--cfg-scale S [--negative-prompt \"...\"] [--cfg-rescale R] [--cfg-interval min,max] [--apg-scale A] [--cfg-norm-threshold T]] [--out song.wav]\n");
         return 1;
     }
-    if (decode_chunk_size < 0 || decode_overlap < 0 ||
+    if (encode_chunk_size < 0 || encode_overlap < 0 ||
+        (encode_chunk_size > 0 && encode_overlap >= encode_chunk_size) ||
+        decode_chunk_size < 0 || decode_overlap < 0 ||
         (decode_chunk_size > 0 && decode_overlap >= decode_chunk_size)) {
-        fprintf(stderr, "invalid --decode-chunk-size/--decode-overlap (overlap must be >= 0 and < chunk size)\n");
+        fprintf(stderr, "invalid encode/decode chunk size or overlap (overlap must be >= 0 and < chunk size)\n");
         return 1;
     }
 
@@ -197,6 +203,8 @@ int main(int argc, char** argv) {
     params.init_noise_level  = init_noise_level;
     params.inpaint_start     = inpaint_start;
     params.inpaint_end       = inpaint_end;
+    params.encode_chunk_size = encode_chunk_size;
+    params.encode_overlap    = encode_overlap;
     params.decode_chunk_size = decode_chunk_size;
     params.decode_overlap    = decode_overlap;
     params.dist_shift        = dist_shift;
