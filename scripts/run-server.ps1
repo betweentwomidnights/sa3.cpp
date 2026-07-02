@@ -1,5 +1,5 @@
 param(
-    [int]$Port = 8086,
+    [int]$Port = 8006,
     [string]$Model = "medium",
     [string]$Encoding = "f16",
     [string]$BuildDir = "build-cuda"

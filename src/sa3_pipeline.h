@@ -31,6 +31,7 @@
 #include "same_ae.h"
 #include "lora.h"
 #include "rng.h"
+#include "audio_post.h"
 
 #include <algorithm>
 #include <chrono>
@@ -305,6 +306,7 @@ struct GenParams {
     // Matches the official SA3 default (6.0). 0 lets the model "end" the piece (silence/fade tail);
     // >0 leaves room so the kept region has no ending — the basis for continuation / loop generation.
     float duration_padding_sec = 6.0f;
+    int target_n_samp = 0;          // optional exact final sample count; 0 = frames*4096
 
     // Classifier-free guidance (matches dit.py:479-619). cfg_scale==1.0 => a single conditioned pass
     // (no CFG, byte-identical to before). Otherwise each step also runs an UNconditioned pass (negative
@@ -323,6 +325,10 @@ struct GenParams {
     int decode_chunk_size = 0;
     int decode_overlap    = 32;
 
+    // Output safety / optional latent experiments. Defaults mirror gary4local: leave latents alone,
+    // normalize decoded audio to +2 dB peak, then catch hot LoRAs with a gentle -0.3 dB limiter.
+    LoudnessParams loudness;
+
     // Residency for THIS request (see the header banner). Default true = resident (keep models loaded
     // for the next request — the right default when a server/lib is reused). Set false for frugal
     // early-free: fits long-form on small VRAM at the cost of a reload next request. The one-shot CLI
@@ -339,6 +345,7 @@ struct GenResult {
     int n_samp = 0;
     int n_ch = 2;
     int sample_rate = 44100;
+    LoudnessMeta loudness;
 };
 
 // Holds the loaded models for the life of the process. Move-only (owns the backend + buffers).
@@ -886,6 +893,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     ggml_gallocr_free(alloc_dit); ggml_free(dctx);
     if (!keep_models) { DIT.free(); dit_loras_.clear(); }   // DiT gone -> next gen reloads a clean base
 
+    LoudnessMeta loudness_meta = make_loudness_meta(params.loudness);
+    apply_latent_loudness(host_x, params.loudness, loudness_meta);
+
     // ---------- decode -> samples ----------
     const double t_dec_total = wall_time_s();
     double dec_build = 0.0, dec_alloc = 0.0, dec_upload = 0.0, dec_compute = 0.0, dec_download = 0.0;
@@ -1017,21 +1027,25 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (!keep_models) { AE.free(); nets_resident_ = false; }   // frugal: free everything -> reload next call
 
     // truncate the padded canvas back to the requested length (planar -> compact each channel)
-    const int out_n_samp = eff_frames * sc.patch_size * sc.output_seg;
-    if (out_n_samp < n_samp) {
-        std::vector<float> tr((size_t)out_n_samp * n_ch);
+    int out_n_samp = eff_frames * sc.patch_size * sc.output_seg;
+    if (params.target_n_samp > 0) out_n_samp = params.target_n_samp;
+    if (out_n_samp != n_samp) {
+        std::vector<float> tr((size_t)out_n_samp * n_ch, 0.0f);
+        const int copy_n = std::min(out_n_samp, n_samp);
         for (int c = 0; c < n_ch; c++)
-            memcpy(&tr[(size_t)c*out_n_samp], &ab[(size_t)c*n_samp], (size_t)out_n_samp*sizeof(float));
+            memcpy(&tr[(size_t)c*out_n_samp], &ab[(size_t)c*n_samp], (size_t)copy_n*sizeof(float));
         ab = std::move(tr);
     }
+    apply_audio_loudness(ab, params.loudness, loudness_meta);
 
     if (params.on_progress) params.on_progress({"done", steps, steps, 1.0f});
 
     GenResult r;
     r.samples = std::move(ab);
-    r.n_samp = out_n_samp < n_samp ? out_n_samp : n_samp;
+    r.n_samp = out_n_samp;
     r.n_ch = n_ch;
     r.sample_rate = 44100;
+    r.loudness = loudness_meta;
     return r;
 }
 

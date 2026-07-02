@@ -8,6 +8,7 @@
 #include "same_ae.h"
 #include "lora.h"
 #include "sa3_pipeline.h"
+#include "env.h"
 #include "rng.h"
 #include "wav.h"
 
@@ -18,45 +19,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <vector>
 
 // (expo_features / wall_time_s / profile_* / tensor_to_host / set_swa_bias moved to sa3_pipeline.h)
 
-// Load KEY=VALUE lines from ./.env (or $SA3_ENV_FILE) into the environment without overriding
-// vars already set — a real env var always wins. Lets a project dir / downstream app configure
-// SA3_* (models + adapters dirs, device, flash) once instead of per-invocation. Lines may start
-// with `export `, use # comments, and quote values.
-static void load_dotenv() {
-    const char* ef = getenv("SA3_ENV_FILE");
-    std::ifstream f(ef && *ef ? ef : ".env");
-    if (!f) return;
-    auto trim = [](std::string s) {
-        size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
-        return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
-    };
-    std::string line;
-    while (std::getline(f, line)) {
-        std::string l = trim(line);
-        if (l.empty() || l[0] == '#') continue;
-        if (l.rfind("export ", 0) == 0) l = trim(l.substr(7));
-        size_t eq = l.find('=');
-        if (eq == std::string::npos) continue;
-        std::string k = trim(l.substr(0, eq)), v = trim(l.substr(eq + 1));
-        if (v.size() >= 2 && (v.front() == '"' || v.front() == '\'') && v.back() == v.front())
-            v = v.substr(1, v.size() - 2);
-        if (k.empty() || getenv(k.c_str())) continue;   // already set in the real environment -> it wins
-#ifdef _WIN32
-        _putenv_s(k.c_str(), v.c_str());
-#else
-        setenv(k.c_str(), v.c_str(), 1);
-#endif
-    }
-}
-
 int main(int argc, char** argv) {
-    load_dotenv();   // ./.env -> SA3_* defaults (real env wins); must precede every getenv below
+    sa3::load_dotenv();   // ./.env -> SA3_* defaults (real env wins); must precede every getenv below
     const bool prof = sa3::profile_enabled();
     const double t_total0 = sa3::wall_time_s();
     const char* tok_p = nullptr; const char* t5_p = nullptr; const char* dit_p = nullptr; const char* same_p = nullptr;
@@ -83,6 +52,7 @@ int main(int argc, char** argv) {
     std::string negative_prompt;                        // CFG negative prompt (only used when cfg_scale != 1)
     float cfg_scale = 1.0f, cfg_rescale = 0.0f, apg_scale = 1.0f, cfg_norm_threshold = 0.0f;
     float cfg_interval_min = 0.0f, cfg_interval_max = 1.0f;
+    sa3::LoudnessParams loudness = sa3::loudness_defaults_from_env();
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--model")  && i+1 < argc) model_variant = argv[++i];
         else if (!strcmp(argv[i], "--encoding") && i+1 < argc) encoding = argv[++i];
@@ -135,6 +105,26 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--decode-chunk-size") && i+1 < argc) decode_chunk_size = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--decode-overlap") && i+1 < argc) decode_overlap = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--keep-models")) keep_models = true;   // disable progressive VRAM frees
+        else if (!strcmp(argv[i], "--latent-rescale") && i+1 < argc) loudness.latent_rescale = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--latent-shift") && i+1 < argc) loudness.latent_shift = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--latent-target-std") && i+1 < argc) {
+            loudness.latent_target_std_enabled = true;
+            loudness.latent_target_std = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--no-latent-target-std")) loudness.latent_target_std_enabled = false;
+        else if (!strcmp(argv[i], "--latent-adapt-min") && i+1 < argc) loudness.latent_adapt_min = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--latent-adapt-max") && i+1 < argc) loudness.latent_adapt_max = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--peak-normalize-db") && i+1 < argc) {
+            loudness.peak_normalize_enabled = true;
+            loudness.peak_normalize_db = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--no-peak-normalize")) loudness.peak_normalize_enabled = false;
+        else if (!strcmp(argv[i], "--limiter-ceiling-db") && i+1 < argc) {
+            loudness.limiter_enabled = true;
+            loudness.limiter_ceiling_db = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--no-limiter")) loudness.limiter_enabled = false;
+        else if (!strcmp(argv[i], "--limiter-knee") && i+1 < argc) loudness.limiter_knee = (float)atof(argv[++i]);
     }
     // --model <variant>: fill the five base ggufs from <models-dir> by the naming convention.
     // Explicit --tok/--t5/--cond/--dit/--same still win (override per-slot).
@@ -188,6 +178,12 @@ int main(int argc, char** argv) {
         fprintf(stderr, "invalid encode/decode chunk size or overlap (overlap must be >= 0 and < chunk size)\n");
         return 1;
     }
+    sa3::normalize_loudness_params(loudness);
+    std::string loudness_err;
+    if (!sa3::validate_loudness_params(loudness, loudness_err)) {
+        fprintf(stderr, "invalid loudness settings: %s\n", loudness_err.c_str());
+        return 1;
+    }
 
     // ---------- build model paths + the request, then run the shared pipeline ----------
     sa3::ModelPaths paths;
@@ -207,6 +203,7 @@ int main(int argc, char** argv) {
     params.encode_overlap    = encode_overlap;
     params.decode_chunk_size = decode_chunk_size;
     params.decode_overlap    = decode_overlap;
+    params.loudness          = loudness;
     params.dist_shift        = dist_shift;
     params.ds_p1 = ds_p1; params.ds_p2 = ds_p2; params.ds_p3 = ds_p3; params.ds_p4 = ds_p4;
     params.duration_padding_sec = duration_padding_sec;

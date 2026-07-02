@@ -1,8 +1,10 @@
 // sa3-server: a small HTTP server over the shared sa3 Pipeline — a PROOF OF CONCEPT that mirrors
 // gary4local's async job model, so a gary4juce-style client can drive it as a drop-in (SA3 on :8006).
-//   POST /generate {prompt, frames|seconds, steps, seed, negative_prompt, cfg_*, dist_shift,
+//   POST /generate {prompt, duration, steps, seed, negative_prompt, cfg_*, dist_shift,
 //                   duration_padding_sec, loras[], init_path, keep_models}
-//                 -> {session_id, seed}   (generation runs in the background)
+//                 -> {success, session_id, seed}   (generation runs in the background)
+//   POST /generate/loop {prompt, duration, bpm?, bars?, ...}
+//                 -> {success, session_id, seed, bpm, bars, loop_duration, gen_duration}
 //   GET  /poll_status/<session_id>
 //                 -> {success, generation_in_progress, progress, step, total_steps, status,
 //                     queue_status, audio_data (base64 wav, on "completed"), meta:{seed}}
@@ -11,6 +13,7 @@
 // The Pipeline carries the reusable primitives (incl. GenParams::on_progress); a synchronous or SSE
 // transport is left to real apps — this server only demonstrates the poll_status pattern.
 #include "sa3_pipeline.h"
+#include "env.h"
 #include "wav.h"
 
 #include "httplib.h"
@@ -19,7 +22,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -53,6 +58,7 @@ struct Job {
     int      progress = 0;                // 0..100
     int      step = 0, total_steps = 0;
     std::string audio_b64;                // base64 wav, filled on completion
+    std::string loudness_json;
     std::string error;
     uint64_t seed = 0;
     double   created = 0.0;
@@ -76,6 +82,52 @@ std::string json_escape(const std::string& s) {
         else o += c;
     }
     return o;
+}
+
+std::string json_num(double v) {
+    if (!std::isfinite(v)) return "null";
+    char b[64];
+    snprintf(b, sizeof b, "%.9g", v);
+    return b;
+}
+
+std::string json_opt_num(bool enabled, double v) {
+    return enabled ? json_num(v) : "null";
+}
+
+std::string loudness_params_json(const sa3::LoudnessParams& p) {
+    std::string body = "{";
+    body += "\"latent_rescale\":" + json_num(p.latent_rescale);
+    body += ",\"latent_shift\":" + json_num(p.latent_shift);
+    body += ",\"latent_target_std\":" + json_opt_num(p.latent_target_std_enabled, p.latent_target_std);
+    body += ",\"latent_adapt_min\":" + json_num(p.latent_adapt_min);
+    body += ",\"latent_adapt_max\":" + json_num(p.latent_adapt_max);
+    body += ",\"peak_normalize_db\":" + json_opt_num(p.peak_normalize_enabled, p.peak_normalize_db);
+    body += ",\"limiter_ceiling_db\":" + json_opt_num(p.limiter_enabled, p.limiter_ceiling_db);
+    body += ",\"limiter_knee\":" + json_num(p.limiter_knee);
+    body += "}";
+    return body;
+}
+
+std::string loudness_meta_json(const sa3::LoudnessMeta& meta) {
+    const sa3::LoudnessParams& p = meta.params;
+    std::string body = "{";
+    body += "\"latent_rescale\":" + json_num(p.latent_rescale);
+    body += ",\"latent_shift\":" + json_num(p.latent_shift);
+    body += ",\"latent_target_std\":" + json_opt_num(p.latent_target_std_enabled, p.latent_target_std);
+    body += ",\"latent_adapt_min\":" + json_num(p.latent_adapt_min);
+    body += ",\"latent_adapt_max\":" + json_num(p.latent_adapt_max);
+    body += ",\"latent_factor\":" + json_num(meta.latent_factor);
+    body += ",\"latent_std\":" + json_opt_num(meta.latent_std_set, meta.latent_std);
+    body += ",\"peak_normalize_db\":" + json_opt_num(p.peak_normalize_enabled, p.peak_normalize_db);
+    body += ",\"peak_normalize_gain\":" + json_opt_num(meta.peak_normalize_gain_set, meta.peak_normalize_gain);
+    body += ",\"limiter_ceiling_db\":" + json_opt_num(p.limiter_enabled, p.limiter_ceiling_db);
+    body += ",\"limiter_knee\":" + json_num(p.limiter_knee);
+    body += ",\"limiter_limited_fraction\":" + json_opt_num(meta.limiter_limited_fraction_set, meta.limiter_limited_fraction);
+    body += ",\"decoded_peak\":" + json_num(meta.decoded_peak);
+    body += ",\"final_peak\":" + json_num(meta.final_peak);
+    body += "}";
+    return body;
 }
 
 bool starts_with(const std::string& s, const std::string& prefix) {
@@ -408,11 +460,276 @@ bool ensure_loaded(std::string& err) {
     return true;
 }
 
+int env_int(const char* name, int fallback) {
+    const char* e = getenv(name);
+    return e && *e ? atoi(e) : fallback;
+}
+
+double env_double(const char* name, double fallback) {
+    const char* e = getenv(name);
+    return e && *e ? atof(e) : fallback;
+}
+
+bool valid_loop_bars(int bars) {
+    return bars == 4 || bars == 8 || bars == 16 || bars == 32;
+}
+
+float extract_bpm_from_prompt(const std::string& prompt) {
+    const std::string lower = lower_ascii(prompt);
+    size_t pos = lower.find("bpm");
+    while (pos != std::string::npos) {
+        size_t end = pos;
+        while (end > 0 && std::isspace((unsigned char)lower[end - 1])) end--;
+        size_t start = end;
+        while (start > 0) {
+            const char c = lower[start - 1];
+            if ((c >= '0' && c <= '9') || c == '.') start--;
+            else break;
+        }
+        if (start < end) {
+            float bpm = 0.0f;
+            if (sa3::parse_float_text(prompt.substr(start, end - start).c_str(), bpm)) return bpm;
+        }
+        pos = lower.find("bpm", pos + 3);
+    }
+    return 0.0f;
+}
+
+bool parse_generate_request(yyjson_val* root, const std::string& adir,
+                            sa3::GenParams& params, uint64_t& seed_resolved,
+                            std::string& perr) {
+    auto S = [&](const char* k, const char* d) { yyjson_val* v = yyjson_obj_get(root, k); return std::string(v && yyjson_is_str(v) ? yyjson_get_str(v) : d); };
+    auto I = [&](const char* k, int d) {
+        yyjson_val* v = yyjson_obj_get(root, k);
+        if (v && yyjson_is_int(v)) return (int)yyjson_get_int(v);
+        if (v && yyjson_is_num(v)) return (int)yyjson_get_num(v);
+        return d;
+    };
+    auto D = [&](const char* k, double d) { yyjson_val* v = yyjson_obj_get(root, k); return v && yyjson_is_num(v) ? yyjson_get_num(v) : d; };
+    auto B = [&](const char* k, bool d) { yyjson_val* v = yyjson_obj_get(root, k); return v && yyjson_is_bool(v) ? yyjson_get_bool(v) : d; };
+
+    params.prompt           = S("prompt", "");
+    if (yyjson_obj_get(root, "seconds")) {
+        perr = "use duration, not seconds";
+        return false;
+    }
+    if (yyjson_obj_get(root, "frames")) {
+        perr = "HTTP API uses duration seconds; frames is CLI/internal";
+        return false;
+    }
+    const double max_duration = env_double("SA3_MAX_DURATION", 300.0);
+    const double duration = D("duration", env_double("SA3_DEFAULT_DURATION", 30.0));
+    if (!std::isfinite(duration) || duration <= 0.0 || duration > max_duration) {
+        perr = "duration must be in (0, " + json_num(max_duration) + "] seconds";
+        return false;
+    }
+    params.frames = std::max(1, (int)(duration * 44100.0 / 4096.0 + 0.5));
+    params.steps            = I("steps", 8);
+    seed_resolved           = sa3::pick_seed(I("seed", 0));   // seed -1 => random
+    params.seed             = seed_resolved;
+    params.keep_models      = B("keep_models", false);        // FRUGAL default
+    params.init_noise_level = (float)D("init_noise_level", 0.85);
+    params.inpaint_start    = (float)D("inpaint_start", -1.0);
+    params.inpaint_end      = (float)D("inpaint_end", -1.0);
+    params.duration_padding_sec = (float)D("duration_padding_sec", 6.0);
+    params.target_n_samp    = I("target_samples", 0);
+    params.encode_chunk_size = I("encode_chunk_size", 0);
+    params.encode_overlap    = I("encode_overlap", 32);
+    params.decode_chunk_size = I("decode_chunk_size", 0);
+    params.decode_overlap    = I("decode_overlap", 32);
+    params.loudness          = sa3::loudness_defaults_from_env();
+
+    auto parse_json_float = [&](yyjson_val* v, float& out, const char* key) {
+        if (!v) return true;
+        if (yyjson_is_num(v)) {
+            out = (float)yyjson_get_num(v);
+            if (std::isfinite(out)) return true;
+        }
+        if (yyjson_is_str(v)) {
+            if (sa3::parse_float_text(yyjson_get_str(v), out)) return true;
+        }
+        if (perr.empty()) perr = std::string(key) + " must be a finite number";
+        return false;
+    };
+    auto request_float = [&](const char* key, float& dst) {
+        if (!perr.empty()) return;
+        yyjson_val* v = yyjson_obj_get(root, key);
+        if (!v) return;
+        parse_json_float(v, dst, key);
+    };
+    auto request_optional_float = [&](const char* key, bool& enabled, float& dst, bool positive_disables = false) {
+        if (!perr.empty()) return;
+        yyjson_val* v = yyjson_obj_get(root, key);
+        if (!v) return;
+        if (yyjson_is_null(v) || (yyjson_is_bool(v) && !yyjson_get_bool(v))) {
+            enabled = false;
+            return;
+        }
+        if (yyjson_is_str(v) && sa3::text_disables_optional_float(yyjson_get_str(v))) {
+            enabled = false;
+            return;
+        }
+        float parsed = dst;
+        if (!parse_json_float(v, parsed, key)) return;
+        if (positive_disables && parsed > 0.0f) {
+            enabled = false;
+            return;
+        }
+        enabled = true;
+        dst = parsed;
+    };
+    request_float("latent_rescale", params.loudness.latent_rescale);
+    request_float("latent_shift", params.loudness.latent_shift);
+    request_optional_float("latent_target_std", params.loudness.latent_target_std_enabled, params.loudness.latent_target_std);
+    request_float("latent_adapt_min", params.loudness.latent_adapt_min);
+    request_float("latent_adapt_max", params.loudness.latent_adapt_max);
+    request_optional_float("peak_normalize_db", params.loudness.peak_normalize_enabled, params.loudness.peak_normalize_db);
+    request_optional_float("limiter_ceiling_db", params.loudness.limiter_enabled, params.loudness.limiter_ceiling_db, true);
+    request_float("limiter_knee", params.loudness.limiter_knee);
+    sa3::normalize_loudness_params(params.loudness);
+
+    params.negative_prompt   = S("negative_prompt", "");
+    params.cfg_scale         = (float)D("cfg_scale", 1.0);
+    params.cfg_rescale       = (float)D("cfg_rescale", 0.0);
+    params.apg_scale         = (float)D("apg_scale", 1.0);
+    params.cfg_norm_threshold= (float)D("cfg_norm_threshold", 0.0);
+    params.cfg_interval_min  = (float)D("cfg_interval_min", 0.0);
+    params.cfg_interval_max  = (float)D("cfg_interval_max", 1.0);
+
+    params.dist_shift       = S("dist_shift", "LogSNR");
+    sa3::dist_shift_defaults(params.dist_shift, params.ds_p1, params.ds_p2, params.ds_p3, params.ds_p4);
+    if (yyjson_val* dsp = yyjson_obj_get(root, "dist_shift_params"); dsp && yyjson_is_arr(dsp)) {
+        float* slots[4] = { &params.ds_p1, &params.ds_p2, &params.ds_p3, &params.ds_p4 };
+        yyjson_val* v; yyjson_arr_iter di; yyjson_arr_iter_init(dsp, &di);
+        for (int k = 0; k < 4 && (v = yyjson_arr_iter_next(&di)); k++)
+            if (yyjson_is_num(v)) *slots[k] = (float)yyjson_get_num(v);
+    }
+
+    yyjson_val* loras = yyjson_obj_get(root, "loras");
+    if (loras && yyjson_is_arr(loras)) {
+        yyjson_val* it; yyjson_arr_iter ai; yyjson_arr_iter_init(loras, &ai);
+        while ((it = yyjson_arr_iter_next(&ai))) {
+            yyjson_val* nv = yyjson_obj_get(it, "name");
+            if (!nv) nv = yyjson_obj_get(it, "path");
+            std::string name = nv && yyjson_is_str(nv) ? yyjson_get_str(nv) : "";
+            yyjson_val* sv = yyjson_obj_get(it, "strength");
+            float strength = sv && yyjson_is_num(sv) ? (float)yyjson_get_num(sv) : 1.0f;
+            if (name.empty()) continue;
+            std::string p = resolve_lora_path(adir, name);
+            if (p.empty()) { perr = "unknown lora '" + name + "'"; break; }
+            params.loras.push_back({p, strength});
+        }
+    }
+
+    if (!perr.empty()) return false;
+    if (!sa3::validate_loudness_params(params.loudness, perr)) return false;
+
+    std::string init_path = S("init_path", "");
+    if (!init_path.empty()) {
+        if (!std::filesystem::exists(init_path)) {
+            perr = "init_path not found: " + init_path;
+            return false;
+        }
+        int ns = 0, nc = 0, sr = 0;
+        try {
+            params.init_audio = sa3::read_wav_planar(init_path, ns, nc, sr);
+        } catch (const std::exception& e) {
+            perr = std::string("invalid init_path WAV: ") + e.what();
+            return false;
+        }
+        if (sr != 44100) {
+            int resampled_ns = 0;
+            params.init_audio = sa3::resample_planar_linear(params.init_audio, ns, nc, sr, 44100, resampled_ns);
+            fprintf(stderr, "[sa3-server] resampled init_path from %d Hz/%d samples to 44100 Hz/%d samples\n",
+                    sr, ns, resampled_ns);
+            fflush(stderr);
+            ns = resampled_ns;
+        }
+        params.init_n_samp = ns; params.init_n_ch = nc;
+    }
+
+    return true;
+}
+
+std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved) {
+    const std::string sid = new_session_id();
+    {
+        std::lock_guard<std::mutex> lk(jobs_mtx);
+        jobs_prune();
+        Job j; j.total_steps = params.steps; j.seed = seed_resolved; j.created = sa3::wall_time_s();
+        jobs[sid] = std::move(j);
+    }
+    const std::string peak_norm_log = params.loudness.peak_normalize_enabled
+        ? json_num(params.loudness.peak_normalize_db) : "off";
+    const std::string limiter_log = params.loudness.limiter_enabled
+        ? json_num(params.loudness.limiter_ceiling_db) : "off";
+    fprintf(stderr,
+            "[sa3-server] queued %s frames=%d (~%.2fs) target_samples=%d steps=%d keep_models=%s init_samples=%d init_ch=%d inpaint=%.2f..%.2f loras=%zu ae_chunks=enc%d/%d dec%d/%d peak_norm=%s limiter=%s\n",
+            sid.c_str(), params.frames, (double)params.frames * 4096.0 / 44100.0, params.target_n_samp,
+            params.steps, params.keep_models ? "true" : "false", params.init_n_samp, params.init_n_ch,
+            params.inpaint_start, params.inpaint_end, params.loras.size(),
+            params.encode_chunk_size, params.encode_overlap, params.decode_chunk_size, params.decode_overlap,
+            peak_norm_log.c_str(), limiter_log.c_str());
+    fflush(stderr);
+    std::thread([sid, seed_resolved, params = std::move(params)]() mutable {
+        params.on_progress = [sid](const sa3::Progress& p) {
+            fprintf(stderr, "[sa3-server] job %s %s %d/%d %.0f%%\n",
+                    sid.c_str(), p.stage, p.step, p.total, p.fraction * 100.0f);
+            fflush(stderr);
+            std::lock_guard<std::mutex> lk(jobs_mtx);
+            auto it = jobs.find(sid); if (it == jobs.end()) return;
+            it->second.progress = (int)(p.fraction * 100.0f);
+            it->second.step     = p.step;
+            if      (!strcmp(p.stage, "sampling")) it->second.status = "generating";
+            else if (!strcmp(p.stage, "encoding") || !strcmp(p.stage, "decoding")) it->second.status = "encoding";
+        };
+        std::lock_guard<std::mutex> lk(g_mtx);
+        { std::lock_guard<std::mutex> jl(jobs_mtx); if (auto it = jobs.find(sid); it != jobs.end()) it->second.status = "generating"; }
+        std::string err;
+        fprintf(stderr, "[sa3-server] job %s starting\n", sid.c_str());
+        fflush(stderr);
+        if (!ensure_loaded(err)) {
+            fprintf(stderr, "[sa3-server] job %s failed to load model: %s\n", sid.c_str(), err.c_str());
+            fflush(stderr);
+            std::lock_guard<std::mutex> jl(jobs_mtx);
+            if (auto it = jobs.find(sid); it != jobs.end()) { it->second.status = "failed"; it->second.error = err; }
+            return;
+        }
+        fprintf(stderr, "[sa3-server] job %s model ready\n", sid.c_str());
+        fflush(stderr);
+        try {
+            sa3::GenResult r = g_pipe->generate(params);
+            std::string b64 = b64_encode(sa3::wav_planar_bytes(r.samples.data(), r.n_samp, r.n_ch, r.sample_rate));
+            std::lock_guard<std::mutex> jl(jobs_mtx);
+            if (auto it = jobs.find(sid); it != jobs.end()) {
+                it->second.audio_b64 = std::move(b64);
+                it->second.loudness_json = loudness_meta_json(r.loudness);
+                it->second.status = "completed"; it->second.progress = 100;
+                it->second.finished = sa3::wall_time_s();
+            }
+            fprintf(stderr, "[sa3-server] job %s completed %.2fs seed=%llu peak %.3f -> %.3f limited %.4f%%\n",
+                    sid.c_str(), (double)r.n_samp / (double)r.sample_rate, (unsigned long long)seed_resolved,
+                    r.loudness.decoded_peak, r.loudness.final_peak,
+                    r.loudness.limiter_limited_fraction_set ? 100.0 * r.loudness.limiter_limited_fraction : 0.0);
+            fflush(stderr);
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[sa3-server] job %s failed: %s\n", sid.c_str(), e.what());
+            fflush(stderr);
+            std::lock_guard<std::mutex> jl(jobs_mtx);
+            if (auto it = jobs.find(sid); it != jobs.end()) {
+                it->second.status = "failed"; it->second.error = e.what(); it->second.finished = sa3::wall_time_s();
+            }
+        }
+    }).detach();
+    return sid;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    sa3::load_dotenv();
     std::string host = "127.0.0.1";
-    int port = 8086;
+    int port = 8006;
     if (const char* e = getenv("SA3_MODELS_DIR"))   g_models_dir   = e;
     if (const char* e = getenv("SA3_ADAPTERS_DIR")) g_adapters_dir = e;
     if (const char* e = getenv("SA3_PROMPTS_DIR"))  g_prompts_dir  = e;
@@ -424,7 +741,7 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         auto next = [&](const char* d){ return i + 1 < argc ? argv[++i] : d; };
         if      (a == "--host")         host = next("127.0.0.1");
-        else if (a == "--port")         port = atoi(next("8086"));
+        else if (a == "--port")         port = atoi(next("8006"));
         else if (a == "--model")        g_variant = next("medium");
         else if (a == "--encoding")     g_encoding = next("f16");
         else if (a == "--models-dir")   g_models_dir = next("models");
@@ -441,7 +758,8 @@ int main(int argc, char** argv) {
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         const bool loaded = g_loaded.load();   // atomic: never blocks behind an in-flight generation
         std::string body = "{\"status\":\"ok\",\"model\":\"" + g_variant + "\",\"encoding\":\"" +
-                           g_encoding + "\",\"loaded\":" + (loaded ? "true" : "false") + "}";
+                           g_encoding + "\",\"loaded\":" + (loaded ? "true" : "false") +
+                           ",\"loudness_defaults\":" + loudness_params_json(sa3::loudness_defaults_from_env()) + "}";
         res.set_content(body, "application/json");
     });
 
@@ -518,11 +836,21 @@ int main(int argc, char** argv) {
         auto D = [&](const char* k, double d) { yyjson_val* v = yyjson_obj_get(root, k); return v && yyjson_is_num(v) ? yyjson_get_num(v) : d; };
         auto B = [&](const char* k, bool d) { yyjson_val* v = yyjson_obj_get(root, k); return v && yyjson_is_bool(v) ? yyjson_get_bool(v) : d; };
 
+        std::string perr;
         sa3::GenParams params;
         params.prompt           = S("prompt", "");
-        params.frames           = I("frames", 128);
-        if (yyjson_obj_get(root, "seconds"))                 // ~10.77 latent frames/sec (44100/4096)
-            params.frames = (int)(D("seconds", 12.0) * 44100.0 / 4096.0 + 0.5);
+        if (yyjson_obj_get(root, "seconds")) {
+            perr = "use duration, not seconds";
+        } else if (yyjson_obj_get(root, "frames")) {
+            perr = "HTTP API uses duration seconds; frames is CLI/internal";
+        } else {
+            const double max_duration = env_double("SA3_MAX_DURATION", 300.0);
+            const double duration = D("duration", env_double("SA3_DEFAULT_DURATION", 30.0));
+            if (!std::isfinite(duration) || duration <= 0.0 || duration > max_duration)
+                perr = "duration must be in (0, " + json_num(max_duration) + "] seconds";
+            else
+                params.frames = std::max(1, (int)(duration * 44100.0 / 4096.0 + 0.5));
+        }
         params.steps            = I("steps", 8);
         const uint64_t seed_resolved = sa3::pick_seed(I("seed", 0));   // seed -1 => random
         params.seed             = seed_resolved;
@@ -531,10 +859,60 @@ int main(int argc, char** argv) {
         params.inpaint_start    = (float)D("inpaint_start", -1.0);   // inpaint/continuation region (sec)
         params.inpaint_end      = (float)D("inpaint_end", -1.0);
         params.duration_padding_sec = (float)D("duration_padding_sec", 6.0);   // text2music schedule headroom (0 = let it end)
+        params.target_n_samp     = I("target_samples", 0);
         params.encode_chunk_size = I("encode_chunk_size", 0);
         params.encode_overlap    = I("encode_overlap", 32);
         params.decode_chunk_size = I("decode_chunk_size", 0);
         params.decode_overlap    = I("decode_overlap", 32);
+        params.loudness          = sa3::loudness_defaults_from_env();
+        auto parse_json_float = [&](yyjson_val* v, float& out, const char* key) {
+            if (!v) return true;
+            if (yyjson_is_num(v)) {
+                out = (float)yyjson_get_num(v);
+                if (std::isfinite(out)) return true;
+            }
+            if (yyjson_is_str(v)) {
+                if (sa3::parse_float_text(yyjson_get_str(v), out)) return true;
+            }
+            if (perr.empty()) perr = std::string(key) + " must be a finite number";
+            return false;
+        };
+        auto request_float = [&](const char* key, float& dst) {
+            if (!perr.empty()) return;
+            yyjson_val* v = yyjson_obj_get(root, key);
+            if (!v) return;
+            parse_json_float(v, dst, key);
+        };
+        auto request_optional_float = [&](const char* key, bool& enabled, float& dst, bool positive_disables = false) {
+            if (!perr.empty()) return;
+            yyjson_val* v = yyjson_obj_get(root, key);
+            if (!v) return;
+            if (yyjson_is_null(v) || (yyjson_is_bool(v) && !yyjson_get_bool(v))) {
+                enabled = false;
+                return;
+            }
+            if (yyjson_is_str(v) && sa3::text_disables_optional_float(yyjson_get_str(v))) {
+                enabled = false;
+                return;
+            }
+            float parsed = dst;
+            if (!parse_json_float(v, parsed, key)) return;
+            if (positive_disables && parsed > 0.0f) {
+                enabled = false;
+                return;
+            }
+            enabled = true;
+            dst = parsed;
+        };
+        request_float("latent_rescale", params.loudness.latent_rescale);
+        request_float("latent_shift", params.loudness.latent_shift);
+        request_optional_float("latent_target_std", params.loudness.latent_target_std_enabled, params.loudness.latent_target_std);
+        request_float("latent_adapt_min", params.loudness.latent_adapt_min);
+        request_float("latent_adapt_max", params.loudness.latent_adapt_max);
+        request_optional_float("peak_normalize_db", params.loudness.peak_normalize_enabled, params.loudness.peak_normalize_db);
+        request_optional_float("limiter_ceiling_db", params.loudness.limiter_enabled, params.loudness.limiter_ceiling_db, true);
+        request_float("limiter_knee", params.loudness.limiter_knee);
+        sa3::normalize_loudness_params(params.loudness);
         // classifier-free guidance (all inert unless cfg_scale != 1.0)
         params.negative_prompt   = S("negative_prompt", "");
         params.cfg_scale         = (float)D("cfg_scale", 1.0);
@@ -554,7 +932,6 @@ int main(int argc, char** argv) {
         }
         std::string init_path   = S("init_path", "");                // local WAV for audio2audio / inpaint
 
-        std::string perr;
         yyjson_val* loras = yyjson_obj_get(root, "loras");
         if (loras && yyjson_is_arr(loras)) {
             yyjson_val* it; yyjson_arr_iter ai; yyjson_arr_iter_init(loras, &ai);
@@ -573,7 +950,9 @@ int main(int argc, char** argv) {
         yyjson_doc_free(doc);
 
         if (!perr.empty())            { res.status = 400; res.set_content(json_err(perr), "application/json"); return; }
-        if (params.prompt.empty())    { res.status = 400; res.set_content(json_err("prompt required"), "application/json"); return; }
+        if (!sa3::validate_loudness_params(params.loudness, perr)) {
+            res.status = 400; res.set_content(json_err(perr), "application/json"); return;
+        }
 
         if (!init_path.empty()) {     // audio2audio / inpaint source (local path — the server is localhost)
             if (!std::filesystem::exists(init_path)) {
@@ -607,12 +986,17 @@ int main(int argc, char** argv) {
             Job j; j.total_steps = params.steps; j.seed = seed_resolved; j.created = sa3::wall_time_s();
             jobs[sid] = std::move(j);
         }
+        const std::string peak_norm_log = params.loudness.peak_normalize_enabled
+            ? json_num(params.loudness.peak_normalize_db) : "off";
+        const std::string limiter_log = params.loudness.limiter_enabled
+            ? json_num(params.loudness.limiter_ceiling_db) : "off";
         fprintf(stderr,
-                "[sa3-server] queued %s frames=%d (~%.2fs) steps=%d keep_models=%s init_samples=%d init_ch=%d inpaint=%.2f..%.2f loras=%zu ae_chunks=enc%d/%d dec%d/%d\n",
+                "[sa3-server] queued %s frames=%d (~%.2fs) steps=%d keep_models=%s init_samples=%d init_ch=%d inpaint=%.2f..%.2f loras=%zu ae_chunks=enc%d/%d dec%d/%d peak_norm=%s limiter=%s\n",
                 sid.c_str(), params.frames, (double)params.frames * 4096.0 / 44100.0, params.steps,
                 params.keep_models ? "true" : "false", params.init_n_samp, params.init_n_ch,
                 params.inpaint_start, params.inpaint_end, params.loras.size(),
-                params.encode_chunk_size, params.encode_overlap, params.decode_chunk_size, params.decode_overlap);
+                params.encode_chunk_size, params.encode_overlap, params.decode_chunk_size, params.decode_overlap,
+                peak_norm_log.c_str(), limiter_log.c_str());
         fflush(stderr);
         std::thread([sid, seed_resolved, params = std::move(params)]() mutable {
             params.on_progress = [sid](const sa3::Progress& p) {   // sampling->generating, decoding->encoding
@@ -646,11 +1030,14 @@ int main(int argc, char** argv) {
                 std::lock_guard<std::mutex> jl(jobs_mtx);
                 if (auto it = jobs.find(sid); it != jobs.end()) {
                     it->second.audio_b64 = std::move(b64);
+                    it->second.loudness_json = loudness_meta_json(r.loudness);
                     it->second.status = "completed"; it->second.progress = 100;
                     it->second.finished = sa3::wall_time_s();
                 }
-                fprintf(stderr, "[sa3-server] job %s completed %.2fs seed=%llu\n",
-                        sid.c_str(), (double)r.n_samp / (double)r.sample_rate, (unsigned long long)seed_resolved);
+                fprintf(stderr, "[sa3-server] job %s completed %.2fs seed=%llu peak %.3f -> %.3f limited %.4f%%\n",
+                        sid.c_str(), (double)r.n_samp / (double)r.sample_rate, (unsigned long long)seed_resolved,
+                        r.loudness.decoded_peak, r.loudness.final_peak,
+                        r.loudness.limiter_limited_fraction_set ? 100.0 * r.loudness.limiter_limited_fraction : 0.0);
                 fflush(stderr);
             } catch (const std::exception& e) {
                 fprintf(stderr, "[sa3-server] job %s failed: %s\n", sid.c_str(), e.what());
@@ -662,7 +1049,71 @@ int main(int argc, char** argv) {
             }
         }).detach();
 
-        res.set_content("{\"session_id\":\"" + sid + "\",\"seed\":" + std::to_string(seed_resolved) + "}", "application/json");
+        res.set_content("{\"success\":true,\"session_id\":\"" + sid + "\",\"seed\":" + std::to_string(seed_resolved) + "}", "application/json");
+    });
+
+    // POST /generate/loop: Gary-compatible loop mode. The model gets a short padded generation canvas,
+    // then the result is trimmed to the exact requested bar length.
+    svr.Post("/generate/loop", [&adir](const httplib::Request& req, httplib::Response& res) {
+        yyjson_doc* doc = yyjson_read(req.body.c_str(), req.body.size(), 0);
+        if (!doc) { res.status = 400; res.set_content(json_err("invalid json"), "application/json"); return; }
+        yyjson_val* root = yyjson_doc_get_root(doc);
+        auto I = [&](const char* k, int d) {
+            yyjson_val* v = yyjson_obj_get(root, k);
+            if (v && yyjson_is_int(v)) return (int)yyjson_get_int(v);
+            if (v && yyjson_is_num(v)) return (int)yyjson_get_num(v);
+            return d;
+        };
+
+        sa3::GenParams params;
+        uint64_t seed_resolved = 0;
+        std::string perr;
+        if (!parse_generate_request(root, adir, params, seed_resolved, perr)) {
+            yyjson_doc_free(doc);
+            res.status = 400; res.set_content(json_err(perr), "application/json"); return;
+        }
+
+        float bpm = 0.0f;
+        if (yyjson_val* bv = yyjson_obj_get(root, "bpm")) {
+            if (yyjson_is_num(bv)) bpm = (float)yyjson_get_num(bv);
+            else if (yyjson_is_str(bv)) sa3::parse_float_text(yyjson_get_str(bv), bpm);
+        }
+        if (bpm <= 0.0f) bpm = extract_bpm_from_prompt(params.prompt);
+
+        const int bars = I("bars", env_int("SA3_DEFAULT_LOOP_BARS", 8));
+        yyjson_doc_free(doc);
+
+        if (bpm <= 0.0f) {
+            res.status = 400; res.set_content(json_err("BPM required in prompt or bpm field"), "application/json"); return;
+        }
+        if (!valid_loop_bars(bars)) {
+            res.status = 400; res.set_content(json_err("bars must be one of [4, 8, 16, 32]"), "application/json"); return;
+        }
+
+        const double seconds_per_bar = (60.0 / (double)bpm) * 4.0;
+        const double loop_duration = seconds_per_bar * (double)bars;
+        const double gen_duration = loop_duration + env_double("SA3_LOOP_PAD_SECONDS", 2.0);
+        const double max_duration = env_double("SA3_MAX_DURATION", 300.0);
+        if (gen_duration > max_duration) {
+            res.status = 400;
+            res.set_content(json_err(std::to_string(bars) + " bars at " + json_num(bpm) + " bpm exceeds max " + json_num(max_duration) + "s with pad"), "application/json");
+            return;
+        }
+
+        const int target_samples = std::max(1, (int)std::llround(loop_duration * 44100.0));
+        params.frames = std::max(1, (int)(gen_duration * 44100.0 / 4096.0 + 0.5));
+        params.target_n_samp = target_samples;
+        params.duration_padding_sec = 0.0f;
+
+        const std::string sid = queue_generation(std::move(params), seed_resolved);
+        std::string body = "{\"success\":true,\"session_id\":\"" + sid + "\",\"seed\":" + std::to_string(seed_resolved);
+        body += ",\"bpm\":" + json_num(bpm);
+        body += ",\"bars\":" + std::to_string(bars);
+        body += ",\"seconds_per_bar\":" + json_num(seconds_per_bar);
+        body += ",\"loop_duration\":" + json_num(loop_duration);
+        body += ",\"gen_duration\":" + json_num(gen_duration);
+        body += ",\"target_samples\":" + std::to_string(target_samples) + "}";
+        res.set_content(body, "application/json");
     });
 
     // GET /poll_status/<session_id>: progress + (on completion) the base64 wav. Matches gary4local.
@@ -674,6 +1125,7 @@ int main(int argc, char** argv) {
         int progress = 0, step = 0, total_steps = 0;
         uint64_t seed = 0;
         std::string audio_b64;
+        std::string loudness_json;
         std::string error;
         {
             std::lock_guard<std::mutex> lk(jobs_mtx);
@@ -692,10 +1144,12 @@ int main(int argc, char** argv) {
             total_steps = j.total_steps;
             seed = j.seed;
             error = j.error;
+            loudness_json = j.loudness_json;
 
             if (j.status == "completed") {
                 if (consume) {
                     audio_b64.swap(j.audio_b64);
+                    loudness_json.swap(j.loudness_json);
                     jobs.erase(it);
                 } else {
                     audio_b64 = j.audio_b64;
@@ -717,7 +1171,8 @@ int main(int argc, char** argv) {
         body += "\"status\":\"" + status + "\",";
         body += "\"queue_status\":" + qs;
         if (status == "completed")
-            body += ",\"audio_data\":\"" + audio_b64 + "\",\"meta\":{\"seed\":" + std::to_string(seed) + "}";
+            body += ",\"audio_data\":\"" + audio_b64 + "\",\"meta\":{\"seed\":" + std::to_string(seed) +
+                    ",\"loudness\":" + (loudness_json.empty() ? "{}" : loudness_json) + "}";
         if (status == "failed")
             body += ",\"error\":\"" + json_escape(error) + "\"";
         body += "}";

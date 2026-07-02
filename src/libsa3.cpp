@@ -46,14 +46,13 @@ SA3_API sa3_context* sa3_init(const sa3_config* cfg, char* err, int err_len) {
 
 SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* out, char* err, int err_len) {
     if (!ctx || !req || !out) { set_err(err, err_len, "null argument"); return 1; }
-    if (!req->prompt || !*req->prompt) { set_err(err, err_len, "prompt required"); return 1; }
     try {
         if (!ctx->pipe) {   // reload after sa3_unload()
             ctx->pipe = std::make_unique<sa3::Pipeline>();
             ctx->pipe->load(ctx->paths);
         }
         sa3::GenParams p;
-        p.prompt = req->prompt;
+        p.prompt = req->prompt ? req->prompt : "";
         if (req->negative_prompt) p.negative_prompt = req->negative_prompt;
         p.frames = req->frames > 0 ? req->frames : 128;
         p.steps  = req->steps  > 0 ? req->steps  : 8;
@@ -61,6 +60,7 @@ SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* ou
         p.cfg_scale = req->cfg_scale != 0.0f ? req->cfg_scale : 1.0f;
         p.duration_padding_sec = req->duration_padding_sec >= 0.0f ? req->duration_padding_sec : 6.0f;
         p.keep_models = req->keep_models != 0;
+        p.loudness = sa3::loudness_defaults_from_env();
 
         for (int i = 0; i < req->n_loras; i++) {
             const std::string name = (req->lora_names && req->lora_names[i]) ? req->lora_names[i] : "";

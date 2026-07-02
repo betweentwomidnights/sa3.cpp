@@ -46,7 +46,7 @@ typedef void (*sa3_progress_cb)(void* user, const char* stage, int step, int tot
 /* One generation request. Zero-initialize it (memset 0), then set what you need — a 0/NULL field
  * means "use the default" shown below. */
 typedef struct {
-    const char* prompt;             /* required */
+    const char* prompt;             /* NULL/"" = unprompted */
     const char* negative_prompt;    /* NULL/"" = none (only affects output when cfg_scale != 1) */
     int      frames;                /* output latent frames; 0 -> 128 (~12 s; ~10.77 frames/s) */
     int      steps;                 /* 0 -> 8 */

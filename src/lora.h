@@ -201,8 +201,8 @@ inline LoraStack apply_loras_host(GgufModel& base, std::vector<LoraAdapter>& ada
     return LoraStack{};
 }
 
-// Apply `adapters` (in order) to `base`, filling base.overrides with W_eff for every targeted
-// weight. Dispatches to the GPU/graph path for additive+dora-rows, else the host fallback.
+// Apply `adapters` (in order) to `base`, updating every targeted weight in place. Dispatches to
+// the GPU/graph path for additive+dora-rows, else the host fallback.
 inline LoraStack apply_loras(GgufModel& base, std::vector<LoraAdapter>& adapters) {
     std::vector<std::string> targets;
     for (auto& kv : base.tensors) {

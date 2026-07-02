@@ -8,4 +8,4 @@ for %%d in (build-cuda build-vulkan build-all build) do (
 )
 if "%BIN%"=="" ( echo sa3-server not built - run build.cmd ^<backend^> first& exit /b 1 )
 echo [sa3-server] launching %BIN%
-"%BIN%" --model medium --encoding f16 --port 8086 %*
+"%BIN%" --model medium --encoding f16 --port 8006 %*
