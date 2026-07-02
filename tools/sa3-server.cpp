@@ -437,7 +437,7 @@ std::string new_session_id() {
 // (call under jobs_mtx). The preferred client path is /poll_status/<id>?consume=1, which
 // removes completed jobs immediately after the successful audio fetch.
 void jobs_prune() {
-    constexpr double kFinishedJobTtlS = 120.0;
+    constexpr double kFinishedJobTtlS = 600.0;  // 10 min, matches docs/SERVER.md
     const double now = sa3::wall_time_s();
     for (auto it = jobs.begin(); it != jobs.end(); ) {
         const bool done = it->second.status == "completed" || it->second.status == "failed";
@@ -533,6 +533,10 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     params.inpaint_end      = (float)D("inpaint_end", -1.0);
     params.duration_padding_sec = (float)D("duration_padding_sec", 6.0);
     params.target_n_samp    = I("target_samples", 0);
+    // clamp to the requested canvas (frames*4096 samples); an unvalidated JSON int would
+    // otherwise drive a huge truncation-buffer alloc in Pipeline::generate. 0 = auto.
+    if (params.target_n_samp < 0) params.target_n_samp = 0;
+    else if (params.target_n_samp > params.frames * 4096) params.target_n_samp = params.frames * 4096;
     params.encode_chunk_size = I("encode_chunk_size", 0);
     params.encode_overlap    = I("encode_overlap", 32);
     params.decode_chunk_size = I("decode_chunk_size", 0);
@@ -823,215 +827,17 @@ int main(int argc, char** argv) {
         yyjson_doc* doc = yyjson_read(req.body.c_str(), req.body.size(), 0);
         if (!doc) { res.status = 400; res.set_content(json_err("invalid json"), "application/json"); return; }
         yyjson_val* root = yyjson_doc_get_root(doc);
-        auto S = [&](const char* k, const char* d) { yyjson_val* v = yyjson_obj_get(root, k); return std::string(v && yyjson_is_str(v) ? yyjson_get_str(v) : d); };
-        auto I = [&](const char* k, int d) { yyjson_val* v = yyjson_obj_get(root, k); return v && yyjson_is_int(v) ? (int)yyjson_get_int(v) : d; };
-        auto D = [&](const char* k, double d) { yyjson_val* v = yyjson_obj_get(root, k); return v && yyjson_is_num(v) ? yyjson_get_num(v) : d; };
-        auto B = [&](const char* k, bool d) { yyjson_val* v = yyjson_obj_get(root, k); return v && yyjson_is_bool(v) ? yyjson_get_bool(v) : d; };
 
-        std::string perr;
         sa3::GenParams params;
-        params.prompt           = S("prompt", "");
-        if (yyjson_obj_get(root, "seconds")) {
-            perr = "use duration, not seconds";
-        } else if (yyjson_obj_get(root, "frames")) {
-            perr = "HTTP API uses duration seconds; frames is CLI/internal";
-        } else {
-            const double max_duration = env_double("SA3_MAX_DURATION", 300.0);
-            const double duration = D("duration", env_double("SA3_DEFAULT_DURATION", 30.0));
-            if (!std::isfinite(duration) || duration <= 0.0 || duration > max_duration)
-                perr = "duration must be in (0, " + json_num(max_duration) + "] seconds";
-            else
-                params.frames = std::max(1, (int)(duration * 44100.0 / 4096.0 + 0.5));
-        }
-        params.steps            = I("steps", 8);
-        const uint64_t seed_resolved = sa3::pick_seed(I("seed", 0));   // seed -1 => random
-        params.seed             = seed_resolved;
-        params.keep_models      = B("keep_models", false);   // FRUGAL default
-        params.init_noise_level = (float)D("init_noise_level", 0.85);
-        params.inpaint_start    = (float)D("inpaint_start", -1.0);   // inpaint/continuation region (sec)
-        params.inpaint_end      = (float)D("inpaint_end", -1.0);
-        params.duration_padding_sec = (float)D("duration_padding_sec", 6.0);   // text2music schedule headroom (0 = let it end)
-        params.target_n_samp     = I("target_samples", 0);
-        params.encode_chunk_size = I("encode_chunk_size", 0);
-        params.encode_overlap    = I("encode_overlap", 32);
-        params.decode_chunk_size = I("decode_chunk_size", 0);
-        params.decode_overlap    = I("decode_overlap", 32);
-        params.loudness          = sa3::loudness_defaults_from_env();
-        auto parse_json_float = [&](yyjson_val* v, float& out, const char* key) {
-            if (!v) return true;
-            if (yyjson_is_num(v)) {
-                out = (float)yyjson_get_num(v);
-                if (std::isfinite(out)) return true;
-            }
-            if (yyjson_is_str(v)) {
-                if (sa3::parse_float_text(yyjson_get_str(v), out)) return true;
-            }
-            if (perr.empty()) perr = std::string(key) + " must be a finite number";
-            return false;
-        };
-        auto request_float = [&](const char* key, float& dst) {
-            if (!perr.empty()) return;
-            yyjson_val* v = yyjson_obj_get(root, key);
-            if (!v) return;
-            parse_json_float(v, dst, key);
-        };
-        auto request_optional_float = [&](const char* key, bool& enabled, float& dst, bool positive_disables = false) {
-            if (!perr.empty()) return;
-            yyjson_val* v = yyjson_obj_get(root, key);
-            if (!v) return;
-            if (yyjson_is_null(v) || (yyjson_is_bool(v) && !yyjson_get_bool(v))) {
-                enabled = false;
-                return;
-            }
-            if (yyjson_is_str(v) && sa3::text_disables_optional_float(yyjson_get_str(v))) {
-                enabled = false;
-                return;
-            }
-            float parsed = dst;
-            if (!parse_json_float(v, parsed, key)) return;
-            if (positive_disables && parsed > 0.0f) {
-                enabled = false;
-                return;
-            }
-            enabled = true;
-            dst = parsed;
-        };
-        request_float("latent_rescale", params.loudness.latent_rescale);
-        request_float("latent_shift", params.loudness.latent_shift);
-        request_optional_float("latent_target_std", params.loudness.latent_target_std_enabled, params.loudness.latent_target_std);
-        request_float("latent_adapt_min", params.loudness.latent_adapt_min);
-        request_float("latent_adapt_max", params.loudness.latent_adapt_max);
-        request_optional_float("peak_normalize_db", params.loudness.peak_normalize_enabled, params.loudness.peak_normalize_db);
-        request_optional_float("limiter_ceiling_db", params.loudness.limiter_enabled, params.loudness.limiter_ceiling_db, true);
-        request_float("limiter_knee", params.loudness.limiter_knee);
-        sa3::normalize_loudness_params(params.loudness);
-        // classifier-free guidance (all inert unless cfg_scale != 1.0)
-        params.negative_prompt   = S("negative_prompt", "");
-        params.cfg_scale         = (float)D("cfg_scale", 1.0);
-        params.cfg_rescale       = (float)D("cfg_rescale", 0.0);
-        params.apg_scale         = (float)D("apg_scale", 1.0);
-        params.cfg_norm_threshold= (float)D("cfg_norm_threshold", 0.0);
-        params.cfg_interval_min  = (float)D("cfg_interval_min", 0.0);
-        params.cfg_interval_max  = (float)D("cfg_interval_max", 1.0);
-        // schedule warp: "dist_shift" type + its defaults, optionally overridden by a 4-number "dist_shift_params".
-        params.dist_shift       = S("dist_shift", "LogSNR");
-        sa3::dist_shift_defaults(params.dist_shift, params.ds_p1, params.ds_p2, params.ds_p3, params.ds_p4);
-        if (yyjson_val* dsp = yyjson_obj_get(root, "dist_shift_params"); dsp && yyjson_is_arr(dsp)) {
-            float* slots[4] = { &params.ds_p1, &params.ds_p2, &params.ds_p3, &params.ds_p4 };
-            yyjson_val* v; yyjson_arr_iter di; yyjson_arr_iter_init(dsp, &di);
-            for (int k = 0; k < 4 && (v = yyjson_arr_iter_next(&di)); k++)
-                if (yyjson_is_num(v)) *slots[k] = (float)yyjson_get_num(v);
-        }
-        std::string init_path   = S("init_path", "");                // local WAV for audio2audio / inpaint
-
-        yyjson_val* loras = yyjson_obj_get(root, "loras");
-        if (loras && yyjson_is_arr(loras)) {
-            yyjson_val* it; yyjson_arr_iter ai; yyjson_arr_iter_init(loras, &ai);
-            while ((it = yyjson_arr_iter_next(&ai))) {
-                yyjson_val* nv = yyjson_obj_get(it, "name");
-                if (!nv) nv = yyjson_obj_get(it, "path");
-                std::string name = nv && yyjson_is_str(nv) ? yyjson_get_str(nv) : "";
-                yyjson_val* sv = yyjson_obj_get(it, "strength");
-                float strength = sv && yyjson_is_num(sv) ? (float)yyjson_get_num(sv) : 1.0f;
-                if (name.empty()) continue;
-                std::string p = resolve_lora_path(adir, name);
-                if (p.empty()) { perr = "unknown lora '" + name + "'"; break; }
-                params.loras.push_back({p, strength});
-            }
+        uint64_t seed_resolved = 0;
+        std::string perr;
+        if (!parse_generate_request(root, adir, params, seed_resolved, perr)) {
+            yyjson_doc_free(doc);
+            res.status = 400; res.set_content(json_err(perr), "application/json"); return;
         }
         yyjson_doc_free(doc);
 
-        if (!perr.empty())            { res.status = 400; res.set_content(json_err(perr), "application/json"); return; }
-        if (!sa3::validate_loudness_params(params.loudness, perr)) {
-            res.status = 400; res.set_content(json_err(perr), "application/json"); return;
-        }
-
-        if (!init_path.empty()) {     // audio2audio / inpaint source (local path — the server is localhost)
-            if (!std::filesystem::exists(init_path)) {
-                res.status = 400; res.set_content(json_err("init_path not found: " + init_path), "application/json"); return;
-            }
-            int ns = 0, nc = 0, sr = 0;
-            try {
-                params.init_audio = sa3::read_wav_planar(init_path, ns, nc, sr);
-            } catch (const std::exception& e) {
-                res.status = 400;
-                res.set_content(json_err(std::string("invalid init_path WAV: ") + e.what()), "application/json");
-                return;
-            }
-            params.init_n_samp = ns; params.init_n_ch = nc; params.init_sample_rate = sr;  // pipeline resamples
-        }
-
-        // register the job, then hand off to a worker thread and reply immediately
-        const std::string sid = new_session_id();
-        {
-            std::lock_guard<std::mutex> lk(jobs_mtx);
-            jobs_prune();
-            Job j; j.total_steps = params.steps; j.seed = seed_resolved; j.created = sa3::wall_time_s();
-            jobs[sid] = std::move(j);
-        }
-        const std::string peak_norm_log = params.loudness.peak_normalize_enabled
-            ? json_num(params.loudness.peak_normalize_db) : "off";
-        const std::string limiter_log = params.loudness.limiter_enabled
-            ? json_num(params.loudness.limiter_ceiling_db) : "off";
-        fprintf(stderr,
-                "[sa3-server] queued %s frames=%d (~%.2fs) steps=%d keep_models=%s init_samples=%d init_ch=%d inpaint=%.2f..%.2f loras=%zu ae_chunks=enc%d/%d dec%d/%d peak_norm=%s limiter=%s\n",
-                sid.c_str(), params.frames, (double)params.frames * 4096.0 / 44100.0, params.steps,
-                params.keep_models ? "true" : "false", params.init_n_samp, params.init_n_ch,
-                params.inpaint_start, params.inpaint_end, params.loras.size(),
-                params.encode_chunk_size, params.encode_overlap, params.decode_chunk_size, params.decode_overlap,
-                peak_norm_log.c_str(), limiter_log.c_str());
-        fflush(stderr);
-        std::thread([sid, seed_resolved, params = std::move(params)]() mutable {
-            params.on_progress = [sid](const sa3::Progress& p) {   // sampling->generating, decoding->encoding
-                fprintf(stderr, "[sa3-server] job %s %s %d/%d %.0f%%\n",
-                        sid.c_str(), p.stage, p.step, p.total, p.fraction * 100.0f);
-                fflush(stderr);
-                std::lock_guard<std::mutex> lk(jobs_mtx);
-                auto it = jobs.find(sid); if (it == jobs.end()) return;
-                it->second.progress = (int)(p.fraction * 100.0f);
-                it->second.step     = p.step;
-                if      (!strcmp(p.stage, "sampling")) it->second.status = "generating";
-                else if (!strcmp(p.stage, "encoding") || !strcmp(p.stage, "decoding")) it->second.status = "encoding";
-            };
-            std::lock_guard<std::mutex> lk(g_mtx);   // serialize: one generation at a time
-            { std::lock_guard<std::mutex> jl(jobs_mtx); if (auto it = jobs.find(sid); it != jobs.end()) it->second.status = "generating"; }
-            std::string err;
-            fprintf(stderr, "[sa3-server] job %s starting\n", sid.c_str());
-            fflush(stderr);
-            if (!ensure_loaded(err)) {
-                fprintf(stderr, "[sa3-server] job %s failed to load model: %s\n", sid.c_str(), err.c_str());
-                fflush(stderr);
-                std::lock_guard<std::mutex> jl(jobs_mtx);
-                if (auto it = jobs.find(sid); it != jobs.end()) { it->second.status = "failed"; it->second.error = err; }
-                return;
-            }
-            fprintf(stderr, "[sa3-server] job %s model ready\n", sid.c_str());
-            fflush(stderr);
-            try {
-                sa3::GenResult r = g_pipe->generate(params);
-                std::string b64 = b64_encode(sa3::wav_planar_bytes(r.samples.data(), r.n_samp, r.n_ch, r.sample_rate));
-                std::lock_guard<std::mutex> jl(jobs_mtx);
-                if (auto it = jobs.find(sid); it != jobs.end()) {
-                    it->second.audio_b64 = std::move(b64);
-                    it->second.loudness_json = loudness_meta_json(r.loudness);
-                    it->second.status = "completed"; it->second.progress = 100;
-                    it->second.finished = sa3::wall_time_s();
-                }
-                fprintf(stderr, "[sa3-server] job %s completed %.2fs seed=%llu peak %.3f -> %.3f limited %.4f%%\n",
-                        sid.c_str(), (double)r.n_samp / (double)r.sample_rate, (unsigned long long)seed_resolved,
-                        r.loudness.decoded_peak, r.loudness.final_peak,
-                        r.loudness.limiter_limited_fraction_set ? 100.0 * r.loudness.limiter_limited_fraction : 0.0);
-                fflush(stderr);
-            } catch (const std::exception& e) {
-                fprintf(stderr, "[sa3-server] job %s failed: %s\n", sid.c_str(), e.what());
-                fflush(stderr);
-                std::lock_guard<std::mutex> jl(jobs_mtx);
-                if (auto it = jobs.find(sid); it != jobs.end()) {
-                    it->second.status = "failed"; it->second.error = e.what(); it->second.finished = sa3::wall_time_s();
-                }
-            }
-        }).detach();
-
+        const std::string sid = queue_generation(std::move(params), seed_resolved);
         res.set_content("{\"success\":true,\"session_id\":\"" + sid + "\",\"seed\":" + std::to_string(seed_resolved) + "}", "application/json");
     });
 

@@ -207,6 +207,36 @@ inline void set_swa_bias(ggml_tensor* mt, const SameConfig& sc, int64_t N) {
     }
 }
 
+// Fill a position tensor with [0,1,...,n-1] (shared by chunked encode + decode).
+inline void set_positions(ggml_tensor* p, int n) {
+    std::vector<int32_t> b(n);
+    for (int i = 0; i < n; i++) b[i] = i;
+    ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t));
+}
+
+// One tile of a chunked encode/decode plan, in the chunk's native frame unit: read `size`
+// frames of source at `src`; the chunk output's valid window is [left,right), copied to the
+// destination anchored at `out`. A sample-space caller scales these by its own stride.
+struct ChunkTile { int src, out, left, right; };
+
+// Chunk stitching plan mirroring stable_audio_3 autoencoder encode_audio/decode_audio: starts
+// spaced by hop=size-overlap, a final end-anchored chunk, inner edges dropping half the overlap.
+// Shared by encode + decode so the index math cannot drift between them.
+inline std::vector<ChunkTile> plan_chunks(int total, int size, int overlap) {
+    const int hop = size - overlap, half = overlap / 2;
+    std::vector<int> starts;
+    for (int s = 0; s <= total - size; s += hop) starts.push_back(s);
+    const int final_start = total - size;
+    if (starts.empty() || starts.back() != final_start) starts.push_back(final_start);
+    std::vector<ChunkTile> tiles; tiles.reserve(starts.size());
+    for (size_t i = 0; i < starts.size(); i++) {
+        const bool first = i == 0, last = i + 1 == starts.size();
+        tiles.push_back({ starts[i], last ? total - size : starts[i],
+                          first ? 0 : half, last ? size : size - half });
+    }
+    return tiles;
+}
+
 // Find the one file in `dir` whose name starts with `prefix` and ends with `suffix`. "" if none;
 // returns "" + sets ambiguous=true if >1 match. Resolves --model / --lora by the naming convention.
 inline std::string resolve_one(const std::string& dir, const std::string& prefix,
@@ -690,11 +720,6 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             ggml_tensor* z = nullptr;
             int T = 0, n_samp = 0, n_ch = 0, Nenc = 0, N2 = 0;
         };
-        auto set_pos_enc = [&](ggml_tensor* p, int n){
-            std::vector<int32_t> b(n);
-            for (int i = 0; i < n; i++) b[i] = i;
-            ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t));
-        };
         auto build_encode_graph = [&](int run_T) {
             EncodeGraph eg;
             eg.T = run_T;
@@ -731,9 +756,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         };
         auto run_encode_graph = [&](EncodeGraph& eg, const float* audio_src, std::vector<float>& out) {
             ggml_backend_tensor_set(eg.audio, audio_src, 0, (size_t)eg.n_samp*eg.n_ch*sizeof(float));
-            set_pos_enc(eg.pos, eg.Nenc);
+            set_positions(eg.pos, eg.Nenc);
             set_swa_bias(eg.mask, sc, eg.Nenc);
-            if (sc.chunk) set_pos_enc(eg.pos2, eg.N2);
+            if (sc.chunk) set_positions(eg.pos2, eg.N2);
             ggml_backend_graph_compute(AE.backend, eg.graph);
             out.resize((size_t)sc.latent * eg.T);
             ggml_backend_tensor_get(eg.z, out.data(), 0, out.size()*sizeof(float));
@@ -750,42 +775,33 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             free_encode_graph(eg);
             if (params.on_progress) params.on_progress({"encoding", 1, 1, 0.1f});
         } else {
-            const int hop = encode_chunk_size - encode_overlap;
-            std::vector<int> starts;
-            for (int s = 0; s <= T - encode_chunk_size; s += hop) starts.push_back(s);
-            const int final_start = T - encode_chunk_size;
-            if (starts.empty() || starts.back() != final_start) starts.push_back(final_start);
             // Mirrors stable_audio_3.models.autoencoders encode_audio/decode_audio chunk stitching:
             // final chunk is anchored to the end; inner chunk edges drop half the overlap.
+            const std::vector<ChunkTile> tiles = plan_chunks(T, encode_chunk_size, encode_overlap);
             fprintf(stderr, "[sa3] chunked SAME-L encode: %zu chunks, size=%d overlap=%d\n",
-                    starts.size(), encode_chunk_size, encode_overlap);
+                    tiles.size(), encode_chunk_size, encode_overlap);
 
             EncodeGraph eg = build_encode_graph(encode_chunk_size);
             std::vector<float> audio_chunk((size_t)eg.n_samp * eg.n_ch);
             std::vector<float> zchunk;
-            const int half_overlap = encode_overlap / 2;
-            for (size_t i = 0; i < starts.size(); i++) {
-                const int st = starts[i];
-                const int sample_st = st * ds;
+            for (size_t i = 0; i < tiles.size(); i++) {
+                const ChunkTile& tl = tiles[i];   // encode is native latent-frame: no stride scaling
+                const int sample_st = tl.src * ds;
                 for (int c = 0; c < eg.n_ch; c++)
                     memcpy(&audio_chunk[(size_t)c*eg.n_samp],
                            &init_audio[(size_t)c*init_L + sample_st],
                            (size_t)eg.n_samp*sizeof(float));
                 run_encode_graph(eg, audio_chunk.data(), zchunk);
 
-                const bool first = i == 0, last = i + 1 == starts.size();
-                const int out_start = last ? T - encode_chunk_size : st;
-                const int left = first ? 0 : half_overlap;
-                const int right = last ? encode_chunk_size : encode_chunk_size - half_overlap;
-                const int target_start = out_start + left;
-                const int copy_count = right - left;
+                const int target_start = tl.out + tl.left;
+                const int copy_count = tl.right - tl.left;
                 for (int t = 0; t < copy_count; t++)
                     memcpy(&z_init[(size_t)(target_start + t)*sc.latent],
-                           &zchunk[(size_t)(left + t)*sc.latent],
+                           &zchunk[(size_t)(tl.left + t)*sc.latent],
                            (size_t)sc.latent*sizeof(float));
                 if (params.on_progress)
-                    params.on_progress({"encoding", (int)(i+1), (int)starts.size(),
-                                        0.02f + 0.08f * (float)(i+1) / (float)starts.size()});
+                    params.on_progress({"encoding", (int)(i+1), (int)tiles.size(),
+                                        0.02f + 0.08f * (float)(i+1) / (float)tiles.size()});
             }
             free_encode_graph(eg);
         }
@@ -924,11 +940,6 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         ggml_cgraph* graph = nullptr;
         ggml_gallocr_t alloc = nullptr;
     };
-    auto set_pos = [&](ggml_tensor* p, int n){
-        std::vector<int32_t> b(n);
-        for (int i = 0; i < n; i++) b[i] = i;
-        ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t));
-    };
     auto build_decode_graph = [&](int run_T) {
         DecodeGraph dg;
         dg.T = run_T;
@@ -970,9 +981,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     auto run_decode_graph = [&](DecodeGraph& dg, const float* z_src, std::vector<float>& out) {
         double ts = wall_time_s();
         ggml_backend_tensor_set(dg.z, z_src, 0, (size_t)sc.latent*dg.T*sizeof(float));
-        set_pos(dg.pos, dg.Ndec);
+        set_positions(dg.pos, dg.Ndec);
         set_swa_bias(dg.mask, sc, dg.Ndec);
-        if (sc.chunk) set_pos(dg.pos2, dg.N2);
+        if (sc.chunk) set_positions(dg.pos2, dg.N2);
         dec_upload += wall_time_s() - ts;
         ts = wall_time_s();
         ggml_backend_graph_compute(AE.backend, dg.graph);
@@ -996,35 +1007,26 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         run_decode_graph(dg, host_x.data(), ab);
         free_decode_graph(dg);
     } else {
-        const int hop = decode_chunk_size - decode_overlap;
-        std::vector<int> starts;
-        for (int s = 0; s <= T - decode_chunk_size; s += hop) starts.push_back(s);
-        const int final_start = T - decode_chunk_size;
-        if (starts.empty() || starts.back() != final_start) starts.push_back(final_start);
+        const std::vector<ChunkTile> tiles = plan_chunks(T, decode_chunk_size, decode_overlap);
         fprintf(stderr, "[sa3] chunked SAME-L decode: %zu chunks, size=%d overlap=%d\n",
-                starts.size(), decode_chunk_size, decode_overlap);
+                tiles.size(), decode_chunk_size, decode_overlap);
         DecodeGraph dg = build_decode_graph(decode_chunk_size);
         std::vector<float> zchunk((size_t)sc.latent * decode_chunk_size);
         std::vector<float> chunk_audio;
         const int chunk_samples = decode_chunk_size * ds;
-        const int half_overlap_samples = (decode_overlap / 2) * ds;
-        for (size_t i = 0; i < starts.size(); i++) {
-            const int st = starts[i];
+        for (size_t i = 0; i < tiles.size(); i++) {
+            const ChunkTile& tl = tiles[i];   // decode stitches in samples: scale the plan by ds
             for (int t = 0; t < decode_chunk_size; t++)
-                memcpy(&zchunk[(size_t)t*sc.latent], &host_x[(size_t)(st + t)*sc.latent], sc.latent*sizeof(float));
+                memcpy(&zchunk[(size_t)t*sc.latent], &host_x[(size_t)(tl.src + t)*sc.latent], sc.latent*sizeof(float));
             run_decode_graph(dg, zchunk.data(), chunk_audio);
             if (params.on_progress)
-                params.on_progress({"decoding", (int)(i+1), (int)starts.size(),
-                                    0.9f + 0.1f * (float)(i+1) / (float)starts.size()});
-            const bool first = i == 0, last = i + 1 == starts.size();
-            const int out_start = last ? n_samp - chunk_samples : st * ds;
-            const int left = first ? 0 : half_overlap_samples;
-            const int right = last ? chunk_samples : chunk_samples - half_overlap_samples;
-            const int target_start = out_start + left;
-            const int copy_count = right - left;
+                params.on_progress({"decoding", (int)(i+1), (int)tiles.size(),
+                                    0.9f + 0.1f * (float)(i+1) / (float)tiles.size()});
+            const int target_start = (tl.out + tl.left) * ds;
+            const int copy_count = (tl.right - tl.left) * ds;
             for (int c = 0; c < n_ch; c++)
                 memcpy(&ab[(size_t)c*n_samp + target_start],
-                       &chunk_audio[(size_t)c*chunk_samples + left],
+                       &chunk_audio[(size_t)c*chunk_samples + tl.left * ds],
                        (size_t)copy_count*sizeof(float));
         }
         free_decode_graph(dg);
