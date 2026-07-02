@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "_note": "Generic dice pool used when no LoRA is selected. Do not put bpm or key/scale here; hosts can append those to generated prompts. Keep entries short because SA3 prompt conditioning is token-capped.",
+  "dice": {
+    "generic": [
+      "warm analog synthwave with a hypnotic arpeggio",
+      "dusty boom-bap beat with a soulful sample chop",
+      "cinematic post-rock build with shimmering guitars",
+      "deep dub techno with cavernous reverb and tape hiss",
+      "lush neo-soul groove with electric piano and warm bass",
+      "glitchy IDM with intricate broken percussion",
+      "moody trip-hop with vinyl crackle and muted trumpet",
+      "driving krautrock motorik groove, repetitive and entrancing",
+      "spacious ambient drone with slow evolving pads",
+      "gritty garage rock riff with raw overdriven guitar",
+      "liquid drum and bass with rolling subs and airy pads",
+      "psychedelic desert rock with fuzzed-out guitars",
+      "minimal lo-fi house with a swung shaker and soft chords",
+      "orchestral hybrid trailer with pulsing brass and taiko",
+      "jazzy fusion with syncopated Rhodes and slap bass"
+    ],
+    "instrumental": [
+      "fingerpicked acoustic guitar with intimate room tone",
+      "intricate math-rock with clean tapped guitar lines",
+      "lo-fi hip hop instrumental with mellow keys and sub bass",
+      "cinematic piano with sustained strings underneath",
+      "surf rock with reverb-drenched twangy guitar",
+      "post-rock crescendo from clean arpeggios to wall of guitars",
+      "warm Rhodes neo-soul instrumental with brushed drums",
+      "glassy ambient guitar with volume swells and delay",
+      "funky clavinet groove with tight pocket drums",
+      "chiptune-flavored lo-fi with crunchy 8-bit textures",
+      "breakbeat instrumental with chopped amen and deep bass",
+      "spacey psytrance with a rolling hypnotic bassline"
+    ],
+    "drums": [
+      "punchy boom-bap drum break, slightly swung",
+      "tight funk drum loop with ghost notes and crisp hats",
+      "lo-fi dusty drum loop with vinyl crackle",
+      "breakcore amen chop, frantic and glitchy",
+      "deep house drum groove with shaker and rim",
+      "live-feel jazz brushes on a slow groove",
+      "hard-hitting trap hats and 808-style kick pattern",
+      "tribal percussion ensemble, organic and driving"
+    ]
+  }
+}

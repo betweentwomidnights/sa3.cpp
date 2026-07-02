@@ -31,6 +31,7 @@
 #include "same_ae.h"
 #include "lora.h"
 #include "rng.h"
+#include "audio_post.h"
 
 #include <algorithm>
 #include <chrono>
@@ -206,6 +207,36 @@ inline void set_swa_bias(ggml_tensor* mt, const SameConfig& sc, int64_t N) {
     }
 }
 
+// Fill a position tensor with [0,1,...,n-1] (shared by chunked encode + decode).
+inline void set_positions(ggml_tensor* p, int n) {
+    std::vector<int32_t> b(n);
+    for (int i = 0; i < n; i++) b[i] = i;
+    ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t));
+}
+
+// One tile of a chunked encode/decode plan, in the chunk's native frame unit: read `size`
+// frames of source at `src`; the chunk output's valid window is [left,right), copied to the
+// destination anchored at `out`. A sample-space caller scales these by its own stride.
+struct ChunkTile { int src, out, left, right; };
+
+// Chunk stitching plan mirroring stable_audio_3 autoencoder encode_audio/decode_audio: starts
+// spaced by hop=size-overlap, a final end-anchored chunk, inner edges dropping half the overlap.
+// Shared by encode + decode so the index math cannot drift between them.
+inline std::vector<ChunkTile> plan_chunks(int total, int size, int overlap) {
+    const int hop = size - overlap, half = overlap / 2;
+    std::vector<int> starts;
+    for (int s = 0; s <= total - size; s += hop) starts.push_back(s);
+    const int final_start = total - size;
+    if (starts.empty() || starts.back() != final_start) starts.push_back(final_start);
+    std::vector<ChunkTile> tiles; tiles.reserve(starts.size());
+    for (size_t i = 0; i < starts.size(); i++) {
+        const bool first = i == 0, last = i + 1 == starts.size();
+        tiles.push_back({ starts[i], last ? total - size : starts[i],
+                          first ? 0 : half, last ? size : size - half });
+    }
+    return tiles;
+}
+
 // Find the one file in `dir` whose name starts with `prefix` and ends with `suffix`. "" if none;
 // returns "" + sets ambiguous=true if >1 match. Resolves --model / --lora by the naming convention.
 inline std::string resolve_one(const std::string& dir, const std::string& prefix,
@@ -262,9 +293,10 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
 
 // Progress tick passed to GenParams::on_progress. `fraction` is a ready-to-use overall [0,1] (UIs do
 // fraction*100) so a consumer needs no knowledge of the internal stages; step/total/stage give detail.
-// Curve mirrors gary's poll_status: sampling spans 0..0.9, decode 0.9..1.0, then a final "done" at 1.0.
+// Curve mirrors gary's poll_status: init encoding spans 0..0.1 when present, sampling spans up to
+// 0.9, decode 0.9..1.0, then a final "done" at 1.0.
 struct Progress {
-    const char* stage;   // "sampling" | "decoding" | "done"
+    const char* stage;   // "encoding" | "sampling" | "decoding" | "done"
     int   step;          // completed units in this stage
     int   total;         // total units in this stage
     float fraction;      // overall progress in [0,1]
@@ -277,10 +309,12 @@ struct GenParams {
     int      steps  = 8;
     uint64_t seed   = 0;
 
-    // audio2audio / inpaint (optional). init_audio is planar [init_n_samp, init_n_ch] @ 44.1 kHz;
-    // empty => text2music. Length-derivation (T from the source, padding) happens inside generate().
+    // audio2audio / inpaint (optional). init_audio is planar [init_n_samp, init_n_ch] at any rate —
+    // generate() resamples to the model's 44.1 kHz if init_sample_rate differs (the caller just passes
+    // the source rate; cf. the official preprocess_audio). empty => text2music.
     std::vector<float> init_audio;
     int   init_n_samp = 0, init_n_ch = 0;
+    int   init_sample_rate = 44100;    // source rate of init_audio; != 44100 => resampled in generate()
     float init_noise_level = 0.85f;    // sigma_max for a2a (1.0 == text2music)
     float inpaint_start = -1.0f;       // inpaint region in seconds; needs init_audio + a local-cond DiT
     float inpaint_end   = -1.0f;       // also the TOTAL output duration (a short clip can extend)
@@ -304,6 +338,7 @@ struct GenParams {
     // Matches the official SA3 default (6.0). 0 lets the model "end" the piece (silence/fade tail);
     // >0 leaves room so the kept region has no ending — the basis for continuation / loop generation.
     float duration_padding_sec = 6.0f;
+    int target_n_samp = 0;          // optional exact final sample count; 0 = frames*4096
 
     // Classifier-free guidance (matches dit.py:479-619). cfg_scale==1.0 => a single conditioned pass
     // (no CFG, byte-identical to before). Otherwise each step also runs an UNconditioned pass (negative
@@ -316,9 +351,15 @@ struct GenParams {
     float apg_scale        = 1.0f;    // 1.0 = full APG (orthogonal), 0.0 = vanilla CFG, else blend
     float cfg_norm_threshold = 0.0f;  // >0 clamps the guidance-delta L2 norm
 
-    // Long-audio decode tiling; 0 = monolithic (the sliding-window decoder is already linear).
+    // Long-audio SAME autoencoder tiling; 0 = monolithic (the sliding-window AE is already linear).
+    int encode_chunk_size = 0;
+    int encode_overlap    = 32;
     int decode_chunk_size = 0;
     int decode_overlap    = 32;
+
+    // Output safety / optional latent experiments. Defaults mirror gary4local: leave latents alone,
+    // normalize decoded audio to +2 dB peak, then catch hot LoRAs with a gentle -0.3 dB limiter.
+    LoudnessParams loudness;
 
     // Residency for THIS request (see the header banner). Default true = resident (keep models loaded
     // for the next request — the right default when a server/lib is reused). Set false for frugal
@@ -336,6 +377,7 @@ struct GenResult {
     int n_samp = 0;
     int n_ch = 2;
     int sample_rate = 44100;
+    LoudnessMeta loudness;
 };
 
 // Holds the loaded models for the life of the process. Move-only (owns the backend + buffers).
@@ -441,6 +483,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     const bool keep_models = params.keep_models;
     const float init_noise_level = params.init_noise_level;
     const float inpaint_start = params.inpaint_start, inpaint_end = params.inpaint_end;
+    const int encode_chunk_size = params.encode_chunk_size, encode_overlap = params.encode_overlap;
     const int decode_chunk_size = params.decode_chunk_size, decode_overlap = params.decode_overlap;
     const std::string& dist_shift = params.dist_shift;
     const float ds_p1 = params.ds_p1, ds_p2 = params.ds_p2, ds_p3 = params.ds_p3, ds_p4 = params.ds_p4;
@@ -452,6 +495,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     const bool do_cfg = (cfg_scale != 1.0f);
     const bool inpaint = (inpaint_start >= 0.0f || inpaint_end >= 0.0f);
     const bool has_init = !params.init_audio.empty();
+    if (encode_chunk_size < 0 || encode_overlap < 0 ||
+        (encode_chunk_size > 0 && encode_overlap >= encode_chunk_size))
+        throw std::runtime_error("invalid encode_chunk_size/encode_overlap");
+    if (decode_chunk_size < 0 || decode_overlap < 0 ||
+        (decode_chunk_size > 0 && decode_overlap >= decode_chunk_size))
+        throw std::runtime_error("invalid decode_chunk_size/decode_overlap");
 
     int same_l_flash_mode = sc.chunk ? 0 : nn::same_flash_attn_mode();
     if (same_l_flash_mode == 2) {
@@ -489,8 +538,18 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // ---------- init audio: pad + derive output T (overrides params.frames) ----------
     std::vector<float> init_audio; int init_L = 0;
     if (has_init) {
-        const int n_samp = params.init_n_samp, n_ch = params.init_n_ch;
-        const std::vector<float>& raw = params.init_audio;
+        int n_samp = params.init_n_samp; const int n_ch = params.init_n_ch;
+        // resample the init source to the model rate (44.1 kHz) if the caller passed another rate.
+        std::vector<float> resampled;
+        const std::vector<float>* rawp = &params.init_audio;
+        if (params.init_sample_rate > 0 && params.init_sample_rate != 44100) {
+            int out_ns = 0;
+            resampled = sa3::resample_planar_linear(params.init_audio, n_samp, n_ch,
+                                                    params.init_sample_rate, 44100, out_ns);
+            printf("init: resampled %d Hz -> 44100 Hz (%d -> %d samples)\n", params.init_sample_rate, n_samp, out_ns);
+            n_samp = out_ns; rawp = &resampled;
+        }
+        const std::vector<float>& raw = *rawp;
         if (n_ch != sc.out_channels / sc.patch_size)
             throw std::runtime_error("init audio must be " + std::to_string(sc.out_channels / sc.patch_size) + "-channel");
         int want = n_samp;
@@ -649,36 +708,103 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     std::vector<float> z_init;
     if (has_init) {
         z_init.resize(N);
-        const int Nenc  = T * sc.sub_chunk;
-        const int Nenc2 = sc.chunk ? Nenc + 2*sc.shift : 0;
-        ggml_init_params encp = { (size_t)512*1024*1024, nullptr, true };
-        ggml_context* enctx = ggml_init(encp);
-        ggml_tensor* a_in   = ggml_new_tensor_2d(enctx, GGML_TYPE_F32, init_L, sc.out_channels / sc.patch_size);
-        ggml_tensor* pos_a  = ggml_new_tensor_1d(enctx, GGML_TYPE_I32, Nenc);
-        ggml_tensor* mask_a = sc.chunk ? ggml_new_tensor_2d(enctx, GGML_TYPE_F32, Nenc, Nenc)
-                            : same_l_flash_mode == 1 ? ggml_new_tensor_4d(enctx, GGML_TYPE_F16, Nenc, Nenc, 1, 1)
-                            : same_l_flash_mode == 2 ? ggml_new_tensor_3d(enctx, GGML_TYPE_F16, 3*sc.sub_chunk, sc.sub_chunk, Nenc/sc.sub_chunk)
-                                                     : ggml_new_tensor_3d(enctx, GGML_TYPE_F32, 3*sc.sub_chunk, sc.sub_chunk, Nenc/sc.sub_chunk);
-        ggml_set_input(a_in); ggml_set_input(pos_a); ggml_set_input(mask_a);
-        ggml_tensor *pos_a2 = nullptr, *mask_a2 = nullptr;
-        if (sc.chunk) {
-            pos_a2  = ggml_new_tensor_1d(enctx, GGML_TYPE_I32, Nenc2);
-            mask_a2 = ggml_new_tensor_2d(enctx, GGML_TYPE_F32, Nenc2, Nenc2);
-            ggml_set_input(pos_a2); ggml_set_input(mask_a2);
+        struct EncodeGraph {
+            ggml_context* ctx = nullptr;
+            ggml_cgraph* graph = nullptr;
+            ggml_gallocr_t alloc = nullptr;
+            ggml_tensor* audio = nullptr;
+            ggml_tensor* pos = nullptr;
+            ggml_tensor* mask = nullptr;
+            ggml_tensor* pos2 = nullptr;
+            ggml_tensor* mask2 = nullptr;
+            ggml_tensor* z = nullptr;
+            int T = 0, n_samp = 0, n_ch = 0, Nenc = 0, N2 = 0;
+        };
+        auto build_encode_graph = [&](int run_T) {
+            EncodeGraph eg;
+            eg.T = run_T;
+            eg.n_samp = run_T * ds;
+            eg.n_ch = sc.out_channels / sc.patch_size;
+            eg.Nenc = run_T * sc.sub_chunk;
+            eg.N2 = sc.chunk ? eg.Nenc + 2*sc.shift : 0;
+            ggml_init_params encp = { (size_t)512*1024*1024, nullptr, true };
+            eg.ctx = ggml_init(encp);
+            eg.audio = ggml_new_tensor_2d(eg.ctx, GGML_TYPE_F32, eg.n_samp, eg.n_ch);
+            eg.pos = ggml_new_tensor_1d(eg.ctx, GGML_TYPE_I32, eg.Nenc);
+            eg.mask = sc.chunk ? ggml_new_tensor_2d(eg.ctx, GGML_TYPE_F32, eg.Nenc, eg.Nenc)
+                    : same_l_flash_mode == 1 ? ggml_new_tensor_4d(eg.ctx, GGML_TYPE_F16, eg.Nenc, eg.Nenc, 1, 1)
+                    : same_l_flash_mode == 2 ? ggml_new_tensor_3d(eg.ctx, GGML_TYPE_F16, 3*sc.sub_chunk, sc.sub_chunk, eg.Nenc/sc.sub_chunk)
+                                             : ggml_new_tensor_3d(eg.ctx, GGML_TYPE_F32, 3*sc.sub_chunk, sc.sub_chunk, eg.Nenc/sc.sub_chunk);
+            ggml_set_input(eg.audio); ggml_set_input(eg.pos); ggml_set_input(eg.mask);
+            if (sc.chunk) {
+                eg.pos2 = ggml_new_tensor_1d(eg.ctx, GGML_TYPE_I32, eg.N2);
+                eg.mask2 = ggml_new_tensor_2d(eg.ctx, GGML_TYPE_F32, eg.N2, eg.N2);
+                ggml_set_input(eg.pos2); ggml_set_input(eg.mask2);
+            }
+            eg.z = ggml_cont(eg.ctx, sa3::same_encode(eg.ctx, AE, eg.audio, sc, run_T, eg.pos, eg.mask, eg.pos2, eg.mask2).z);
+            ggml_set_output(eg.z);
+            eg.graph = ggml_new_graph_custom(eg.ctx, 32768, false);
+            ggml_build_forward_expand(eg.graph, eg.z);
+            eg.alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(AE.backend));
+            ggml_gallocr_alloc_graph(eg.alloc, eg.graph);
+            return eg;
+        };
+        auto free_encode_graph = [&](EncodeGraph& eg) {
+            if (eg.alloc) ggml_gallocr_free(eg.alloc);
+            if (eg.ctx) ggml_free(eg.ctx);
+            eg = EncodeGraph{};
+        };
+        auto run_encode_graph = [&](EncodeGraph& eg, const float* audio_src, std::vector<float>& out) {
+            ggml_backend_tensor_set(eg.audio, audio_src, 0, (size_t)eg.n_samp*eg.n_ch*sizeof(float));
+            set_positions(eg.pos, eg.Nenc);
+            set_swa_bias(eg.mask, sc, eg.Nenc);
+            if (sc.chunk) set_positions(eg.pos2, eg.N2);
+            ggml_backend_graph_compute(AE.backend, eg.graph);
+            out.resize((size_t)sc.latent * eg.T);
+            ggml_backend_tensor_get(eg.z, out.data(), 0, out.size()*sizeof(float));
+        };
+
+        const bool can_chunk_encode = encode_chunk_size > 0 && !sc.chunk && T >= encode_chunk_size;
+        if (encode_chunk_size > 0 && sc.chunk)
+            fprintf(stderr, "warning: outer chunked encode is only enabled for SAME-L; using monolithic SAME-S encode\n");
+
+        if (params.on_progress) params.on_progress({"encoding", 0, can_chunk_encode ? 1 : 1, 0.02f});
+        if (!can_chunk_encode) {
+            EncodeGraph eg = build_encode_graph(T);
+            run_encode_graph(eg, init_audio.data(), z_init);
+            free_encode_graph(eg);
+            if (params.on_progress) params.on_progress({"encoding", 1, 1, 0.1f});
+        } else {
+            // Mirrors stable_audio_3.models.autoencoders encode_audio/decode_audio chunk stitching:
+            // final chunk is anchored to the end; inner chunk edges drop half the overlap.
+            const std::vector<ChunkTile> tiles = plan_chunks(T, encode_chunk_size, encode_overlap);
+            fprintf(stderr, "[sa3] chunked SAME-L encode: %zu chunks, size=%d overlap=%d\n",
+                    tiles.size(), encode_chunk_size, encode_overlap);
+
+            EncodeGraph eg = build_encode_graph(encode_chunk_size);
+            std::vector<float> audio_chunk((size_t)eg.n_samp * eg.n_ch);
+            std::vector<float> zchunk;
+            for (size_t i = 0; i < tiles.size(); i++) {
+                const ChunkTile& tl = tiles[i];   // encode is native latent-frame: no stride scaling
+                const int sample_st = tl.src * ds;
+                for (int c = 0; c < eg.n_ch; c++)
+                    memcpy(&audio_chunk[(size_t)c*eg.n_samp],
+                           &init_audio[(size_t)c*init_L + sample_st],
+                           (size_t)eg.n_samp*sizeof(float));
+                run_encode_graph(eg, audio_chunk.data(), zchunk);
+
+                const int target_start = tl.out + tl.left;
+                const int copy_count = tl.right - tl.left;
+                for (int t = 0; t < copy_count; t++)
+                    memcpy(&z_init[(size_t)(target_start + t)*sc.latent],
+                           &zchunk[(size_t)(tl.left + t)*sc.latent],
+                           (size_t)sc.latent*sizeof(float));
+                if (params.on_progress)
+                    params.on_progress({"encoding", (int)(i+1), (int)tiles.size(),
+                                        0.02f + 0.08f * (float)(i+1) / (float)tiles.size()});
+            }
+            free_encode_graph(eg);
         }
-        ggml_tensor* zt = ggml_cont(enctx, sa3::same_encode(enctx, AE, a_in, sc, T, pos_a, mask_a, pos_a2, mask_a2).z);
-        ggml_set_output(zt);
-        ggml_cgraph* gf_enc = ggml_new_graph_custom(enctx, 32768, false);
-        ggml_build_forward_expand(gf_enc, zt);
-        ggml_gallocr_t alloc_enc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(AE.backend));
-        ggml_gallocr_alloc_graph(alloc_enc, gf_enc);
-        ggml_backend_tensor_set(a_in, init_audio.data(), 0, init_audio.size()*sizeof(float));
-        auto set_pos  = [&](ggml_tensor* p, int n){ std::vector<int32_t> b(n); for (int i=0;i<n;i++) b[i]=i; ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t)); };
-        set_pos(pos_a, Nenc); set_swa_bias(mask_a, sc, Nenc);
-        if (sc.chunk) set_pos(pos_a2, Nenc2);
-        ggml_backend_graph_compute(AE.backend, gf_enc);
-        ggml_backend_tensor_get(zt, z_init.data(), 0, N*sizeof(float));
-        ggml_gallocr_free(alloc_enc); ggml_free(enctx);
     }
 
     // ---------- noise (audio2audio: noise = init*(1-sigma_max) + noise*sigma_max) ----------
@@ -795,6 +921,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     ggml_gallocr_free(alloc_dit); ggml_free(dctx);
     if (!keep_models) { DIT.free(); dit_loras_.clear(); }   // DiT gone -> next gen reloads a clean base
 
+    LoudnessMeta loudness_meta = make_loudness_meta(params.loudness);
+    apply_latent_loudness(host_x, params.loudness, loudness_meta);
+
     // ---------- decode -> samples ----------
     const double t_dec_total = wall_time_s();
     double dec_build = 0.0, dec_alloc = 0.0, dec_upload = 0.0, dec_compute = 0.0, dec_download = 0.0;
@@ -810,11 +939,6 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         ggml_tensor* audio = nullptr;
         ggml_cgraph* graph = nullptr;
         ggml_gallocr_t alloc = nullptr;
-    };
-    auto set_pos = [&](ggml_tensor* p, int n){
-        std::vector<int32_t> b(n);
-        for (int i = 0; i < n; i++) b[i] = i;
-        ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t));
     };
     auto build_decode_graph = [&](int run_T) {
         DecodeGraph dg;
@@ -857,9 +981,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     auto run_decode_graph = [&](DecodeGraph& dg, const float* z_src, std::vector<float>& out) {
         double ts = wall_time_s();
         ggml_backend_tensor_set(dg.z, z_src, 0, (size_t)sc.latent*dg.T*sizeof(float));
-        set_pos(dg.pos, dg.Ndec);
+        set_positions(dg.pos, dg.Ndec);
         set_swa_bias(dg.mask, sc, dg.Ndec);
-        if (sc.chunk) set_pos(dg.pos2, dg.N2);
+        if (sc.chunk) set_positions(dg.pos2, dg.N2);
         dec_upload += wall_time_s() - ts;
         ts = wall_time_s();
         ggml_backend_graph_compute(AE.backend, dg.graph);
@@ -883,48 +1007,27 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         run_decode_graph(dg, host_x.data(), ab);
         free_decode_graph(dg);
     } else {
-        const int hop = decode_chunk_size - decode_overlap;
-        std::vector<int> starts;
-        for (int s = 0; s <= T - decode_chunk_size; s += hop) starts.push_back(s);
-        const int final_start = T - decode_chunk_size;
-        if (starts.empty() || starts.back() != final_start) starts.push_back(final_start);
+        const std::vector<ChunkTile> tiles = plan_chunks(T, decode_chunk_size, decode_overlap);
         fprintf(stderr, "[sa3] chunked SAME-L decode: %zu chunks, size=%d overlap=%d\n",
-                starts.size(), decode_chunk_size, decode_overlap);
+                tiles.size(), decode_chunk_size, decode_overlap);
         DecodeGraph dg = build_decode_graph(decode_chunk_size);
         std::vector<float> zchunk((size_t)sc.latent * decode_chunk_size);
         std::vector<float> chunk_audio;
         const int chunk_samples = decode_chunk_size * ds;
-        const int half_overlap_samples = (decode_overlap / 2) * ds;
-        int cursor = 0;
-        for (size_t i = 0; i < starts.size(); i++) {
-            const int st = starts[i];
+        for (size_t i = 0; i < tiles.size(); i++) {
+            const ChunkTile& tl = tiles[i];   // decode stitches in samples: scale the plan by ds
             for (int t = 0; t < decode_chunk_size; t++)
-                memcpy(&zchunk[(size_t)t*sc.latent], &host_x[(size_t)(st + t)*sc.latent], sc.latent*sizeof(float));
+                memcpy(&zchunk[(size_t)t*sc.latent], &host_x[(size_t)(tl.src + t)*sc.latent], sc.latent*sizeof(float));
             run_decode_graph(dg, zchunk.data(), chunk_audio);
             if (params.on_progress)
-                params.on_progress({"decoding", (int)(i+1), (int)starts.size(),
-                                    0.9f + 0.1f * (float)(i+1) / (float)starts.size()});
-            const bool first = i == 0, last = i + 1 == starts.size();
-            const int out_start = last ? n_samp - chunk_samples : st * ds;
-            const int left = first ? 0 : half_overlap_samples;
-            const int right = last ? chunk_samples : chunk_samples - half_overlap_samples;
-            const int target_start = out_start + left;
-            int target_end = out_start + right;
-            const int next_start = !last
-                ? ((i + 2 == starts.size() ? n_samp - chunk_samples : starts[i + 1] * ds)
-                   + half_overlap_samples)
-                : target_end;
-            target_end = std::min(target_end, next_start);
-            const int clipped_start = std::max(target_start, cursor);
-            if (target_end > clipped_start) {
-                const int copy_left = left + (clipped_start - target_start);
-                const int copy_count = target_end - clipped_start;
-                for (int c = 0; c < n_ch; c++)
-                    memcpy(&ab[(size_t)c*n_samp + clipped_start],
-                           &chunk_audio[(size_t)c*chunk_samples + copy_left],
-                           (size_t)copy_count*sizeof(float));
-                cursor = target_end;
-            }
+                params.on_progress({"decoding", (int)(i+1), (int)tiles.size(),
+                                    0.9f + 0.1f * (float)(i+1) / (float)tiles.size()});
+            const int target_start = (tl.out + tl.left) * ds;
+            const int copy_count = (tl.right - tl.left) * ds;
+            for (int c = 0; c < n_ch; c++)
+                memcpy(&ab[(size_t)c*n_samp + target_start],
+                       &chunk_audio[(size_t)c*chunk_samples + tl.left * ds],
+                       (size_t)copy_count*sizeof(float));
         }
         free_decode_graph(dg);
     }
@@ -938,21 +1041,25 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (!keep_models) { AE.free(); nets_resident_ = false; }   // frugal: free everything -> reload next call
 
     // truncate the padded canvas back to the requested length (planar -> compact each channel)
-    const int out_n_samp = eff_frames * sc.patch_size * sc.output_seg;
-    if (out_n_samp < n_samp) {
-        std::vector<float> tr((size_t)out_n_samp * n_ch);
+    int out_n_samp = eff_frames * sc.patch_size * sc.output_seg;
+    if (params.target_n_samp > 0) out_n_samp = params.target_n_samp;
+    if (out_n_samp != n_samp) {
+        std::vector<float> tr((size_t)out_n_samp * n_ch, 0.0f);
+        const int copy_n = std::min(out_n_samp, n_samp);
         for (int c = 0; c < n_ch; c++)
-            memcpy(&tr[(size_t)c*out_n_samp], &ab[(size_t)c*n_samp], (size_t)out_n_samp*sizeof(float));
+            memcpy(&tr[(size_t)c*out_n_samp], &ab[(size_t)c*n_samp], (size_t)copy_n*sizeof(float));
         ab = std::move(tr);
     }
+    apply_audio_loudness(ab, params.loudness, loudness_meta);
 
     if (params.on_progress) params.on_progress({"done", steps, steps, 1.0f});
 
     GenResult r;
     r.samples = std::move(ab);
-    r.n_samp = out_n_samp < n_samp ? out_n_samp : n_samp;
+    r.n_samp = out_n_samp;
     r.n_ch = n_ch;
     r.sample_rate = 44100;
+    r.loudness = loudness_meta;
     return r;
 }
 

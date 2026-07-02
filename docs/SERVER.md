@@ -10,9 +10,17 @@ for progress and, on completion, the base64 audio. That makes it a drop-in for a
 ## Run
 
 ```bash
-./build/bin/Release/sa3-server.exe --model medium --encoding f16 --port 8086
-# args: --host (default 127.0.0.1) --port (8086) --model <variant> --encoding f16|f32
+./build/bin/Release/sa3-server.exe --model medium --encoding f16 --port 8006
+# args: --host (default 127.0.0.1) --port (8006) --model <variant> --encoding f16|f32
 #       --models-dir DIR (or SA3_MODELS_DIR) --adapters-dir DIR (or SA3_ADAPTERS_DIR)
+#       --prompts-dir DIR (or SA3_PROMPTS_DIR)
+#       --source-loras-dir DIR (or SA3_SOURCE_LORAS_DIR)
+```
+
+On Windows, after `.\build.cmd cuda`, this keeps the server in the terminal you can close or Ctrl+C:
+
+```powershell
+.\scripts\run-server.ps1
 ```
 
 It binds to `127.0.0.1` by default (local only). The model loads lazily on the first `/generate`.
@@ -21,20 +29,26 @@ It binds to `127.0.0.1` by default (local only). The model loads lazily on the f
 
 | method | path | body / result |
 |---|---|---|
+| `GET`  | `/loras`    | `{success, loras:[{index,name,path}], adapters_dir, model_loaded}` |
+| `GET`  | `/prompts`  | prompt dice pools, optionally blended with `?lora=name` or `?lora=a,b` |
 | `GET`  | `/health`   | `{status, model, encoding, loaded}` (lock-free — never blocks behind a gen) |
-| `POST` | `/generate` | JSON request (below) → **`{session_id, seed}`** immediately; generation runs in the background |
+| `POST` | `/generate` | JSON request (below) → **`{success, session_id, seed}`** immediately; generation runs in the background |
+| `POST` | `/generate/loop` | same request plus `bpm`/prompt BPM and `bars` for exact-length loop generation |
 | `GET`  | `/poll_status/<session_id>` | `{success, generation_in_progress, progress, step, total_steps, status, queue_status, ...}`; on `status:"completed"` also `audio_data` (base64 wav) + `meta:{seed}` |
 | `POST` | `/unload`   | frees the model (full VRAM release) → `{status:"unloaded"}` |
 
 `status` runs `queued → generating → encoding → completed` (or `failed`); `progress` is `0..100`
 (sampling `0→90`, decode `→100`). Poll until `status == "completed"`, then base64-decode `audio_data`.
-Finished jobs are pruned after 10 min.
+Finished jobs are pruned after 2 min. Clients can poll `/poll_status/<id>?consume=1` to return the
+completed audio once and immediately remove that job from server memory. Completed jobs include
+`meta.loudness` with the decoded peak, final peak, peak-normalize gain, and limiter fraction.
+`/health` also reports the current `loudness_defaults`.
 
 **`/generate` request:**
 ```json
 {
   "prompt": "breakcore 140bpm",
-  "seconds": 12,                 // or "frames": 128  (frames win if both given)
+  "duration": 12,
   "steps": 8,
   "seed": 0,
   "loras": [{"name": "kev", "strength": 1.0}, {"name": "keygen", "strength": 0.8}],
@@ -65,29 +79,128 @@ Finished jobs are pruned after 10 min.
   "init_path": "in.wav",         // audio2audio source; output length follows it
   "init_noise_level": 0.5,       // a2a strength (sigma_max); 1.0 == text2music
   "inpaint_start": 4.0,          // continuation/inpaint: regenerate [start,end] seconds, keep the rest
-  "inpaint_end": 30.0            // also the total output duration (a short clip can extend)
+  "inpaint_end": 30.0,           // also the total output duration (a short clip can extend)
+
+  // optional SAME-L autoencoder tiling for long DAW selections; 0 = monolithic
+  "encode_chunk_size": 128,
+  "encode_overlap": 32,
+  "decode_chunk_size": 128,
+  "decode_overlap": 32,
+
+  // loudness safety (optional). defaults mirror gary4local:
+  "peak_normalize_db": 2.0,       // null/off/false disables peak normalization
+  "limiter_ceiling_db": -0.3,     // null/off/false disables limiter; positive dB also disables
+  "limiter_knee": 0.8,
+
+  // latent experiments (optional; normally leave these alone):
+  "latent_rescale": 1.0,
+  "latent_shift": 0.0,
+  "latent_target_std": null,
+  "latent_adapt_min": 0.9,
+  "latent_adapt_max": 1.0
 }
 ```
+
+`prompt` may be an empty string for unprompted or LoRA-only generations.
+HTTP uses `duration` in seconds. `frames` remains a CLI/internal knob, and `seconds` is intentionally
+not accepted so this stays aligned with the Python service.
+
+`POST /generate/loop` accepts the same fields, plus optional `"bpm"` and `"bars"`. If `bpm` is omitted,
+the server tries to read it from the prompt, e.g. `"breakcore 170bpm"`. `bars` must be `4`, `8`, `16`,
+or `32`. The server generates a padded canvas (`SA3_LOOP_PAD_SECONDS`, default `2.0`) and trims the
+returned WAV to the exact loop length.
+
+`init_path` WAVs are decoded from common PCM/float formats and resampled to SA3's 44.1 kHz internal
+rate before audio2audio/inpaint processing. Chunked encode/decode is only used by SAME-L; SAME-S stays
+monolithic because its internal block structure is already chunked.
+
 LoRA `name` resolves to `<adapters-dir>/lora-<name>-*.gguf`; a full `"path"` also works. Set
 `keep_models: true` to keep the model resident between requests (lower latency, more VRAM); the server
 reloads a clean DiT only when a request's adapter set changes, so strengths can vary per request either way.
+
+## Loudness safety
+
+The server defaults to the same output safety chain used in gary4local: decoded audio is peak-normalized
+to `+2.0 dB`, then limited to `-0.3 dB` with a `0.8` knee. That keeps hot LoRA generations from clipping
+when the WAV writer converts to 16-bit PCM.
+
+These defaults can be changed in `.env` with `SA3_PEAK_NORMALIZE_DB`, `SA3_LIMITER_CEILING_DB`, and
+`SA3_LIMITER_KNEE`, or overridden per request with the JSON keys above. Set `SA3_PEAK_NORMALIZE_DB=off`
+or `"peak_normalize_db": null` to disable peak normalization; do the same for `limiter_ceiling_db` to
+disable the limiter. See [`LOUDNESS.md`](LOUDNESS.md) for the short rationale and latent-control notes.
+
+## LoRA and prompt discovery
+
+`GET /loras` scans the adapters directory and returns GGUF adapter names that can be passed back in a
+generation request. It also reports source `.ckpt` / `.safetensors` exports from `--source-loras-dir`
+under `source_loras`; those need conversion before the C++ runtime can load them.
+
+```json
+{
+  "success": true,
+  "loras": [{"index": 0, "name": "kev", "path": "models/lora-kev-f32.gguf"}]
+}
+```
+
+The resolver accepts:
+
+- full adapter paths
+- exact files in the adapters directory
+- `lora-<name>-*.gguf`
+- `<name>-*.gguf`
+
+Source adapters can be converted to runtime GGUF adapters with:
+
+```powershell
+.venv\Scripts\python.exe tools\convert_lora.py --in loras\kev --out models\lora-kev-f32.gguf
+.venv\Scripts\python.exe tools\convert_lora.py --in loras\keygen --out models\lora-keygen-f32.gguf
+```
+
+`GET /prompts` reads dice prompt pools from `--prompts-dir` / `SA3_PROMPTS_DIR`
+and returns the same shape used by gary4local:
+
+```json
+{
+  "success": true,
+  "missing_loras": [],
+  "prompts": {
+    "version": 1,
+    "dice": {
+      "generic": ["warm analog groove"]
+    }
+  }
+}
+```
+
+The default file is `prompts/defaults.json`. Per-adapter prompt files live beside it
+as `<lora>.json`, for example `prompts/kev.json`. A client can request an adapter's
+training-distribution prompts with:
+
+```text
+/prompts?lora=kev
+/prompts?lora=kev,keygen
+```
+
+When a LoRA-specific prompt file contains a bucket such as `generic` or `drums`,
+that bucket replaces the default bucket for the response. This lets adapter prompt
+pools stay narrow and distribution-faithful without losing unrelated buckets.
 
 ## Calling it (async flow)
 
 **PowerShell** — `curl` is an alias for `Invoke-WebRequest`, so use `Invoke-RestMethod`:
 ```powershell
-$body = '{"prompt":"breakcore 140bpm","seconds":12,"loras":[{"name":"kev","strength":1.0}]}'
-$sid = (Invoke-RestMethod http://localhost:8086/generate -Method Post -ContentType application/json -Body $body).session_id
-do { Start-Sleep 1; $p = Invoke-RestMethod "http://localhost:8086/poll_status/$sid"; $p.progress } while ($p.status -ne "completed")
+$body = '{"prompt":"breakcore 140bpm","duration":12,"loras":[{"name":"kev","strength":1.0}]}'
+$sid = (Invoke-RestMethod http://localhost:8006/generate -Method Post -ContentType application/json -Body $body).session_id
+do { Start-Sleep 1; $p = Invoke-RestMethod "http://localhost:8006/poll_status/$sid"; $p.progress } while ($p.status -ne "completed")
 [IO.File]::WriteAllBytes("song.wav", [Convert]::FromBase64String($p.audio_data))
 ```
 
 **Git Bash / cmd / macOS / Linux** — real `curl` (+ `jq`):
 ```bash
-sid=$(curl -s -X POST http://localhost:8086/generate -H "Content-Type: application/json" \
-  -d '{"prompt":"breakcore 140bpm","seconds":12}' | jq -r .session_id)
-until [ "$(curl -s localhost:8086/poll_status/$sid | jq -r .status)" = completed ]; do sleep 1; done
-curl -s localhost:8086/poll_status/$sid | jq -r .audio_data | base64 -d > song.wav
+sid=$(curl -s -X POST http://localhost:8006/generate -H "Content-Type: application/json" \
+  -d '{"prompt":"breakcore 140bpm","duration":12}' | jq -r .session_id)
+until [ "$(curl -s localhost:8006/poll_status/$sid | jq -r .status)" = completed ]; do sleep 1; done
+curl -s localhost:8006/poll_status/$sid | jq -r .audio_data | base64 -d > song.wav
 ```
 (To use `curl.exe` *from PowerShell*, pass the body from a file — `-d "@body.json"` — inline JSON quoting
 is mangled by PowerShell's native-argument handling.)

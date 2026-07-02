@@ -46,14 +46,13 @@ SA3_API sa3_context* sa3_init(const sa3_config* cfg, char* err, int err_len) {
 
 SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* out, char* err, int err_len) {
     if (!ctx || !req || !out) { set_err(err, err_len, "null argument"); return 1; }
-    if (!req->prompt || !*req->prompt) { set_err(err, err_len, "prompt required"); return 1; }
     try {
         if (!ctx->pipe) {   // reload after sa3_unload()
             ctx->pipe = std::make_unique<sa3::Pipeline>();
             ctx->pipe->load(ctx->paths);
         }
         sa3::GenParams p;
-        p.prompt = req->prompt;
+        p.prompt = req->prompt ? req->prompt : "";
         if (req->negative_prompt) p.negative_prompt = req->negative_prompt;
         p.frames = req->frames > 0 ? req->frames : 128;
         p.steps  = req->steps  > 0 ? req->steps  : 8;
@@ -61,6 +60,22 @@ SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* ou
         p.cfg_scale = req->cfg_scale != 0.0f ? req->cfg_scale : 1.0f;
         p.duration_padding_sec = req->duration_padding_sec >= 0.0f ? req->duration_padding_sec : 6.0f;
         p.keep_models = req->keep_models != 0;
+        if (req->loudness.set) {              // per-request loudness (incl. raw: peak_normalize=0, limiter=0)
+            sa3::LoudnessParams lp;
+            lp.peak_normalize_enabled = req->loudness.peak_normalize != 0;
+            lp.peak_normalize_db      = req->loudness.peak_normalize_db;
+            lp.limiter_enabled        = req->loudness.limiter != 0;
+            lp.limiter_ceiling_db     = req->loudness.limiter_ceiling_db;
+            lp.limiter_knee           = req->loudness.limiter_knee > 0.0f ? req->loudness.limiter_knee : lp.limiter_knee;
+            lp.latent_rescale         = req->loudness.latent_rescale > 0.0f ? req->loudness.latent_rescale : 1.0f;
+            lp.latent_shift           = req->loudness.latent_shift;
+            sa3::normalize_loudness_params(lp);
+            std::string lerr;
+            if (!sa3::validate_loudness_params(lp, lerr)) { set_err(err, err_len, "loudness: " + lerr); return 4; }
+            p.loudness = lp;
+        } else {
+            p.loudness = sa3::loudness_defaults_from_env();   // gary4local defaults + SA3_* env overrides
+        }
 
         for (int i = 0; i < req->n_loras; i++) {
             const std::string name = (req->lora_names && req->lora_names[i]) ? req->lora_names[i] : "";

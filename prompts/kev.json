@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "source": {
+    "lora": "kev",
+    "files": 38,
+    "unique_genres": 27
+  },
+  "dice": {
+    "instrumental": [
+      "Math rock",
+      "Lo-fi hip hop",
+      "Trap, Future Bass",
+      "funk-rock",
+      "electronic",
+      "Lo-fi hip-hop chiptune",
+      "Lo-fi ambient",
+      "neo-soul",
+      "Breakbeat",
+      "Surf rock",
+      "Post-rock",
+      "Glitch electronica",
+      "Neoclassical lo-fi hip hop",
+      "Acoustic",
+      "neo-soul lo-fi hip-hop",
+      "Indie rock",
+      "Math rock post-hardcore",
+      "Math rock, Progressive rock",
+      "Breakcore",
+      "Funky rock",
+      "ambient trap",
+      "psytrance",
+      "alternative rock",
+      "Instrumental electronic",
+      "Latin electronica",
+      "hip-hop",
+      "acoustic guitar"
+    ]
+  }
+}

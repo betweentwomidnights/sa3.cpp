@@ -43,10 +43,26 @@ typedef struct {
  * "sampling" | "decoding" | "done". Called on the sa3_generate() thread. */
 typedef void (*sa3_progress_cb)(void* user, const char* stage, int step, int total, float fraction);
 
+/* Loudness post-processing. Defaults mirror gary4local (peak-normalize +2 dB, limiter -0.3 dB) — see
+ * docs/LOUDNESS.md. Leave `set = 0` (the zero-initialized default) to use those defaults plus any
+ * SA3_* env overrides. Set `set = 1` to drive it per-request from the fields below, including RAW,
+ * unprocessed output (`peak_normalize = 0` and `limiter = 0`). A final true-peak safety always
+ * prevents >0 dBFS output regardless of these values. */
+typedef struct {
+    int   set;                  /* 0 = library defaults; 1 = use the fields below */
+    int   peak_normalize;       /* bool: normalize the decoded peak */
+    float peak_normalize_db;    /* target peak, dBFS (e.g. 2.0) */
+    int   limiter;              /* bool: soft-knee limiter after normalize */
+    float limiter_ceiling_db;   /* limiter ceiling, dBFS (e.g. -0.3) */
+    float limiter_knee;         /* knee fraction (0,1]; <=0 -> 0.8 */
+    float latent_rescale;       /* advanced: latents = latents*rescale + shift before decode; <=0 -> 1.0 */
+    float latent_shift;
+} sa3_loudness;
+
 /* One generation request. Zero-initialize it (memset 0), then set what you need — a 0/NULL field
  * means "use the default" shown below. */
 typedef struct {
-    const char* prompt;             /* required */
+    const char* prompt;             /* NULL/"" = unprompted */
     const char* negative_prompt;    /* NULL/"" = none (only affects output when cfg_scale != 1) */
     int      frames;                /* output latent frames; 0 -> 128 (~12 s; ~10.77 frames/s) */
     int      steps;                 /* 0 -> 8 */
@@ -54,6 +70,7 @@ typedef struct {
     float    cfg_scale;             /* 0 -> 1.0 (CFG off, single pass). >1 or <1 enables CFG (~2x/step) */
     float    duration_padding_sec;  /* < 0 -> 6.0 headroom (no ending); 0 lets the model end the piece */
     int      keep_models;           /* 1 = keep resident after this call (lower latency next time) */
+    sa3_loudness loudness;          /* loudness post-processing; set=0 -> gary4local defaults */
 
     /* LoRA adapters, parallel arrays of length n_loras. A name resolves to lora-<name>-*.gguf in the
      * adapters dir; a full path is used as-is. lora_strengths may be NULL (all 1.0). */

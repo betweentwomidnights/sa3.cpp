@@ -10,11 +10,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <climits>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace sa3 {
+
+inline std::runtime_error tokenizer_error(const std::string& message) {
+    return std::runtime_error("[tok] " + message);
+}
 
 struct Tokenizer {
     std::unordered_map<std::string, int> vocab;        // piece -> id
@@ -26,26 +32,26 @@ struct Tokenizer {
         Tokenizer t;
         ggml_context* mctx = nullptr;
         gguf_init_params gp = { /*no_alloc=*/true, /*ctx=*/&mctx };
-        gguf_context* g = gguf_init_from_file(path, gp);
-        if (!g) { fprintf(stderr, "[tok] failed to open %s\n", path); exit(1); }
+        gguf_context* g_raw = gguf_init_from_file(path, gp);
+        auto free_ctx = [](ggml_context* ctx) { if (ctx) ggml_free(ctx); };
+        std::unique_ptr<ggml_context, decltype(free_ctx)> ctx_guard(mctx, free_ctx);
+        if (!g_raw) throw tokenizer_error("failed to open " + std::string(path));
+        std::unique_ptr<gguf_context, decltype(&gguf_free)> g(g_raw, gguf_free);
 
-        int kt = gguf_find_key(g, "tok.tokens");
-        int km = gguf_find_key(g, "tok.merges");
-        if (kt < 0 || km < 0) { fprintf(stderr, "[tok] missing token/merge arrays\n"); exit(1); }
-        const size_t nt = gguf_get_arr_n(g, kt);
+        int kt = gguf_find_key(g.get(), "tok.tokens");
+        int km = gguf_find_key(g.get(), "tok.merges");
+        if (kt < 0 || km < 0) throw tokenizer_error("missing token/merge arrays");
+        const size_t nt = gguf_get_arr_n(g.get(), kt);
         t.vocab.reserve(nt * 2);
-        for (size_t i = 0; i < nt; i++) t.vocab.emplace(gguf_get_arr_str(g, kt, i), (int)i);
-        const size_t nm = gguf_get_arr_n(g, km);
+        for (size_t i = 0; i < nt; i++) t.vocab.emplace(gguf_get_arr_str(g.get(), kt, i), (int)i);
+        const size_t nm = gguf_get_arr_n(g.get(), km);
         t.merge_rank.reserve(nm * 2);
-        for (size_t i = 0; i < nm; i++) t.merge_rank.emplace(gguf_get_arr_str(g, km, i), (int)i);
+        for (size_t i = 0; i < nm; i++) t.merge_rank.emplace(gguf_get_arr_str(g.get(), km, i), (int)i);
 
-        auto u32 = [&](const char* k, int def){ int i = gguf_find_key(g, k); return i < 0 ? def : (int)gguf_get_val_u32(g, i); };
+        auto u32 = [&](const char* k, int def){ int i = gguf_find_key(g.get(), k); return i < 0 ? def : (int)gguf_get_val_u32(g.get(), i); };
         t.bos_id = u32("tok.bos_id", 2); t.eos_id = u32("tok.eos_id", 1);
         t.pad_id = u32("tok.pad_id", 0); t.unk_id = u32("tok.unk_id", 3);
-        { int i = gguf_find_key(g, "tok.add_bos"); if (i >= 0) t.add_bos = gguf_get_val_bool(g, i); }
-
-        gguf_free(g);
-        if (mctx) ggml_free(mctx);
+        { int i = gguf_find_key(g.get(), "tok.add_bos"); if (i >= 0) t.add_bos = gguf_get_val_bool(g.get(), i); }
         return t;
     }
 

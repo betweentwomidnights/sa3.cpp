@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "source": {
+    "lora": "keygen",
+    "note": "Prompt pool for chiptune / demoscene / keygen-style SA3 adapter tests."
+  },
+  "dice": {
+    "instrumental": [
+      "demoscene chiptune, fast arpeggios, tracker module energy",
+      "keygen music, crunchy square leads, tight chip drums",
+      "8-bit synthwave, bright arps, retro computer music",
+      "Amiga tracker music, melodic chip lead, driving bassline",
+      "video game title screen music, catchy loop, crunchy digital synths",
+      "chiptune breakbeat, rapid arpeggios, distorted low-bit drums",
+      "retro game music, pulse wave melody, energetic bass ostinato",
+      "demoscene intro music, FM synth bass, sparkling arpeggios",
+      "chipmusic trance, euphoric lead melody, fast sequenced notes",
+      "lo-fi chiptune hip hop, 8-bit lead, dusty drum groove",
+      "tracker-style electro, bitcrushed synths, punchy snare",
+      "arcade racing game music, upbeat chip melody, tight electronic drums"
+    ],
+    "drums": [
+      "crunchy chip drum loop, tight kick, noisy snare",
+      "tracker drum pattern, fast hats, lo-bit percussion",
+      "8-bit breakbeat drums, bitcrushed transients, energetic fills"
+    ]
+  }
+}

@@ -39,6 +39,8 @@ set them locally — see [`.env.example`](.env.example). precedence is **flag > 
 |---|---|---|---|
 | base ggufs | `SA3_MODELS_DIR` | `--models-dir` | `models/` |
 | adapters (`--lora <name>`) | `SA3_ADAPTERS_DIR` | `--adapters-dir` | = models dir |
+| source adapter exports | `SA3_SOURCE_LORAS_DIR` | `--source-loras-dir` | `loras/` |
+| prompt dice pools | `SA3_PROMPTS_DIR` | `--prompts-dir` | `prompts/` |
 | device / flash | `SA3_DEVICE` `SA3_GPU` `SA3_FLASH_ATTN` | — | auto |
 
 build needs cmake + a c++17 compiler (Visual Studio 2022 on windows). cuda needs the CUDA

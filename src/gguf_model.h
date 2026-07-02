@@ -12,11 +12,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <map>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sa3 {
+
+inline std::runtime_error gguf_error(const std::string& message) {
+    return std::runtime_error("[gguf] " + message);
+}
 
 // Pick the compute backend: a registered GPU device (CUDA when the CUDA backend is
 // linked) unless SA3_DEVICE=cpu forces CPU. In a CPU-only build the registry has no
@@ -92,24 +99,37 @@ struct GgufModel {
     std::map<std::string, ggml_tensor*> tensors;
     std::map<std::string, ggml_tensor*> overrides;   // LoRA-effective weights (see lora.h)
 
+    GgufModel() = default;
+    ~GgufModel() { free(); }
+    GgufModel(const GgufModel&) = delete;
+    GgufModel& operator=(const GgufModel&) = delete;
+    GgufModel(GgufModel&& other) noexcept { move_from(other); }
+    GgufModel& operator=(GgufModel&& other) noexcept {
+        if (this != &other) {
+            free();
+            move_from(other);
+        }
+        return *this;
+    }
+
     bool has(const std::string& n) const { return tensors.count(n) != 0; }
 
     ggml_tensor* get(const std::string& n) const {
         auto ov = overrides.find(n);                 // LoRA W_eff transparently shadows the base weight
         if (ov != overrides.end()) return ov->second;
         auto it = tensors.find(n);
-        if (it == tensors.end()) { fprintf(stderr, "[gguf] missing tensor: %s\n", n.c_str()); exit(1); }
+        if (it == tensors.end()) throw gguf_error("missing tensor: " + n);
         return it->second;
     }
 
     uint32_t u32(const char* k) const {
         int i = gguf_find_key(gguf, k);
-        if (i < 0) { fprintf(stderr, "[gguf] missing key: %s\n", k); exit(1); }
+        if (i < 0) throw gguf_error("missing key: " + std::string(k));
         return gguf_get_val_u32(gguf, i);
     }
     float f32(const char* k) const {
         int i = gguf_find_key(gguf, k);
-        if (i < 0) { fprintf(stderr, "[gguf] missing key: %s\n", k); exit(1); }
+        if (i < 0) throw gguf_error("missing key: " + std::string(k));
         return gguf_get_val_f32(gguf, i);
     }
     // read a single-element tensor's value to the host
@@ -127,6 +147,25 @@ struct GgufModel {
         buf = nullptr; gguf = nullptr; ctx = nullptr; backend = nullptr;
         tensors.clear(); overrides.clear(); owns_backend = true;
     }
+
+private:
+    void move_from(GgufModel& other) noexcept {
+        ctx = other.ctx;
+        gguf = other.gguf;
+        backend = other.backend;
+        owns_backend = other.owns_backend;
+        buf = other.buf;
+        tensors = std::move(other.tensors);
+        overrides = std::move(other.overrides);
+
+        other.ctx = nullptr;
+        other.gguf = nullptr;
+        other.backend = nullptr;
+        other.owns_backend = true;
+        other.buf = nullptr;
+        other.tensors.clear();
+        other.overrides.clear();
+    }
 };
 
 // Load a GGUF into the given backend (CPU if null). Reads tensor data straight
@@ -138,12 +177,12 @@ inline GgufModel load_gguf(const char* path, ggml_backend_t backend = nullptr) {
 
     gguf_init_params gp = { /*no_alloc=*/true, /*ctx=*/&m.ctx };
     m.gguf = gguf_init_from_file(path, gp);
-    if (!m.gguf) { fprintf(stderr, "[gguf] failed to open %s\n", path); exit(1); }
+    if (!m.gguf) throw gguf_error("failed to open " + std::string(path));
 
     m.buf = ggml_backend_alloc_ctx_tensors(m.ctx, m.backend);
 
-    FILE* f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "[gguf] cannot read %s\n", path); exit(1); }
+    std::unique_ptr<FILE, int(*)(FILE*)> f(fopen(path, "rb"), fclose);
+    if (!f) throw gguf_error("cannot read " + std::string(path));
     const size_t data_off = gguf_get_data_offset(m.gguf);
     std::vector<char> tmp;
     for (ggml_tensor* cur = ggml_get_first_tensor(m.ctx); cur; cur = ggml_get_next_tensor(m.ctx, cur)) {
@@ -153,15 +192,14 @@ inline GgufModel load_gguf(const char* path, ggml_backend_t backend = nullptr) {
         const size_t nb  = ggml_nbytes(cur);
         tmp.resize(nb);
 #ifdef _WIN32
-        _fseeki64(f, (long long)off, SEEK_SET);   // MSVC `long` is 32-bit; files exceed 2 GB
+        _fseeki64(f.get(), (long long)off, SEEK_SET);   // MSVC `long` is 32-bit; files exceed 2 GB
 #else
-        fseeko(f, (off_t)off, SEEK_SET);
+        fseeko(f.get(), (off_t)off, SEEK_SET);
 #endif
-        if (fread(tmp.data(), 1, nb, f) != nb) { fprintf(stderr, "[gguf] short read %s\n", name); exit(1); }
+        if (fread(tmp.data(), 1, nb, f.get()) != nb) throw gguf_error("short read " + std::string(name));
         ggml_backend_tensor_set(cur, tmp.data(), 0, nb);
         m.tensors[name] = cur;
     }
-    fclose(f);
     return m;
 }
 
