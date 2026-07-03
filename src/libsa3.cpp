@@ -73,6 +73,16 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
         p.cfg_scale = req->cfg_scale != 0.0f ? req->cfg_scale : 1.0f;
         p.duration_padding_sec = req->duration_padding_sec >= 0.0f ? req->duration_padding_sec : 6.0f;
         p.keep_models = req->keep_models != 0;
+
+        // distribution shift: NULL/"" -> "LogSNR"; per-type defaults, overridden by dist_shift_params if any set.
+        p.dist_shift = (req->dist_shift && *req->dist_shift) ? req->dist_shift : "LogSNR";
+        sa3::dist_shift_defaults(p.dist_shift, p.ds_p1, p.ds_p2, p.ds_p3, p.ds_p4);
+        {
+            const float* dp = req->dist_shift_params;
+            if (dp[0] != 0.0f || dp[1] != 0.0f || dp[2] != 0.0f || dp[3] != 0.0f) {
+                p.ds_p1 = dp[0]; p.ds_p2 = dp[1]; p.ds_p3 = dp[2]; p.ds_p4 = dp[3];
+            }
+        }
         if (req->loudness.set) {              // per-request loudness (incl. raw: peak_normalize=0, limiter=0)
             sa3::LoudnessParams lp;
             lp.peak_normalize_enabled = req->loudness.peak_normalize != 0;

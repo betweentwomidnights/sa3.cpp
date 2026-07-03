@@ -85,6 +85,13 @@ typedef struct {
 
     sa3_progress_cb on_progress;    /* NULL = none */
     void*           user;           /* passed back to on_progress */
+
+    /* Distribution shift (sampler schedule warp), matching the CLI/server. dist_shift is one of
+     * "LogSNR" (default) | "Flux" | "Full" | "None"; NULL/"" -> "LogSNR". dist_shift_params overrides the
+     * per-type defaults only when any element is non-zero (all-zero -> use the type's defaults). Per-type
+     * meaning follows sa3_pipeline.h dist_shift_warp (e.g. LogSNR = anchor_length, anchor_logsnr, rate, logsnr_end). */
+    const char* dist_shift;
+    float       dist_shift_params[4];
 } sa3_request;
 
 enum {
