@@ -168,9 +168,12 @@ inline void cfg_combine(std::vector<float>& v_out,
 // value so a good result stays reproducible.
 inline uint64_t pick_seed(long long requested) {
     if (requested >= 0) return (uint64_t)requested;
+    // Random draw in [0, 99999] to match the official Stable Audio 3 service (api.py: randint(0, 99999)) —
+    // keeps seeds short/human-friendly. An explicit non-negative seed still passes through unchanged.
     std::random_device rd;
-    return ((uint64_t)rd() << 32) ^ (uint64_t)rd()
-         ^ (uint64_t)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    std::mt19937_64 gen(((uint64_t)rd() << 32) ^ (uint64_t)rd()
+        ^ (uint64_t)std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    return std::uniform_int_distribution<uint64_t>(0, 99999)(gen);
 }
 
 inline double wall_time_s() {
