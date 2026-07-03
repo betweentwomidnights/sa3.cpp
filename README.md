@@ -72,6 +72,10 @@ what's next:
 - [x] vulkan backend ([docs/VULKAN.md](docs/VULKAN.md))
 - [x] metal backend builds + smoke-tests on Apple M4
 - [ ] hip/rocm for amd — scaffolded (`./build.sh hip`) but **untested, [ROCm tester wanted](docs/HIP.md)** 🙏
+- [ ] cross-backend seed reproducibility — the same seed gives a *different-but-valid* result on cuda vs vulkan
+  (tensor-core matmul accumulation, not the RNG — the noise is already deterministic). worth a "precise mode"
+  toggle / philox-style approach (cf. [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp)) so a seed
+  carries across backends for A/B testing
 
 > note: **dora-rows and bora are both validated end-to-end against trained checkpoints at cossim 1.0**
 > (kev/keygen for dora-rows; a trained koan bora adapter for bora). dora-cols and the -xs variants are
