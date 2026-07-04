@@ -22,6 +22,33 @@ quality-critical, so they're always F32.
 ./models.sh --variant small-music    # or small-sfx; --encoding f32; --out DIR
 ```
 
+## faster official downloader
+
+If plain `curl` is slow on your connection, use the Hugging Face SDK downloader. It keeps the
+same filenames in `models/`, but uses Hugging Face's cache/local-dir metadata, concurrent file
+fetching, and recent `hf_xet` support:
+
+```bash
+python -m pip install -U "huggingface_hub"
+python tools/download_models.py --variant small-music --encoding f16
+```
+
+Set `HF_XET_HIGH_PERFORMANCE=1` before running it if you want Hugging Face's high-throughput Xet mode:
+
+```powershell
+$env:HF_XET_HIGH_PERFORMANCE = "1"
+python tools\download_models.py --variant small-music --encoding f16
+```
+
+```cmd
+set HF_XET_HIGH_PERFORMANCE=1
+python tools\download_models.py --variant small-music --encoding f16
+```
+
+```bash
+HF_XET_HIGH_PERFORMANCE=1 python tools/download_models.py --variant small-music --encoding f16
+```
+
 or download by hand from huggingface:
 
 - https://huggingface.co/thepatch/stable-audio-3-medium-GGUF
@@ -29,6 +56,11 @@ or download by hand from huggingface:
 - https://huggingface.co/thepatch/stable-audio-3-small-sfx-GGUF
 - https://huggingface.co/thepatch/t5gemma-b-b-ul2-GGUF  (shared encoder + tokenizer)
 
+## troubleshooting
+
+If generation fails with `[gguf] short read ...`, the named GGUF is incomplete, usually from an interrupted
+download. Rerun `models.sh` / `models.cmd`; the curl downloader resumes existing partial files. If it still
+fails, delete the named `.gguf` and run the downloader again.
+
 `sa3-generate --model <variant>` resolves this set from the naming convention above. lora adapters resolve the
 same way (`lora-<name>-*.gguf`) — see [`../loras`](../loras).
-

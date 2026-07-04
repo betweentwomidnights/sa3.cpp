@@ -26,15 +26,28 @@ set "BASE=stable-audio-3-%VARIANT%"
 if not exist "%OUT%" mkdir "%OUT%"
 
 call :dl "%VAR_REPO%" "%BASE%-dit-%DIT_SIZE%-v1.0-%ENC%.gguf"
+if errorlevel 1 exit /b 1
 call :dl "%VAR_REPO%" "%BASE%-%SAME%-v1.0-%ENC%.gguf"
+if errorlevel 1 exit /b 1
 call :dl "%VAR_REPO%" "%BASE%-conditioner-v1.0-F32.gguf"
+if errorlevel 1 exit /b 1
 call :dl "%SHARED%"   "t5gemma-b-b-ul2-encoder-0.3B-v1.0-F32.gguf"
+if errorlevel 1 exit /b 1
 call :dl "%SHARED%"   "t5gemma-b-b-ul2-v1.0-vocab.gguf"
+if errorlevel 1 exit /b 1
 echo [done] %VARIANT% (%ENCODING%) -^> %OUT%\
 exit /b 0
 
 :dl
-if exist "%OUT%\%~2" ( echo [ok] %~2 & exit /b )
-echo [download] %~1/%~2
-curl -fL --retry 3 -o "%OUT%\%~2" "https://huggingface.co/%~1/resolve/main/%~2"
-exit /b
+set "DST=%OUT%\%~2"
+if exist "%DST%" (
+    echo [check/resume] %~2
+) else (
+    echo [download] %~1/%~2
+)
+curl.exe -fL --retry 3 --continue-at - -o "%DST%" "https://huggingface.co/%~1/resolve/main/%~2"
+if errorlevel 1 (
+    echo [error] failed to download %~1/%~2
+    exit /b 1
+)
+exit /b 0

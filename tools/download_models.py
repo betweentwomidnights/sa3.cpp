@@ -5,13 +5,16 @@ Fetches one model variant (DiT + SAME + conditioner) plus the shared T5Gemma enc
 + tokenizer, following the naming/repo layout in docs/DISTRIBUTION.md. Cross-platform
 (Windows + macOS/Linux), unlike a bash models.sh.
 
-  python3 -m pip install huggingface_hub
+  python3 -m pip install -U "huggingface_hub"
   python3 tools/download_models.py --variant medium --encoding f16
   HF_TOKEN=hf_... python3 tools/download_models.py --variant small-sfx   # if a repo is gated
 
+For the fastest official Hugging Face path, install a recent `huggingface_hub`
+(1.x installs `hf_xet`) and optionally set HF_XET_HIGH_PERFORMANCE=1.
+
 The HF namespace is not final yet (pending Stability packaging) — override with --namespace.
 """
-import argparse, os, sys
+import argparse, importlib.util, os, sys
 
 # TODO: confirm with Stability/Zach before publishing; override at runtime with --namespace.
 DEFAULT_NAMESPACE = "thepatch"
@@ -25,6 +28,28 @@ VARIANTS = {
 SHARED_REPO = "t5gemma-b-b-ul2-GGUF"
 
 
+def print_transfer_info():
+    try:
+        import huggingface_hub
+        from huggingface_hub import constants
+    except Exception:
+        return
+
+    xet_installed = importlib.util.find_spec("hf_xet") is not None
+    xet_disabled = bool(getattr(constants, "HF_HUB_DISABLE_XET", False))
+    xet_ready = xet_installed and not xet_disabled
+    xet_high_perf = bool(getattr(constants, "HF_XET_HIGH_PERFORMANCE", False))
+    transfer = "hf_xet" if xet_ready else "http"
+    print(f"[hf] huggingface_hub {huggingface_hub.__version__}; transfer={transfer}; "
+          f"HF_XET_HIGH_PERFORMANCE={'1' if xet_high_perf else '0'}")
+    if xet_disabled:
+        print("[hf] HF_HUB_DISABLE_XET=1, so Xet downloads are disabled.")
+    elif not xet_installed:
+        print('[hf] install "huggingface_hub[hf_xet]" or "hf_xet" for Xet-backed downloads.')
+    elif not xet_high_perf:
+        print("[hf] set HF_XET_HIGH_PERFORMANCE=1 for Hugging Face's high-throughput Xet mode.")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Download sa3.cpp GGUF models from HuggingFace.")
     ap.add_argument("--variant", default="medium", choices=list(VARIANTS))
@@ -35,10 +60,10 @@ def main():
     args = ap.parse_args()
 
     try:
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import snapshot_download
         from huggingface_hub.utils import get_token
     except ImportError:
-        sys.exit("missing dependency: python3 -m pip install huggingface_hub")
+        sys.exit('missing dependency: python3 -m pip install -U "huggingface_hub"')
 
     enc = args.encoding.upper()                 # F16 / F32
     dit_size, same = VARIANTS[args.variant]
@@ -46,23 +71,34 @@ def main():
     shared   = f"{args.namespace}/{SHARED_REPO}"
     base     = f"stable-audio-3-{args.variant}"
 
-    # (repo, filename). conditioner/encoder/tokenizer are small + quality-critical -> always F32.
-    wanted = [
-        (var_repo, f"{base}-dit-{dit_size}-v1.0-{enc}.gguf"),
-        (var_repo, f"{base}-{same}-v1.0-{enc}.gguf"),
-        (var_repo, f"{base}-conditioner-v1.0-F32.gguf"),
-        (shared,   "t5gemma-b-b-ul2-encoder-0.3B-v1.0-F32.gguf"),
-        (shared,   "t5gemma-b-b-ul2-v1.0-vocab.gguf"),
+    # conditioner/encoder/tokenizer are small + quality-critical -> always F32.
+    variant_files = [
+        f"{base}-dit-{dit_size}-v1.0-{enc}.gguf",
+        f"{base}-{same}-v1.0-{enc}.gguf",
+        f"{base}-conditioner-v1.0-F32.gguf",
+    ]
+    shared_files = [
+        "t5gemma-b-b-ul2-encoder-0.3B-v1.0-F32.gguf",
+        "t5gemma-b-b-ul2-v1.0-vocab.gguf",
     ]
 
     os.makedirs(args.out, exist_ok=True)
     token = os.environ.get("HF_TOKEN") or get_token()
-    for repo, fname in wanted:
-        print(f"[download] {repo}/{fname}")
+    print_transfer_info()
+    for repo, files in [(var_repo, variant_files), (shared, shared_files)]:
+        print(f"[download] {repo}")
+        for fname in files:
+            print(f"           {fname}")
         try:
-            hf_hub_download(repo_id=repo, filename=fname, local_dir=args.out, token=token)
+            snapshot_download(
+                repo_id=repo,
+                allow_patterns=files,
+                local_dir=args.out,
+                max_workers=min(8, len(files)),
+                token=token,
+            )
         except Exception as e:
-            print(f"\n[error] could not download {repo}/{fname}", file=sys.stderr)
+            print(f"\n[error] could not download {repo}", file=sys.stderr)
             print("        If the repo is private, make sure the active token can read that namespace.", file=sys.stderr)
             print("        Fine-grained Hugging Face tokens must include repo.content.read for the org/user that owns the repo.", file=sys.stderr)
             raise

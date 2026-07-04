@@ -40,10 +40,13 @@ BASE="stable-audio-3-$VARIANT"
 mkdir -p "$OUT"
 
 dl() {   # dl <repo> <filename>
-  local repo="$1" file="$2"
-  if [ -f "$OUT/$file" ]; then echo "[ok] $file"; return; fi
-  echo "[download] $repo/$file"
-  curl -fL --retry 3 -o "$OUT/$file" "https://huggingface.co/$repo/resolve/main/$file"
+  local repo="$1" file="$2" dst="$OUT/$file"
+  if [ -f "$dst" ]; then
+    echo "[check/resume] $file"
+  else
+    echo "[download] $repo/$file"
+  fi
+  curl -fL --retry 3 --continue-at - -o "$dst" "https://huggingface.co/$repo/resolve/main/$file"
 }
 
 dl "$VAR_REPO" "$BASE-dit-$DIT_SIZE-v1.0-$ENC.gguf"
