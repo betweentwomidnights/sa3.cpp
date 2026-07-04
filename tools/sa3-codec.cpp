@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -19,7 +20,7 @@ static std::vector<float> read_f32(const char* path, size_t n) {
     return b;
 }
 
-int main(int argc, char** argv) {
+static int run(int argc, char** argv) {
     const char* gguf_path = nullptr;
     const char* in_path = nullptr;
     const char* mode = "decode";
@@ -116,4 +117,13 @@ int main(int argc, char** argv) {
     ggml_free(ctx);
     W.free();
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
 }

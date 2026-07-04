@@ -2,9 +2,10 @@
 #include "tokenizer.h"
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <string>
 
-int main(int argc, char** argv) {
+static int run(int argc, char** argv) {
     const char* tok_path = nullptr; std::string text;
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--tok")  && i+1 < argc) tok_path = argv[++i];
@@ -17,4 +18,13 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < ids.size(); i++) printf("%s%d", i ? ", " : "", ids[i]);
     printf("]\n");
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
 }

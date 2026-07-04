@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -33,7 +34,7 @@ static void expo_features(float t, std::vector<float>& out, int dim, float min_f
     }
 }
 
-int main(int argc, char** argv) {
+static int run(int argc, char** argv) {
     const char* dit_path = nullptr; const char* same_path = nullptr;
     const char* dir = "refdata"; const char* outdir = "cppout"; const char* wav_path = "cppout/tm_ggml.wav";
     int frames = 64, steps = 8, ctx_len = 257;
@@ -144,4 +145,13 @@ int main(int argc, char** argv) {
     ggml_gallocr_free(alloc_dit); ggml_gallocr_free(alloc_dec);
     ggml_free(dctx); ggml_free(ectx); DIT.free(); AE.free();
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
 }

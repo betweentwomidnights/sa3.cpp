@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -18,7 +19,7 @@ static std::vector<float> read_f32(const char* path, size_t n) {
     return b;
 }
 
-int main(int argc, char** argv) {
+static int run(int argc, char** argv) {
     const char* gguf_path = nullptr; const char* dir = "refdata"; const char* outdir = "cppout";
     std::vector<std::pair<std::string,float>> lora_specs;   // (gguf, strength) in flag order
     int frames = 32, ctx_len = 257;
@@ -94,4 +95,13 @@ int main(int argc, char** argv) {
 
     ggml_gallocr_free(alloc); ggml_free(ctx); W.free();
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
 }
