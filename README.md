@@ -26,13 +26,15 @@ source ./env.sh        # windows:  env.cmd  (cmd)   or   . .\env.ps1  (powershel
 
 # 4. generate — --model resolves the gguf set in ./models by name
 sa3-generate --model medium --prompt "upbeat funk groove with slap bass" --out song.wav
+sa3-generate --model small-music --duration 12 --prompt "upbeat funk groove with slap bass" --out song.wav
 
 # adapters resolve the same way: --lora <name> finds models/lora-<name>-*.gguf
 sa3-generate --model medium --lora kev --lora keygen --prompt "neo-classical lofi hiphop 90bpm C# minor" --out song.wav
 ```
 
 (`--model` is a convenience over the explicit `--tok/--t5/--cond/--dit/--same` flags, which still
-work and override it per-slot. `--encoding f32` and `--models-dir DIR` adjust what it resolves.)
+work and override it per-slot. `--encoding f32` and `--models-dir DIR` adjust what it resolves.
+Use `--duration SEC` for an exact output length, or `--frames N` for the lower-level latent length.)
 
 **configuration.** the model/adapter dirs (and the backend knobs) read from env vars, so a downstream
 app sets them in the process it spawns and never touches the CLI. drop a `.env` in the working dir to

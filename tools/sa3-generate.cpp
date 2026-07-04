@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,8 @@ int main(int argc, char** argv) {
     int encode_chunk_size = 0, encode_overlap = 32;     // outer SAME-L encode tiling; 0 = monolithic
     int decode_chunk_size = 0, decode_overlap = 32;     // outer SAME-L decode tiling; 0 = monolithic
     int frames = 128, steps = 8; long long seed = 0;   // seed < 0 (e.g. -1) => random (resolved below)
+    bool frames_set = false, duration_set = false;
+    double duration_sec = 0.0;
     std::string dist_shift = "LogSNR";                  // schedule warp: LogSNR|Flux|Full|None
     float ds_p1 = 2000.0f, ds_p2 = -6.2f, ds_p3 = 0.0f, ds_p4 = 2.0f;   // LogSNR defaults (per-type, see --dist-shift)
     float duration_padding_sec = 6.0f;                  // text2music schedule headroom (0 = let the model end the piece)
@@ -64,7 +67,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--same")   && i+1 < argc) same_p = argv[++i];
         else if (!strcmp(argv[i], "--cond")   && i+1 < argc) cond_p = argv[++i];
         else if (!strcmp(argv[i], "--prompt") && i+1 < argc) prompt = argv[++i];
-        else if (!strcmp(argv[i], "--frames") && i+1 < argc) frames = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--frames") && i+1 < argc) { frames = atoi(argv[++i]); frames_set = true; }
+        else if (!strcmp(argv[i], "--duration") && i+1 < argc) { duration_sec = atof(argv[++i]); duration_set = true; }
         else if (!strcmp(argv[i], "--steps")  && i+1 < argc) steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--seed")   && i+1 < argc) seed = strtoll(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--out")    && i+1 < argc) wav_p = argv[++i];
@@ -166,9 +170,36 @@ int main(int argc, char** argv) {
     if (!tok_p || !t5_p || !dit_p || !same_p) {
         fprintf(stderr, "usage: sa3-generate (--model medium|small-music|small-sfx [--encoding f16|f32] [--models-dir DIR]\n"
                         "                     | --tok <f> --t5 <f> --cond <f> --dit <f> --same <f>)\n"
-                        "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--frames N] [--steps N] [--seed S]\n"
+                        "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--duration SEC | --frames N] [--steps N] [--seed S]\n"
                         "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--duration-padding SEC]\n"
                         "                     [--cfg-scale S [--negative-prompt \"...\"] [--cfg-rescale R] [--cfg-interval min,max] [--apg-scale A] [--cfg-norm-threshold T]] [--out song.wav]\n");
+        return 1;
+    }
+    if (duration_set && frames_set) {
+        fprintf(stderr, "use either --duration SEC or --frames N, not both\n");
+        return 1;
+    }
+    int target_n_samp = 0;
+    if (duration_set) {
+        if (!std::isfinite(duration_sec) || duration_sec <= 0.0) {
+            fprintf(stderr, "--duration must be a positive number of seconds\n");
+            return 1;
+        }
+        if (init_p) {
+            fprintf(stderr, "--duration is for text2music; --init audio determines output length (use --inpaint-end for continuation/inpaint)\n");
+            return 1;
+        }
+        const double samples_d = std::round(duration_sec * 44100.0);
+        if (samples_d < 1.0 || samples_d > (double)std::numeric_limits<int>::max()) {
+            fprintf(stderr, "--duration is out of range\n");
+            return 1;
+        }
+        target_n_samp = (int)samples_d;
+        frames = std::max(1, (target_n_samp + 4095) / 4096);
+        if (frames & 1) frames++;  // SAME-S needs even latent frame counts; harmless for SAME-L.
+    }
+    if (frames <= 0) {
+        fprintf(stderr, "--frames must be positive\n");
         return 1;
     }
     if (encode_chunk_size < 0 || encode_overlap < 0 ||
@@ -193,6 +224,7 @@ int main(int argc, char** argv) {
     sa3::GenParams params;
     params.prompt            = prompt;
     params.frames            = frames;
+    params.target_n_samp     = target_n_samp;
     params.steps             = steps;
     const uint64_t seed_resolved = sa3::pick_seed(seed);   // -1 => random
     params.seed              = seed_resolved;
