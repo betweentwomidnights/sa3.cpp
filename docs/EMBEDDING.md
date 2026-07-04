@@ -18,7 +18,12 @@ subprocess and no HTTP. The header is [`src/libsa3.h`](../src/libsa3.h); the pip
 full contract is in [`src/libsa3.h`](../src/libsa3.h). The shape:
 
 ```c
-sa3_context* ctx = sa3_init(&cfg, err, sizeof err);        // load the models (blocks ~seconds)
+sa3_config_ex cfg = {0};
+cfg.config.models_dir = absolute_models_dir;
+cfg.config.variant = "small-music";
+cfg.config.encoding = "f16";
+cfg.cpu_threads = 8;                                      // CPU backend only; 0 = SA3_THREADS/default
+sa3_context* ctx = sa3_init_ex(&cfg, err, sizeof err);     // load the models (blocks ~seconds)
 sa3_audio audio = {0};
 sa3_generate(ctx, &req, &audio, err, sizeof err);          // prompt -> planar float samples (blocks)
 // or: sa3_generate_ex(ctx, &req_ex, &audio, err, sizeof err); // a2a / inpaint + chunk/cancel controls
@@ -33,6 +38,8 @@ sa3_free(ctx);     // destroy
 - **not reentrant** — serialize `sa3_generate` calls on a given context (one at a time).
 - **ownership** — `sa3_generate` allocates `audio.samples`; release it with `sa3_free_audio` (same
   library/CRT — don't `free()` it yourself across the DLL boundary).
+- **CPU threads** — `sa3_init_ex` lets a host set `cpu_threads` directly; `sa3_init` still honors
+  `SA3_THREADS` through the shared backend defaults.
 - **loras** — pass adapter names (resolved in the adapters dir) or full paths via the parallel `lora_names`/
   `lora_strengths` arrays. `sa3_convert_lora(safetensors, json, out_gguf, ...)` converts a `.safetensors`
   adapter to gguf in-process (no Python) — the demo calls it on import.
@@ -102,7 +109,8 @@ auto sa3_init_fn = (decltype(&sa3_init))GetProcAddress(dll, "sa3_init");   // �
 `.exe` for the standalone.
 
 **models:** the DAW's working directory is unknown, so don't rely on the `"models"` default — pass an absolute
-`sa3_config.models_dir` (bundle the ggufs, resolve the path at runtime, or read an env var like `SA3_MODELS_DIR`).
+`sa3_config.models_dir` / `sa3_config_ex.config.models_dir` (bundle the ggufs, resolve the path at runtime,
+or read an env var like `SA3_MODELS_DIR`).
 
 ## threading — the part that matters
 

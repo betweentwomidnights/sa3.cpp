@@ -71,6 +71,25 @@ inline std::string gguf_short_read_message(const char* path, const char* name,
     return msg;
 }
 
+inline int cpu_threads_from_env() {
+    const char* v = getenv("SA3_THREADS");
+    if (!v || !*v) return 0;
+    char* end = nullptr;
+    long n = strtol(v, &end, 10);
+    if (!end || *end != '\0' || n <= 0 || n > 1024) {
+        fprintf(stderr, "[sa3] ignoring invalid SA3_THREADS='%s' (expected a positive integer)\n", v);
+        return 0;
+    }
+    return (int)n;
+}
+
+inline void configure_cpu_threads(ggml_backend_t b, int n_threads) {
+    if (b && n_threads > 0 && ggml_backend_is_cpu(b)) {
+        ggml_backend_cpu_set_n_threads(b, n_threads);
+        fprintf(stderr, "[sa3] CPU threads: %d\n", n_threads);
+    }
+}
+
 // Pick the compute backend: a registered GPU device (CUDA when the CUDA backend is
 // linked) unless SA3_DEVICE=cpu forces CPU. In a CPU-only build the registry has no
 // GPU device, so this transparently returns the CPU backend — same code, both builds.
@@ -81,7 +100,7 @@ inline std::string gguf_short_read_message(const char* path, const char* name,
 // prefer the one with the most total memory (the discrete GPU). SA3_GPU overrides this:
 // a 0-based index into the GPU list, or a case-insensitive substring of the device name
 // (e.g. SA3_GPU=nvidia). CUDA builds expose a single GPU device, so this is a no-op there.
-inline ggml_backend_t make_backend() {
+inline ggml_backend_t make_backend(int cpu_threads = 0) {
     const char* dev = getenv("SA3_DEVICE");
     if (!(dev && strcmp(dev, "cpu") == 0)) {
         // Collect all GPU devices in registry order.
@@ -133,7 +152,9 @@ inline ggml_backend_t make_backend() {
             }
         }
     }
-    return ggml_backend_cpu_init();
+    ggml_backend_t b = ggml_backend_cpu_init();
+    configure_cpu_threads(b, cpu_threads > 0 ? cpu_threads : cpu_threads_from_env());
+    return b;
 }
 
 struct GgufModel {

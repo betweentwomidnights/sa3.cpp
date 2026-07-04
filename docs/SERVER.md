@@ -13,6 +13,7 @@ for progress and, on completion, the base64 audio. That makes it a drop-in for a
 ./build/bin/Release/sa3-server.exe --model medium --encoding f16 --port 8006
 # args: --host (default 127.0.0.1) --port (8006) --model <variant> --encoding f16|f32
 #       --models-dir DIR (or SA3_MODELS_DIR) --adapters-dir DIR (or SA3_ADAPTERS_DIR)
+#       --threads N (or SA3_THREADS, CPU backend only)
 #       --prompts-dir DIR (or SA3_PROMPTS_DIR)
 #       --source-loras-dir DIR (or SA3_SOURCE_LORAS_DIR)
 ```

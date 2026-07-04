@@ -51,6 +51,7 @@ std::string g_models_dir;
 std::string g_adapters_dir;
 std::string g_prompts_dir;
 std::string g_source_loras_dir;
+int g_cpu_threads = 0;
 
 // --- async job registry (mirrors gary4local /poll_status) ---
 struct Job {
@@ -454,7 +455,7 @@ bool ensure_loaded(std::string& err) {
     if (!sa3::ModelPaths::resolve(g_models_dir, g_variant, g_encoding, mp, err)) return false;
     try {
         g_pipe = std::make_unique<sa3::Pipeline>();
-        g_pipe->load(mp);
+        g_pipe->load(mp, g_cpu_threads);
     } catch (const std::exception& e) { g_pipe.reset(); g_loaded = false; err = e.what(); return false; }
     g_loaded = true;
     return true;
@@ -733,6 +734,7 @@ int main(int argc, char** argv) {
     if (g_models_dir.empty()) g_models_dir = "models";
     if (g_prompts_dir.empty()) g_prompts_dir = "prompts";
     if (g_source_loras_dir.empty()) g_source_loras_dir = "loras";
+    bool threads_set = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&](const char* d){ return i + 1 < argc ? argv[++i] : d; };
@@ -744,6 +746,11 @@ int main(int argc, char** argv) {
         else if (a == "--adapters-dir") g_adapters_dir = next("");
         else if (a == "--prompts-dir")  g_prompts_dir = next("prompts");
         else if (a == "--source-loras-dir") g_source_loras_dir = next("loras");
+        else if (a == "--threads")      { g_cpu_threads = atoi(next("0")); threads_set = true; }
+    }
+    if (threads_set && g_cpu_threads <= 0) {
+        fprintf(stderr, "--threads must be positive\n");
+        return 1;
     }
     const std::string adir = g_adapters_dir.empty() ? g_models_dir : g_adapters_dir;
     const std::string pdir = g_prompts_dir;

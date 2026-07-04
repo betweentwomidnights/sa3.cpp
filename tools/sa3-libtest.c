@@ -1,7 +1,7 @@
 /* sa3-libtest — a pure-C smoke test + minimal usage example for libsa3 (see src/libsa3.h).
  * This is exactly the call sequence a JUCE / IPlug2 host would use:
  *   sa3_init -> sa3_generate (with a progress callback) -> use samples -> sa3_free_audio -> sa3_free.
- *   usage: sa3-libtest ["prompt"] [out.wav]
+ *   usage: sa3-libtest ["prompt"] [out.wav] [cpu_threads]
  */
 #include "libsa3.h"
 
@@ -40,15 +40,17 @@ static void write_wav(const char* path, const float* planar, int n_samp, int n_c
 int main(int argc, char** argv) {
     const char* prompt = argc > 1 ? argv[1] : "warm analog house groove";
     const char* out    = argc > 2 ? argv[2] : "libsa3_test.wav";
+    const int cpu_threads = argc > 3 ? atoi(argv[3]) : 0;
     char err[512] = {0};
 
     printf("%s\n", sa3_version());
 
-    sa3_config cfg;
+    sa3_config_ex cfg;
     memset(&cfg, 0, sizeof cfg);
-    cfg.variant = "medium";
-    cfg.encoding = "f16";
-    sa3_context* ctx = sa3_init(&cfg, err, (int)sizeof err);
+    cfg.config.variant = "medium";
+    cfg.config.encoding = "f16";
+    cfg.cpu_threads = cpu_threads;
+    sa3_context* ctx = sa3_init_ex(&cfg, err, (int)sizeof err);
     if (!ctx) { fprintf(stderr, "sa3_init failed: %s\n", err); return 1; }
 
     sa3_request req;

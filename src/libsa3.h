@@ -40,6 +40,13 @@ typedef struct {
     const char* encoding;
 } sa3_config;
 
+/* Extended init options. Keeps the original sa3_config layout intact for existing callers.
+ * cpu_threads: 0 -> SA3_THREADS/default; >0 sets ggml CPU backend threads for this context. */
+typedef struct {
+    sa3_config config;
+    int cpu_threads;
+} sa3_config_ex;
+
 /* Optional progress callback. fraction is overall 0..1 (UI does *100); stage is
  * "sampling" | "decoding" | "done". Called on the sa3_generate() thread. */
 typedef void (*sa3_progress_cb)(void* user, const char* stage, int step, int total, float fraction);
@@ -153,6 +160,9 @@ typedef struct {
 
 /* Load the models. Returns NULL on failure, writing a message into err (if err && err_len > 0). */
 SA3_API sa3_context* sa3_init(const sa3_config* cfg, char* err, int err_len);
+
+/* Extended init with CPU thread override. */
+SA3_API sa3_context* sa3_init_ex(const sa3_config_ex* cfg, char* err, int err_len);
 
 /* Generate. Returns 0 on success (out filled), non-zero on failure (err filled). Not reentrant. */
 SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* out, char* err, int err_len);

@@ -18,6 +18,7 @@ struct sa3_context {
     std::unique_ptr<sa3::Pipeline> pipe;
     sa3::ModelPaths paths;
     std::string adapters_dir;
+    int cpu_threads = 0;
 };
 
 static void set_err(char* err, int n, const std::string& m) {
@@ -63,7 +64,7 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
     try {
         if (!ctx->pipe) {   // reload after sa3_unload()
             ctx->pipe = std::make_unique<sa3::Pipeline>();
-            ctx->pipe->load(ctx->paths);
+            ctx->pipe->load(ctx->paths, ctx->cpu_threads);
         }
         sa3::GenParams p;
         p.prompt = req->prompt ? req->prompt : "";
@@ -145,10 +146,9 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
       catch (...)                     { set_err(err, err_len, "unknown error"); return 10; }
 }
 
-extern "C" {
-
-SA3_API sa3_context* sa3_init(const sa3_config* cfg, char* err, int err_len) {
+static sa3_context* sa3_init_impl(const sa3_config* cfg, int cpu_threads, char* err, int err_len) {
     try {
+        if (cpu_threads < 0) { set_err(err, err_len, "cpu_threads must be positive"); return nullptr; }
         std::string models_dir = cfg && cfg->models_dir ? cfg->models_dir : "";
         if (models_dir.empty()) { const char* e = std::getenv("SA3_MODELS_DIR"); models_dir = (e && *e) ? e : "models"; }
         const std::string variant  = cfg && cfg->variant  ? cfg->variant  : "medium";
@@ -161,11 +161,22 @@ SA3_API sa3_context* sa3_init(const sa3_config* cfg, char* err, int err_len) {
         auto ctx = std::make_unique<sa3_context>();
         ctx->paths = mp;
         ctx->adapters_dir = adir;
+        ctx->cpu_threads = cpu_threads;
         ctx->pipe = std::make_unique<sa3::Pipeline>();
-        ctx->pipe->load(mp);
+        ctx->pipe->load(mp, ctx->cpu_threads);
         return ctx.release();
     } catch (const std::exception& e) { set_err(err, err_len, e.what()); return nullptr; }
       catch (...)                     { set_err(err, err_len, "unknown error"); return nullptr; }
+}
+
+extern "C" {
+
+SA3_API sa3_context* sa3_init(const sa3_config* cfg, char* err, int err_len) {
+    return sa3_init_impl(cfg, 0, err, err_len);
+}
+
+SA3_API sa3_context* sa3_init_ex(const sa3_config_ex* cfg, char* err, int err_len) {
+    return sa3_init_impl(cfg ? &cfg->config : nullptr, cfg ? cfg->cpu_threads : 0, err, err_len);
 }
 
 SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* out, char* err, int err_len) {
@@ -185,7 +196,7 @@ SA3_API void sa3_unload(sa3_context* ctx) { if (ctx) ctx->pipe.reset(); }   // d
 
 SA3_API void sa3_free(sa3_context* ctx) { delete ctx; }
 
-SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 2"; }
+SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 3"; }
 
 SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path,
                              const char* out_gguf_path, char* err, int err_len) {

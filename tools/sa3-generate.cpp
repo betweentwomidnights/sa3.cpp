@@ -47,7 +47,8 @@ int main(int argc, char** argv) {
     int encode_chunk_size = 0, encode_overlap = 32;     // outer SAME-L encode tiling; 0 = monolithic
     int decode_chunk_size = 0, decode_overlap = 32;     // outer SAME-L decode tiling; 0 = monolithic
     int frames = 128, steps = 8; long long seed = 0;   // seed < 0 (e.g. -1) => random (resolved below)
-    bool frames_set = false, duration_set = false;
+    int cpu_threads = 0;
+    bool frames_set = false, duration_set = false, threads_set = false;
     double duration_sec = 0.0;
     std::string dist_shift = "LogSNR";                  // schedule warp: LogSNR|Flux|Full|None
     float ds_p1 = 2000.0f, ds_p2 = -6.2f, ds_p3 = 0.0f, ds_p4 = 2.0f;   // LogSNR defaults (per-type, see --dist-shift)
@@ -70,6 +71,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--frames") && i+1 < argc) { frames = atoi(argv[++i]); frames_set = true; }
         else if (!strcmp(argv[i], "--duration") && i+1 < argc) { duration_sec = atof(argv[++i]); duration_set = true; }
         else if (!strcmp(argv[i], "--steps")  && i+1 < argc) steps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--threads") && i+1 < argc) { cpu_threads = atoi(argv[++i]); threads_set = true; }
         else if (!strcmp(argv[i], "--seed")   && i+1 < argc) seed = strtoll(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--out")    && i+1 < argc) wav_p = argv[++i];
         else if (!strcmp(argv[i], "--init")   && i+1 < argc) init_p = argv[++i];
@@ -170,7 +172,7 @@ int main(int argc, char** argv) {
     if (!tok_p || !t5_p || !dit_p || !same_p) {
         fprintf(stderr, "usage: sa3-generate (--model medium|small-music|small-sfx [--encoding f16|f32] [--models-dir DIR]\n"
                         "                     | --tok <f> --t5 <f> --cond <f> --dit <f> --same <f>)\n"
-                        "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--duration SEC | --frames N] [--steps N] [--seed S]\n"
+                        "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
                         "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--duration-padding SEC]\n"
                         "                     [--cfg-scale S [--negative-prompt \"...\"] [--cfg-rescale R] [--cfg-interval min,max] [--apg-scale A] [--cfg-norm-threshold T]] [--out song.wav]\n");
         return 1;
@@ -200,6 +202,10 @@ int main(int argc, char** argv) {
     }
     if (frames <= 0) {
         fprintf(stderr, "--frames must be positive\n");
+        return 1;
+    }
+    if (threads_set && cpu_threads <= 0) {
+        fprintf(stderr, "--threads must be positive\n");
         return 1;
     }
     if (encode_chunk_size < 0 || encode_overlap < 0 ||
@@ -254,12 +260,14 @@ int main(int argc, char** argv) {
 
     try {
         sa3::Pipeline pipe;
-        pipe.load(paths);
+        pipe.load(paths, cpu_threads);
         sa3::GenResult r = pipe.generate(params);
         double tp = sa3::wall_time_s();
         sa3::write_wav_planar(wav_p, r.samples.data(), r.n_samp, r.n_ch, r.sample_rate);
         sa3::profile_log(prof, "write_wav", sa3::wall_time_s() - tp);
-        printf("wrote %s  (%.2fs, seed %llu)\n", wav_p, (float)r.n_samp / r.sample_rate, (unsigned long long)seed_resolved);
+        const double elapsed = sa3::wall_time_s() - t_total0;
+        printf("wrote %s  (audio %.2fs, elapsed %.2fs, seed %llu)\n",
+               wav_p, (float)r.n_samp / r.sample_rate, elapsed, (unsigned long long)seed_resolved);
     } catch (const std::exception& e) {
         fprintf(stderr, "error: %s\n", e.what());
         return 1;

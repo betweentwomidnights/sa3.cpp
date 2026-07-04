@@ -104,3 +104,22 @@ decode is where it pays off (medium f16, 12s, this 5070 laptop):
 the DiT gain is modest/within-noise; the decoder is the real win. on metal it helped through
 120s (see docs/METAL.md). vulkan pays a one-time shader compile on the first flash run.
 
+## CPU thread count (small-music)
+
+testing ground: Intel Core Ultra 9 275HX, CPU backend, `small-music` f16,
+`--duration 5 --steps 4 --duration-padding 0`. `--threads N` sets ggml's CPU
+backend thread count; `SA3_THREADS=N` does the same for any surface.
+
+| threads | total | t5_compute | dit_compute | dec_compute |
+|---|---:|---:|---:|---:|
+| 1  | 20.90 s | 0.87 s | 15.07 s | 3.54 s |
+| 2  | 8.80 s  | 0.46 s | 5.64 s  | 1.26 s |
+| 4  | 5.46 s  | 0.27 s | 3.02 s  | 0.74 s |
+| 8  | 3.90 s  | 0.17 s | 1.85 s  | 0.43 s |
+| 12 | 3.33 s  | 0.14 s | 1.41 s  | 0.33 s |
+| 16 | 3.09 s  | 0.12 s | 1.20 s  | 0.30 s |
+| 24 | 2.86 s  | 0.11 s | 1.07 s  | 0.25 s |
+
+for a longer radio-style chunk on the same CPU, `--duration 60 --steps 4
+--duration-padding 0` took 25.6s at the build default thread count and 9.4s
+with `--threads 24`.
