@@ -90,24 +90,27 @@ inline void configure_cpu_threads(ggml_backend_t b, int n_threads) {
     }
 }
 
-// Pick the compute backend: a registered GPU device (CUDA when the CUDA backend is
+// Pick the compute backend: a registered GPU/iGPU device (CUDA when the CUDA backend is
 // linked) unless SA3_DEVICE=cpu forces CPU. In a CPU-only build the registry has no
-// GPU device, so this transparently returns the CPU backend — same code, both builds.
+// GPU/iGPU device, so this transparently returns the CPU backend — same code, both builds.
 //
 // Device choice among GPUs: the Vulkan backend registers EVERY Vulkan device, so on a
 // laptop with an Intel iGPU + a discrete NVIDIA GPU the first-by-type device may be the
 // iGPU (wrong: tiny VRAM, slow). We therefore enumerate all GPU devices and, by default,
-// prefer the one with the most total memory (the discrete GPU). SA3_GPU overrides this:
-// a 0-based index into the GPU list, or a case-insensitive substring of the device name
+// prefer a discrete GPU, then the one with the most total memory. If only an integrated
+// GPU/APU is present, use that instead of silently falling back to CPU. SA3_GPU overrides this:
+// a 0-based index into the GPU/iGPU list, or a case-insensitive substring of the device name
 // (e.g. SA3_GPU=nvidia). CUDA builds expose a single GPU device, so this is a no-op there.
 inline ggml_backend_t make_backend(int cpu_threads = 0) {
     const char* dev = getenv("SA3_DEVICE");
     if (!(dev && strcmp(dev, "cpu") == 0)) {
-        // Collect all GPU devices in registry order.
+        // Collect all GPU/iGPU devices in registry order.
         std::vector<ggml_backend_dev_t> gpus;
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             ggml_backend_dev_t d = ggml_backend_dev_get(i);
-            if (ggml_backend_dev_type(d) == GGML_BACKEND_DEVICE_TYPE_GPU) gpus.push_back(d);
+            const enum ggml_backend_dev_type type = ggml_backend_dev_type(d);
+            if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU)
+                gpus.push_back(d);
         }
         if (!gpus.empty()) {
             ggml_backend_dev_t chosen = nullptr;
@@ -132,12 +135,21 @@ inline ggml_backend_t make_backend(int cpu_threads = 0) {
                 }
             }
             if (!chosen) {
-                // Default: the GPU with the most total memory (the discrete one).
+                // Default: prefer discrete GPUs over integrated GPUs/APUs. Within that class,
+                // pick the device with the most total memory.
                 size_t best = 0;
                 for (ggml_backend_dev_t d : gpus) {
+                    if (ggml_backend_dev_type(d) != GGML_BACKEND_DEVICE_TYPE_GPU) continue;
                     size_t free = 0, total = 0;
                     ggml_backend_dev_memory(d, &free, &total);
                     if (total > best) { best = total; chosen = d; }
+                }
+                if (!chosen) {
+                    for (ggml_backend_dev_t d : gpus) {
+                        size_t free = 0, total = 0;
+                        ggml_backend_dev_memory(d, &free, &total);
+                        if (total > best) { best = total; chosen = d; }
+                    }
                 }
                 if (!chosen) chosen = gpus[0];
             }
@@ -153,7 +165,10 @@ inline ggml_backend_t make_backend(int cpu_threads = 0) {
         }
     }
     ggml_backend_t b = ggml_backend_cpu_init();
-    configure_cpu_threads(b, cpu_threads > 0 ? cpu_threads : cpu_threads_from_env());
+    if (b) {
+        configure_cpu_threads(b, cpu_threads > 0 ? cpu_threads : cpu_threads_from_env());
+        fprintf(stderr, "[sa3] backend: %s\n", ggml_backend_name(b));
+    }
     return b;
 }
 
