@@ -62,6 +62,10 @@ target_link_libraries(sa3-tokenize PRIVATE sa3)
 add_executable(sa3-generate tools/sa3-generate.cpp)
 target_link_libraries(sa3-generate PRIVATE sa3)
 
+add_executable(sa3-train tools/sa3-train.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train PRIVATE sa3)
+target_include_directories(sa3-train PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
 # sa3-server: HTTP over the pipeline. Vendored cpp-httplib (split impl) + yyjson (C).
 find_package(Threads REQUIRED)
 add_executable(sa3-server tools/sa3-server.cpp
@@ -81,6 +85,50 @@ endif()
 add_executable(sa3-lora-convert tools/sa3-lora-convert.cpp vendor/yyjson/yyjson.c)
 target_link_libraries(sa3-lora-convert PRIVATE sa3)
 target_include_directories(sa3-lora-convert PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-config-test tests/train_config_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-config-test PRIVATE sa3)
+target_include_directories(sa3-train-config-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-dataset-test tests/train_dataset_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-dataset-test PRIVATE sa3)
+target_include_directories(sa3-train-dataset-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-model-paths-test tests/train_model_paths_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-model-paths-test PRIVATE sa3)
+target_include_directories(sa3-train-model-paths-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-audio-test tests/train_audio_test.cpp)
+target_link_libraries(sa3-train-audio-test PRIVATE sa3)
+
+add_executable(sa3-train-same-compile-test tests/train_same_compile_test.cpp)
+target_link_libraries(sa3-train-same-compile-test PRIVATE sa3)
+
+add_executable(sa3-train-conditioning-compile-test tests/train_conditioning_compile_test.cpp)
+target_link_libraries(sa3-train-conditioning-compile-test PRIVATE sa3)
+
+add_executable(sa3-train-diffusion-test tests/train_diffusion_test.cpp)
+target_link_libraries(sa3-train-diffusion-test PRIVATE sa3)
+
+add_executable(sa3-train-lora-test tests/train_lora_test.cpp)
+target_link_libraries(sa3-train-lora-test PRIVATE sa3)
+
+add_executable(sa3-train-dit-compile-test tests/train_dit_compile_test.cpp)
+target_link_libraries(sa3-train-dit-compile-test PRIVATE sa3)
+
+add_executable(sa3-train-optimizer-test tests/train_optimizer_test.cpp)
+target_link_libraries(sa3-train-optimizer-test PRIVATE sa3)
+
+add_executable(sa3-train-loop-compile-test tests/train_loop_compile_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-loop-compile-test PRIVATE sa3)
+target_include_directories(sa3-train-loop-compile-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-checkpoint-test tests/train_checkpoint_test.cpp)
+target_link_libraries(sa3-train-checkpoint-test PRIVATE sa3)
+
+add_executable(sa3-train-generation-test tests/train_generation_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-generation-test PRIVATE sa3)
+target_include_directories(sa3-train-generation-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
 
 # --- libsa3: C ABI shared library (embed sa3 in a host app; see src/libsa3.h) ---------------
 # Windows: sa3.dll + sa3.lib (import lib).  Unix/macOS: libsa3.so / libsa3.dylib.

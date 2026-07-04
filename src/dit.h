@@ -68,10 +68,17 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
     auto mod = [&](int i){ return ggml_view_1d(ctx, ssg, dim, (size_t)i*dim*sizeof(float)); };
     ggml_tensor *sc_a=mod(0),*sh_a=mod(1),*g_a=mod(2),*sc_f=mod(3),*sh_f=mod(4),*g_f=mod(5);
     auto modulate = [&](ggml_tensor* h, ggml_tensor* sc, ggml_tensor* sh){
-        return ggml_add(ctx, ggml_mul(ctx, h, ggml_add(ctx, sc, ones)), sh);  // h*(1+sc)+sh
+        ggml_tensor* onev = ggml_repeat(ctx, ones, sc);
+        ggml_tensor* scale = ggml_repeat(ctx, ggml_add(ctx, sc, onev), h);
+        ggml_tensor* shift = ggml_repeat(ctx, sh, h);
+        ggml_tensor* hc = ggml_cont(ctx, h);
+        return ggml_add(ctx, ggml_mul(ctx, hc, scale), shift);  // h*(1+sc)+sh
     };
     auto gate = [&](ggml_tensor* h, ggml_tensor* g){
-        return ggml_mul(ctx, h, ggml_sigmoid(ctx, ggml_add(ctx, ggml_neg(ctx, g), ones))); // *sigmoid(1-g)
+        ggml_tensor* onev = ggml_repeat(ctx, ones, g);
+        ggml_tensor* denom = ggml_add(ctx, ggml_exp(ctx, ggml_sub(ctx, g, onev)), onev);
+        ggml_tensor* hc = ggml_cont(ctx, h);
+        return ggml_div(ctx, hc, ggml_repeat(ctx, denom, hc)); // *sigmoid(1-g)
     };
     auto heads = [&](ggml_tensor* a, int64_t n){ return ggml_reshape_3d(ctx, ggml_cont(ctx, a), hd, nh, n); };
     auto qknorm = [&](ggml_tensor* a, const std::string& g){ return nn::rms_norm(ctx, a, W.get(g), c.qk_eps); };
@@ -102,7 +109,7 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
         o = single_attn(toAttn(q), toAttn(k), toAttn(v));
     }
     o = ggml_mul_mat(ctx, W.get(p+"self.out.weight"), o);
-    x = ggml_add(ctx, res, gate(o, g_a));
+    x = ggml_add(ctx, ggml_cont(ctx, res), gate(o, g_a));
 
     // --- cross-attention (no adaLN, no RoPE), kv from context ---
     ggml_tensor* hc = nn::rms_norm(ctx, x, W.get(p+"cross_norm.gamma"), c.norm_eps);
@@ -121,7 +128,7 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
         oc = single_attn(toAttn(cq), toAttn(ck), toAttn(cv));
     }
     oc = ggml_mul_mat(ctx, W.get(p+"cross.out.weight"), oc);
-    x = ggml_add(ctx, x, oc);
+    x = ggml_add(ctx, ggml_cont(ctx, x), oc);
 
     // --- inpaint local conditioning (per block, after cross-attn): add to the T real tokens only ---
     // le = Linear(local_dim->dim) -> SiLU -> Linear(dim->dim); memory tokens (first mem_tokens) get +0.
@@ -132,7 +139,7 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
         const int64_t Tt = local_cond->ne[1];
         ggml_tensor* xm = ggml_cont(ctx, ggml_view_2d(ctx, x, dim, c.mem_tokens, x->nb[1], 0));                    // [dim,mem]
         ggml_tensor* xt = ggml_cont(ctx, ggml_view_2d(ctx, x, dim, Tt, x->nb[1], (size_t)c.mem_tokens*x->nb[1]));  // [dim,T]
-        x = ggml_concat(ctx, xm, ggml_add(ctx, xt, le), 1);                                                       // [dim,mem+T]
+        x = ggml_concat(ctx, xm, ggml_add(ctx, ggml_cont(ctx, xt), le), 1);                                      // [dim,mem+T]
     }
 
     // --- SwiGLU feed-forward with adaLN ---
@@ -144,7 +151,7 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
     ggml_tensor* glu  = ggml_view_2d(ctx, f, inner, S, f->nb[1], (size_t)inner*sizeof(float));
     f = ggml_mul(ctx, ggml_cont(ctx, val), ggml_silu(ctx, ggml_cont(ctx, glu)));
     f = nn::linear(ctx, W.get(p+"ff.out.weight"), f, W.get(p+"ff.out.bias"));
-    return ggml_add(ctx, res, gate(f, g_f));
+    return ggml_add(ctx, ggml_cont(ctx, res), gate(f, g_f));
 }
 
 // MLP: linear(0) -> SiLU -> linear(2), optional biases. prefix like "dit.time_embed."
@@ -171,7 +178,10 @@ inline ggml_tensor* dit_forward(ggml_context* ctx, const GgufModel& W, ggml_tens
     // x path: residual pre-conv, project in, prepend memory tokens
     ggml_tensor* x = ggml_add(ctx, ggml_mul_mat(ctx, W.get("dit.pre_conv.weight"), x_in), x_in); // [io,T]
     x = ggml_mul_mat(ctx, W.get("dit.proj_in.weight"), x);                        // [dim, T]
-    x = ggml_concat(ctx, W.get("dit.memory_tokens"), x, 1);                       // [dim, mem+T]
+    ggml_tensor* full = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, c.dim, c.mem_tokens + x->ne[1]);
+    full = ggml_set(ctx, full, W.get("dit.memory_tokens"), full->nb[1], full->nb[2], full->nb[3], 0);
+    x = ggml_set(ctx, full, x, full->nb[1], full->nb[2], full->nb[3], (size_t)c.mem_tokens * full->nb[1]); // [dim, mem+T]
+    x = ggml_cont(ctx, x);
 
     for (int l = 0; l < c.depth; l++)
         x = dit_block(ctx, W, "dit." + std::to_string(l) + ".", x, context, gcond, pos, ones, c, local_cond);
@@ -180,7 +190,7 @@ inline ggml_tensor* dit_forward(ggml_context* ctx, const GgufModel& W, ggml_tens
     const int64_t T = x->ne[1] - c.mem_tokens;
     x = ggml_cont(ctx, ggml_view_2d(ctx, x, c.dim, T, x->nb[1], (size_t)c.mem_tokens * x->nb[1])); // [dim,T]
     x = ggml_mul_mat(ctx, W.get("dit.proj_out.weight"), x);                       // [io, T]
-    x = ggml_add(ctx, ggml_mul_mat(ctx, W.get("dit.post_conv.weight"), x), x);
+    x = ggml_add(ctx, ggml_mul_mat(ctx, W.get("dit.post_conv.weight"), x), ggml_cont(ctx, x));
     return x;
 }
 
