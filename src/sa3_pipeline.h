@@ -597,6 +597,14 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                inpaint ? "inpaint" : "audio2audio", (float)n_samp/44100.0f, frames, (float)init_L/44100.0f);
     }
 
+    // text2music: an odd latent frame count trips the SAME chunked-attention reshape (hard
+    // GGML_ASSERT in ggml_reshape_4d on CUDA). Upstream never hits this because _adapt_sample_size
+    // (model.py) aligns the requested length before generate(), and the AE self-pads to the chunk
+    // multiple; we have neither, so enforce even here — the single choke point every caller (CLI,
+    // server, libsa3) funnels through. Init-audio derives `frames` from its (already aligned) buffer
+    // above, so only the text2music path needs the clamp.
+    if (!has_init && (frames & 1)) frames++;
+
     // text2music: generate a (frames + duration_padding) canvas so the model isn't forced to "end"
     // the piece in the kept region, then truncate to `frames` at the very end. eff_frames (= the
     // requested length) drives seconds_total conditioning + the dist-shift schedule (upstream's
