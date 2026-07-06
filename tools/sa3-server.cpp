@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +30,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -70,6 +72,22 @@ std::unordered_map<std::string, Job> jobs;
 
 std::string json_escape(const std::string& s);
 std::string json_err(const std::string& msg) { return "{\"error\":\"" + json_escape(msg) + "\"}"; }
+
+constexpr int k_sample_rate = 44100;
+constexpr int k_samples_per_latent_frame = 4096;
+
+bool duration_to_target_samples(double duration, int& target_n_samp) {
+    const double samples_d = std::round(duration * (double)k_sample_rate);
+    if (samples_d < 1.0 || samples_d > (double)std::numeric_limits<int>::max()) return false;
+    target_n_samp = (int)samples_d;
+    return true;
+}
+
+int frames_for_target_samples(int target_n_samp) {
+    int frames = (int)std::max<int64_t>(1, ((int64_t)target_n_samp + k_samples_per_latent_frame - 1) / k_samples_per_latent_frame);
+    if (frames & 1) frames++;  // SAME-S needs even latent frame counts; harmless for SAME-L.
+    return frames;
+}
 
 // minimal JSON string escaping (quotes/backslashes/control) for error text we splice into bodies
 std::string json_escape(const std::string& s) {
@@ -510,6 +528,7 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     auto B = [&](const char* k, bool d) { yyjson_val* v = yyjson_obj_get(root, k); return v && yyjson_is_bool(v) ? yyjson_get_bool(v) : d; };
 
     params.prompt           = S("prompt", "");
+    const std::string init_path = S("init_path", "");
     if (yyjson_obj_get(root, "seconds")) {
         perr = "use duration, not seconds";
         return false;
@@ -524,7 +543,12 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
         perr = "duration must be in (0, " + json_num(max_duration) + "] seconds";
         return false;
     }
-    params.frames = std::max(1, (int)(duration * 44100.0 / 4096.0 + 0.5));
+    int duration_target_samples = 0;
+    if (!duration_to_target_samples(duration, duration_target_samples)) {
+        perr = "duration is out of range";
+        return false;
+    }
+    params.frames = frames_for_target_samples(duration_target_samples);
     params.steps            = I("steps", 8);
     seed_resolved           = sa3::pick_seed(I("seed", 0));   // seed -1 => random
     params.seed             = seed_resolved;
@@ -533,11 +557,11 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     params.inpaint_start    = (float)D("inpaint_start", -1.0);
     params.inpaint_end      = (float)D("inpaint_end", -1.0);
     params.duration_padding_sec = (float)D("duration_padding_sec", 6.0);
-    params.target_n_samp    = I("target_samples", 0);
+    params.target_n_samp    = I("target_samples", init_path.empty() ? duration_target_samples : 0);
     // clamp to the requested canvas (frames*4096 samples); an unvalidated JSON int would
     // otherwise drive a huge truncation-buffer alloc in Pipeline::generate. 0 = auto.
     if (params.target_n_samp < 0) params.target_n_samp = 0;
-    else if (params.target_n_samp > params.frames * 4096) params.target_n_samp = params.frames * 4096;
+    else if (params.target_n_samp > params.frames * k_samples_per_latent_frame) params.target_n_samp = params.frames * k_samples_per_latent_frame;
     params.encode_chunk_size = I("encode_chunk_size", 0);
     params.encode_overlap    = I("encode_overlap", 32);
     params.decode_chunk_size = I("decode_chunk_size", 0);
@@ -629,7 +653,6 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     if (!perr.empty()) return false;
     if (!sa3::validate_loudness_params(params.loudness, perr)) return false;
 
-    std::string init_path = S("init_path", "");
     if (!init_path.empty()) {
         if (!std::filesystem::exists(init_path)) {
             perr = "init_path not found: " + init_path;
@@ -896,8 +919,15 @@ int main(int argc, char** argv) {
             return;
         }
 
-        const int target_samples = std::max(1, (int)std::llround(loop_duration * 44100.0));
-        params.frames = std::max(1, (int)(gen_duration * 44100.0 / 4096.0 + 0.5));
+        int target_samples = 0;
+        int gen_samples = 0;
+        if (!duration_to_target_samples(loop_duration, target_samples) ||
+            !duration_to_target_samples(gen_duration, gen_samples)) {
+            res.status = 400;
+            res.set_content(json_err("loop duration is out of range"), "application/json");
+            return;
+        }
+        params.frames = frames_for_target_samples(gen_samples);
         params.target_n_samp = target_samples;
         params.duration_padding_sec = 0.0f;
 
