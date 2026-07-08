@@ -698,10 +698,13 @@ std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved) {
             fflush(stderr);
             std::lock_guard<std::mutex> lk(jobs_mtx);
             auto it = jobs.find(sid); if (it == jobs.end()) return;
-            it->second.progress = (int)(p.fraction * 100.0f);
-            it->second.step     = p.step;
+            it->second.progress    = (int)(p.fraction * 100.0f);
+            it->second.step        = p.step;
+            it->second.total_steps = p.total;   // per-phase total (was locked at the sampling-step count)
             if      (!strcmp(p.stage, "sampling")) it->second.status = "generating";
-            else if (!strcmp(p.stage, "encoding") || !strcmp(p.stage, "decoding")) it->second.status = "encoding";
+            else if (!strcmp(p.stage, "encoding")) it->second.status = "encoding";
+            else if (!strcmp(p.stage, "decoding")) it->second.status = "decoding";
+            else if (!strcmp(p.stage, "done"))     it->second.status = "finalizing";
         };
         std::lock_guard<std::mutex> lk(g_mtx);
         { std::lock_guard<std::mutex> jl(jobs_mtx); if (auto it = jobs.find(sid); it != jobs.end()) it->second.status = "generating"; }

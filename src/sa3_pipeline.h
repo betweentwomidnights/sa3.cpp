@@ -84,6 +84,13 @@ inline float dist_shift_warp(const std::string& type, float t, int seq_len,
     }
     if (type == "Flux") {
         const float min_length = p1, max_length = p2, alpha_min = p3, alpha_max = p4;
+        // Stale params from a dist-shift type switch (e.g. LogSNR params kept when switching to
+        // Flux, where max_length can be negative) make the log()s below NaN, silently poisoning
+        // the schedule -> silent WAV. Fall back to identity. NB: max==min is a VALID constant-alpha
+        // config (handled by the lmax==lmin bump), so guard strictly with < to preserve it.
+        if (min_length <= 0.0f || max_length <= 0.0f || max_length < min_length ||
+            alpha_min <= 0.0f || alpha_max <= 0.0f)
+            return t;
         const float sl = std::min(std::max((float)seq_len, min_length), max_length);
         const float lmin = std::log(min_length);
         float lmax = std::log(max_length);
@@ -96,6 +103,9 @@ inline float dist_shift_warp(const std::string& type, float t, int seq_len,
     }
     if (type == "Full") {
         const float base_shift = p1, max_shift = p2, min_length = p3, max_length = p4;
+        // max_length <= min_length divides by zero in the (sl-min)/(max-min) term below -> NaN.
+        if (max_length <= min_length || max_length <= 0.0f || min_length < 0.0f)
+            return t;
         const float sl = std::min(std::max((float)seq_len, min_length), max_length);
         const float mu = -(base_shift + (max_shift - base_shift) * (sl - min_length) / (max_length - min_length));
         const float em = std::exp(mu);
@@ -808,7 +818,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         if (encode_chunk_size > 0 && sc.chunk)
             fprintf(stderr, "warning: outer chunked encode is only enabled for SAME-L; using monolithic SAME-S encode\n");
 
-        if (params.on_progress) params.on_progress({"encoding", 0, can_chunk_encode ? 1 : 1, 0.02f});
+        if (params.on_progress) params.on_progress({"encoding", 0, 1, 0.02f});
         if (!can_chunk_encode) {
             throw_if_cancelled(params.should_cancel);
             EncodeGraph eg = build_encode_graph(T);
@@ -1108,6 +1118,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         DecodeGraph dg = build_decode_graph(T);
         run_decode_graph(dg, host_x.data(), ab);
         free_decode_graph(dg);
+        if (params.on_progress) params.on_progress({"decoding", 1, 1, 0.95f});  // match chunked path
         if (params.should_cancel && params.should_cancel())
             throw_cancelled_after_frugal_cleanup();
     } else {
