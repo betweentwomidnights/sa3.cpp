@@ -418,8 +418,6 @@ public:
     const DitConfig&  dit_config()  const { return dc_; }
 
 private:
-    void ensure_nets_loaded();         // (re)load T5/DiT/SAME/cond from paths_ if a frugal call freed them
-
     bool loaded_ = false;
     bool nets_resident_ = false;       // are the heavy nets currently loaded? (false after a frugal gen)
     ModelPaths paths_;                 // kept so frugal mode can reload T5/DiT freed mid-request
@@ -435,34 +433,40 @@ private:
 
 // ---- Pipeline implementation (header-only) ----
 
-inline void Pipeline::ensure_nets_loaded() {
-    if (nets_resident_) return;
-    TE_  = load_gguf(paths_.t5.c_str(),   backend_);
-    DIT_ = load_gguf(paths_.dit.c_str(),  backend_);
-    AE_  = load_gguf(paths_.same.c_str(), backend_);
-    CD_  = paths_.cond.empty() ? nullptr
-                               : std::make_unique<GgufModel>(load_gguf(paths_.cond.c_str(), backend_));
-    dit_loras_.clear();        // a freshly loaded DiT carries no adapters
-    nets_resident_ = true;
-}
-
 inline void Pipeline::load(const ModelPaths& paths, int cpu_threads, const char* device) {
     if (loaded_) return;
     paths_ = paths;
     backend_ = make_backend(cpu_threads, device);
     tok_ = Tokenizer::load(paths_.tok.c_str());
-    ensure_nets_loaded();
-    tc_ = T5GemmaConfig::from(TE_);
-    dc_ = DitConfig::from(DIT_);
-    sc_ = SameConfig::from(AE_);
+
+    // Load each model ONE AT A TIME to read config, then free GPU memory immediately.
+    // Peak VRAM during startup = max(model_size) ≈ 3.0 GB (DiT) — fits 4 GB.
+    // The old code loaded ALL 4 models simultaneously (~5.8 GB), OOMing on small cards.
+    TE_  = load_gguf(paths_.t5.c_str(),   backend_);
+    tc_  = T5GemmaConfig::from(TE_);
+    TE_.free();
+
+    DIT_ = load_gguf(paths_.dit.c_str(),  backend_);
+    dc_  = DitConfig::from(DIT_);
+    DIT_.free();
+
+    AE_  = load_gguf(paths_.same.c_str(), backend_);
+    sc_  = SameConfig::from(AE_);
+    AE_.free();
+
+    if (!paths_.cond.empty()) {
+        CD_ = std::make_unique<GgufModel>(load_gguf(paths_.cond.c_str(), backend_));
+        CD_->free();
+    }
+
+    nets_resident_ = false;   // no weight tensors resident — generate() loads per phase
     loaded_ = true;
 }
 
 inline Pipeline::~Pipeline() {
-    if (backend_) {
-        if (nets_resident_) { TE_.free(); DIT_.free(); AE_.free(); if (CD_) CD_->free(); }
-        ggml_backend_free(backend_);
-    }
+    TE_.free(); DIT_.free(); AE_.free();
+    if (CD_) CD_->free();
+    if (backend_) ggml_backend_free(backend_);
 }
 
 inline Pipeline::Pipeline(Pipeline&& o) noexcept { *this = std::move(o); }
@@ -480,12 +484,18 @@ inline Pipeline& Pipeline::operator=(Pipeline&& o) noexcept {
 inline GenResult Pipeline::generate(const GenParams& params) {
     const bool prof = profile_enabled();
     throw_if_cancelled(params.should_cancel);
-    ensure_nets_loaded();   // reload anything a prior frugal (keep_models=false) call freed
-    throw_if_cancelled(params.should_cancel);
+
+    // Per-phase lazy loading: load only the model needed at each stage, free when done.
+    // Peak VRAM across all phases: max(T5, DiT, SAME) = DiT at 3.0 GB — fits 4 GB cards.
+    // The old code loaded ALL 4 models simultaneously (~5.8 GB), OOMing on the medium model.
+    // Each loader checks ctx (null after free()) so consecutive calls with keep_models=true
+    // skip the reload — models stay resident.
 
     // aliases so the moved body reads exactly like the original CLI generation code
     GgufModel& TE = TE_; GgufModel& DIT = DIT_; GgufModel& AE = AE_;
-    const GgufModel& CD = CD_ ? *CD_ : TE_;
+    // CD resolves to CD_ when present, else TE_ — resolved lazily via a lambda so calling
+    // code reads naturally without a null-check. Do NOT call this before TE/TE_ is loaded.
+    auto CD = [&]() -> const GgufModel& { return CD_ ? *CD_ : TE_; };
     const T5GemmaConfig& tc = tc_;
     const DitConfig& dc = dc_;
     const SameConfig& sc = sc_;
@@ -541,31 +551,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     }
     const bool same_l_flash_attn = same_l_flash_mode != 0;
     const int ds = sc.patch_size * sc.output_seg;
-
-    // ---------- LoRA/DoRA adapters (chained in order) ----------
-    // apply_loras is IN-PLACE over the DiT base, so changing adapters/strength needs a clean base.
-    // Only reload + re-apply when this request's set differs from what's already baked into the DiT
-    // (so resident back-to-back requests with the SAME adapters skip the work; a change pays a reload).
-    if (dit_loras_ != params.loras) {
-        throw_if_cancelled(params.should_cancel);
-        if (!dit_loras_.empty()) {           // DiT carries a prior request's adapters -> reload a clean base
-            DIT.free();
-            DIT_ = load_gguf(paths_.dit.c_str(), backend_);
-            dit_loras_.clear();
-        }
-        if (!params.loras.empty()) {
-            std::vector<sa3::LoraAdapter> adapters;
-            for (auto& ls : params.loras) adapters.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
-            sa3::apply_loras(DIT, adapters);
-            printf("lora: applied %zu adapter(s):\n", adapters.size());
-            for (size_t i = 0; i < adapters.size(); i++)
-                printf("  [%zu] %s  type=%s strength=%.2f\n", i, params.loras[i].first.c_str(),
-                       adapters[i].type.c_str(), adapters[i].strength);
-        }
-        dit_loras_ = params.loras;
-        if (params.should_cancel && params.should_cancel())
-            throw_cancelled_after_frugal_cleanup();
-    }
+    // NOTE: LoRA/DoRA adapters are applied later, right after the DiT is loaded (before sampling).
+    // With per-phase loading the DiT is not resident here, so applying now would be a silent no-op.
 
     // ---------- init audio: pad + derive output T (overrides params.frames) ----------
     std::vector<float> init_audio; int init_L = 0;
@@ -604,6 +591,10 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // server, libsa3) funnels through. Init-audio derives `frames` from its (already aligned) buffer
     // above, so only the text2music path needs the clamp.
     if (!has_init && (frames & 1)) frames++;
+
+    // Load TE now — max_len, cond_dim, and conditioning assembly all need it.
+    // Lazily loaded here so a prior keep_models=false call's free() doesn't cost us.
+    if (!TE.ctx) TE = load_gguf(paths_.t5.c_str(), backend_);
 
     // text2music: generate a (frames + duration_padding) canvas so the model isn't forced to "end"
     // the piece in the kept region, then truncate to `frames` at the very end. eff_frames (= the
@@ -688,17 +679,22 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         return hidden;
     };
 
+    // ---------- load CD (if separate) for conditioning ----------
+    if (!paths_.cond.empty() && (!CD_ || !CD_->ctx))
+        CD_ = std::make_unique<GgufModel>(load_gguf(paths_.cond.c_str(), backend_));
+    throw_if_cancelled(params.should_cancel);
+
     // ---------- conditioning assembly (host): [T5 hidden (pad-substituted) | secs embed] ----------
     double t0 = wall_time_s();
-    std::vector<float> pad_emb = tensor_to_host(CD, "te.padding_embedding");
+    std::vector<float> pad_emb = tensor_to_host(CD(), "te.padding_embedding");
     const float secs = (float)eff_frames * (sc.patch_size * sc.output_seg) / 44100.0f;
-    const float smin = CD.f32("t5g.secs_min"), smax = CD.f32("t5g.secs_max");
-    const int sdim = (int)CD.u32("t5g.secs_dim");
+    const float smin = CD().f32("t5g.secs_min"), smax = CD().f32("t5g.secs_max");
+    const int sdim = (int)CD().u32("t5g.secs_dim");
     float sclamp = secs < smin ? smin : (secs > smax ? smax : secs);
     float snorm = (sclamp - smin) / (smax - smin);
     std::vector<float> ef; expo_features(snorm, ef, sdim, 0.5f, 10000.0f);
-    std::vector<float> sw = tensor_to_host(CD, "te.secs.weight");
-    std::vector<float> sb = tensor_to_host(CD, "te.secs.bias");
+    std::vector<float> sw = tensor_to_host(CD(), "te.secs.weight");
+    std::vector<float> sb = tensor_to_host(CD(), "te.secs.bias");
     std::vector<float> secs_embed(cond_dim);
     for (int d = 0; d < cond_dim; d++) {
         float acc = sb[d];
@@ -750,6 +746,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // ---------- audio2audio: encode init audio -> latent z_init [latent, T] ----------
     std::vector<float> z_init;
     if (has_init) {
+        if (!AE.ctx) AE = load_gguf(paths_.same.c_str(), backend_);
         z_init.resize(N);
         struct EncodeGraph {
             ggml_context* ctx = nullptr;
@@ -883,9 +880,48 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                f0, f1, T, f0 * (float)ds / 44100.0f, f1 * (float)ds / 44100.0f);
     }
 
-    if (!keep_models) { TE.free(); if (CD_) CD_->free(); }
+    // Free T5 (and AE if it was loaded for init audio) before DiT sampling.
+    // DiT needs ~3.0 GB; with T5 (~1.2 GB) and/or AE (~1.6 GB) also resident,
+    // a 4 GB card OOMs. The release_all_for_frugal_cancel paths and next-gen
+    // reloads handle cancellation + subsequent requests respectively.
+    if (!keep_models) {
+        if (has_init && AE.ctx) AE.free();             // init encode done
+        TE.free();
+        if (CD_) CD_->free();
+    }
     if (params.should_cancel && params.should_cancel())
         throw_cancelled_after_frugal_cleanup();
+
+    // Load DiT (if not already resident from a prior keep_models call).
+    if (!DIT.ctx) DIT = load_gguf(paths_.dit.c_str(), backend_);
+    throw_if_cancelled(params.should_cancel);
+
+    // ---------- LoRA/DoRA adapters (chained in order) ----------
+    // Applied here, AFTER the DiT is resident (loaded just above), so the in-place weight
+    // override lands on real tensors. apply_loras is IN-PLACE over the DiT base, so changing
+    // adapters/strength needs a clean base: reload + re-apply only when this request's set
+    // differs from what's already baked in (resident back-to-back requests with the SAME
+    // adapters skip the work; a change pays a reload).
+    if (dit_loras_ != params.loras) {
+        throw_if_cancelled(params.should_cancel);
+        if (!dit_loras_.empty()) {           // DiT carries a prior request's adapters -> reload a clean base
+            DIT.free();
+            DIT_ = load_gguf(paths_.dit.c_str(), backend_);
+            dit_loras_.clear();
+        }
+        if (!params.loras.empty()) {
+            std::vector<sa3::LoraAdapter> adapters;
+            for (auto& ls : params.loras) adapters.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
+            sa3::apply_loras(DIT, adapters);
+            printf("lora: applied %zu adapter(s):\n", adapters.size());
+            for (size_t i = 0; i < adapters.size(); i++)
+                printf("  [%zu] %s  type=%s strength=%.2f\n", i, params.loras[i].first.c_str(),
+                       adapters[i].type.c_str(), adapters[i].strength);
+        }
+        dit_loras_ = params.loras;
+        if (params.should_cancel && params.should_cancel())
+            throw_cancelled_after_frugal_cleanup();
+    }
 
     // ---------- DiT ping-pong ----------
     const int S = dc.mem_tokens + T;
@@ -977,6 +1013,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (!keep_models) { DIT.free(); dit_loras_.clear(); }   // DiT gone -> next gen reloads a clean base
     if (dit_cancelled)
         throw_cancelled_after_frugal_cleanup();
+
+    // Load SAME for decode. DiT was freed above when !keep_models, freeing ~3.0 GB for
+    // SAME's ~1.6 GB. For keep_models=true, AE is already resident from the init-encode
+    // phase or the prior generate() call.
+    if (!AE.ctx) AE = load_gguf(paths_.same.c_str(), backend_);
+    throw_if_cancelled(params.should_cancel);
 
     LoudnessMeta loudness_meta = make_loudness_meta(params.loudness);
     apply_latent_loudness(host_x, params.loudness, loudness_meta);
@@ -1108,8 +1150,10 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (!keep_models) {
         AE.free();
         if (CD_) CD_->free();
-        nets_resident_ = false;
-    }   // frugal: free everything -> reload next call
+        nets_resident_ = false;      // frugal: free everything -> reload next call
+    } else {
+        nets_resident_ = true;       // resident: keep for next call, destructor frees
+    }
 
     // truncate the padded canvas back to the requested length (planar -> compact each channel)
     int out_n_samp = eff_frames * sc.patch_size * sc.output_seg;
