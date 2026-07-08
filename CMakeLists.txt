@@ -21,6 +21,34 @@ option(SA3_HIP    "Build the GGML HIP/ROCm backend"    OFF)
 
 if(SA3_CUDA)
     set(GGML_CUDA ON CACHE BOOL "" FORCE)
+    # CUDA graphs need Ampere+ (CC >= 8.0). On older cards a stale GGML_CUDA_GRAPHS=ON
+    # compiles graph code that prints "disabling CUDA graphs" at runtime. Force it OFF only
+    # when we can PROVE the build targets exclusively pre-Ampere GPUs: every entry of
+    # CMAKE_CUDA_ARCHITECTURES is a plain number < 80. Any non-numeric token (native, all,
+    # all-major) means the arch is unknown at configure time, and any entry >= 80 means an
+    # Ampere+ target is present, so in both cases we leave the ggml default untouched (this
+    # is why -DCMAKE_CUDA_ARCHITECTURES=native must NOT disable graphs on capable hardware).
+    if(CMAKE_CUDA_ARCHITECTURES)
+        set(_sa3_all_pre_ampere ON)
+        set(_sa3_any_numeric OFF)
+        foreach(_arch ${CMAKE_CUDA_ARCHITECTURES})
+            string(REGEX REPLACE "-(real|virtual)$" "" _arch_num "${_arch}")
+            if(_arch_num MATCHES "^[0-9]+$")
+                set(_sa3_any_numeric ON)
+                if(_arch_num GREATER_EQUAL 80)
+                    set(_sa3_all_pre_ampere OFF)
+                    break()
+                endif()
+            else()
+                set(_sa3_all_pre_ampere OFF)   # native/all/unknown -> can't prove pre-Ampere
+                break()
+            endif()
+        endforeach()
+        if(_sa3_any_numeric AND _sa3_all_pre_ampere)
+            set(GGML_CUDA_GRAPHS OFF CACHE BOOL "" FORCE)
+            message(STATUS "SA3_CUDA: CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES} is all pre-Ampere; forcing GGML_CUDA_GRAPHS=OFF")
+        endif()
+    endif()
 endif()
 if(SA3_VULKAN)
     set(GGML_VULKAN ON CACHE BOOL "" FORCE)
