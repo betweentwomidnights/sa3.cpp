@@ -115,6 +115,13 @@ int main(int argc, char** argv) {
             snap << "seed=" << cfg.seed << "\n";
             snap << "output_dir=" << cfg.output_dir << "\n";
             snap << "prompt_mode=" << cfg.prompt_mode << "\n";
+            snap << "max_steps=" << cfg.max_steps << "\n";
+            snap << "max_epochs=" << cfg.max_epochs << "\n";
+            snap << "random_crop=" << (cfg.random_crop ? "true" : "false") << "\n";
+            snap << "grad_clip=" << cfg.grad_clip << "\n";
+            snap << "timestep_sampler=" << cfg.timestep_sampler << "\n";
+            snap << "dist_shift=" << cfg.dist_shift << "\n";
+            snap << "dist_shift_effective_length=" << (cfg.dist_shift_effective_length ? "true" : "false") << "\n";
         }
         {
             std::ofstream cmd(std::filesystem::path(cfg.output_dir) / "command.txt");
@@ -166,6 +173,12 @@ int main(int argc, char** argv) {
         sa3::TrainDiffusionSampler sampler(cfg.seed, cfg.timestep_sampler);
         sa3::TrainLoraGradAccum accum;
 
+        // Stage 10: training-time dist-shift params (per-type defaults; sa3-medium trains with
+        // "Full" base_shift 0.5 / max_shift 1.15 / min 256 / max 4096).
+        float ds_p1 = 0.0f, ds_p2 = 0.0f, ds_p3 = 0.0f, ds_p4 = 0.0f;
+        sa3::dist_shift_defaults(cfg.dist_shift, ds_p1, ds_p2, ds_p3, ds_p4);
+        const int downsampling_ratio = sc.patch_size * sc.output_seg;  // audio samples per latent frame
+
         // Stage 1: multi-epoch loop. max_steps>0 or max_epochs>0 enables per-epoch shuffle and
         // stops at max_steps optimizer updates; both 0 keeps the legacy single pass.
         const bool multi_epoch = cfg.max_steps > 0 || cfg.max_epochs > 0;
@@ -203,8 +216,11 @@ int main(int argc, char** argv) {
                     throw std::runtime_error(err);
                 const std::string caption = compose_train_prompt(cfg, pair);
                 sa3::TrainConditioning conditioning;
-                const float seconds = (float)windowed.n_samples / 44100.0f;
-                if (!sa3::encode_train_caption_conditioning(tok, te, cond, tc, caption, seconds, conditioning, err))
+                // Reference parity: seconds_total is the FULL source-file duration (ceil'd at
+                // pre-encode) and is not updated for the crop window. It feeds both the
+                // seconds_total conditioning and the dist-shift effective length.
+                const int seconds_total = (int)std::ceil((double)decoded.n_samples / 44100.0);
+                if (!sa3::encode_train_caption_conditioning(tok, te, cond, tc, caption, (float)seconds_total, conditioning, err))
                     throw std::runtime_error(err);
                 if (!graph.ctx || graph_frames != latents.frames ||
                     graph_cond_dim != conditioning.cond_dim || graph_ctx_len != conditioning.ctx_len) {
@@ -219,7 +235,16 @@ int main(int argc, char** argv) {
                     graph_ctx_len = conditioning.ctx_len;
                 }
                 sa3::TrainDiffusionSample sample;
-                if (!sampler.sample(latents.z, sample, err)) throw std::runtime_error(err);
+                // Stage 10: warp the drawn t like DiffusionCondTrainingWrapper (dist_shift.shift
+                // with use_effective_length_for_schedule: effective length from seconds_total).
+                float t = sampler.draw_t();
+                if (cfg.dist_shift != "None") {
+                    const int eff_len = cfg.dist_shift_effective_length
+                        ? (int)std::ceil((double)seconds_total * 44100.0 / (double)downsampling_ratio)
+                        : latents.frames;
+                    t = sa3::dist_shift_warp(cfg.dist_shift, t, eff_len, ds_p1, ds_p2, ds_p3, ds_p4);
+                }
+                if (!sampler.sample_at(latents.z, t, sample, err)) throw std::runtime_error(err);
                 float loss = 0.0f;
                 if (!sa3::run_train_dit_accumulate(dit.backend, graph, lora, accum, sample, conditioning, dc, loss, err))
                     throw std::runtime_error(err);
@@ -228,10 +253,10 @@ int main(int argc, char** argv) {
                     if (!sa3::train_apply_accumulated_adamw(lora, accum, loop, opt, err)) throw std::runtime_error(err);
                     updated = true;
                 }
-                std::printf("epoch %d step %d id=%s loss=%.6f\n", epoch, loop.step, pair.id.c_str(), loss);
+                std::printf("epoch %d step %d id=%s t=%.4f loss=%.6f\n", epoch, loop.step, pair.id.c_str(), sample.t, loss);
                 metrics << "{\"epoch\":" << epoch << ",\"update\":" << loop.step
                         << ",\"split\":\"train\",\"id\":\"" << pair.id
-                        << "\",\"loss\":" << loss << "}\n";
+                        << "\",\"t\":" << sample.t << ",\"loss\":" << loss << "}\n";
                 metrics.flush();
                 if (updated && cfg.checkpoint_every > 0 && (loop.step % cfg.checkpoint_every) == 0) do_checkpoint();
                 if (cfg.max_steps > 0 && loop.step >= cfg.max_steps) stop = true;

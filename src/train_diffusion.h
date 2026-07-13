@@ -52,11 +52,18 @@ public:
         : rng_(seed), mode_(mode) {}
 
     bool sample(const std::vector<float>& z, TrainDiffusionSample& out, std::string& err) {
+        return sample_at(z, draw_t(), out, err);
+    }
+
+    // Noise the latent at an externally supplied t. Lets the caller warp the drawn t
+    // (training dist-shift) between draw_t() and noising, matching the reference order
+    // (timestep_sampler -> dist_shift.shift -> noise).
+    bool sample_at(const std::vector<float>& z, float t, TrainDiffusionSample& out, std::string& err) {
         if (z.empty()) {
             err = "latent vector is empty";
             return false;
         }
-        out.t = draw_t();
+        out.t = t;
         out.noise.resize(z.size());
         out.x_t.resize(z.size());
         out.velocity_target.resize(z.size());
@@ -69,7 +76,6 @@ public:
         return true;
     }
 
-private:
     // Timestep draw. "uniform" = U(0,1). "trunc_logit_normal" ports the reference
     // truncated_logistic_normal_rescaled(left_trunc=0.075) then flips (t = 1 - t),
     // matching stable_audio_3/training/diffusion.py + inference/sampling.py.
@@ -87,6 +93,7 @@ private:
         return uniform_(rng_);
     }
 
+private:
     std::mt19937_64 rng_;
     std::string mode_;
     std::uniform_real_distribution<float> uniform_{0.0f, 1.0f};

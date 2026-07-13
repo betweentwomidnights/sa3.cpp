@@ -3,6 +3,7 @@
 
 #include "yyjson.h"
 
+#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <fstream>
@@ -57,7 +58,28 @@ struct TrainConfig {
     float grad_clip = 0.0f;
     // Timestep sampler (Stage 5): "uniform" or "trunc_logit_normal" (the reference default).
     std::string timestep_sampler = "uniform";
+    // Training-time distribution shift on sampled timesteps (Stage 10). The reference warps t
+    // through the model's distribution_shift_options; for sa3-medium that is type "full" with
+    // min_length 256 / max_length 4096 (base/max shift 0.5/1.15). Values map onto
+    // sa3_pipeline.h dist_shift_warp with dist_shift_defaults per type. "None" disables.
+    std::string dist_shift = "Full";
+    // Sequence length fed to the shift. true = reference use_effective_length_for_schedule:
+    // ceil(seconds_total * sr / downsampling_ratio) from the FULL source-file duration (the
+    // pre-encode metadata is not updated for crops). false = the crop's latent frame count.
+    bool dist_shift_effective_length = true;
 };
+
+// Canonicalize a dist-shift type name to the sa3_pipeline.h spelling. Accepts any case.
+inline bool train_normalize_dist_shift(std::string& v) {
+    std::string s;
+    for (char ch : v) s += (char)std::tolower((unsigned char)ch);
+    if      (s == "none")   v = "None";
+    else if (s == "full")   v = "Full";
+    else if (s == "flux")   v = "Flux";
+    else if (s == "logsnr") v = "LogSNR";
+    else return false;
+    return true;
+}
 
 inline bool train_parse_bool(const std::string& text, bool& out) {
     if (text == "1" || text == "true" || text == "yes" || text == "on")  { out = true;  return true; }
@@ -153,6 +175,16 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
     else if (key == "max-epochs" || key == "max_epochs" || key == "epochs") return set_i(c.max_epochs);
     else if (key == "grad-clip" || key == "grad_clip" || key == "gradient-clip-val") return set_f(c.grad_clip);
     else if (key == "timestep-sampler" || key == "timestep_sampler") c.timestep_sampler = value;
+    else if (key == "dist-shift" || key == "dist_shift") {
+        c.dist_shift = value;
+        if (!train_normalize_dist_shift(c.dist_shift)) {
+            err = "unsupported dist_shift (expected none|full|flux|logsnr): " + value;
+            return false;
+        }
+    }
+    else if (key == "dist-shift-effective-length" || key == "dist_shift_effective_length") {
+        if (!train_parse_bool(value, c.dist_shift_effective_length)) { err = "invalid boolean for --" + key + ": " + value; return false; }
+    }
     else if (key == "random-crop" || key == "random_crop") {
         if (!train_parse_bool(value, c.random_crop)) { err = "invalid boolean for --" + key + ": " + value; return false; }
     }
@@ -282,6 +314,8 @@ inline std::string train_config_usage(const char* argv0) {
        << "core options: --model medium|small-music|small-sfx --models-dir DIR --dataset DIR --out DIR\n"
        << "adapter: --adapter-type lora|dora-rows|dora-cols|bora|*-xs --rank N --alpha F\n"
        << "optimization: --learning-rate F --batch-size N --frames N --duration SEC --seed N\n"
+       << "schedule: --timestep-sampler uniform|trunc_logit_normal --dist-shift none|full|flux|logsnr\n"
+       << "          --dist-shift-effective-length BOOL (full-file effective length vs crop frames)\n"
        << "conditioning: --prompt-mode caption|caption-lyrics|lyrics\n";
     return ss.str();
 }
