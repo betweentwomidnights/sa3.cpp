@@ -62,5 +62,21 @@ If generation fails with `[gguf] short read ...`, the named GGUF is incomplete, 
 download. Rerun `models.sh` / `models.cmd`; the curl downloader resumes existing partial files. If it still
 fails, delete the named `.gguf` and run the downloader again.
 
+## LoRA training bases
+
+Adapters are trained on the matching base checkpoint, then applied to the ARC/post-trained model for
+inference:
+
+| `sa3-train --model` | Training checkpoint | Inference checkpoint |
+|---|---|---|
+| `medium` | `stabilityai/stable-audio-3-medium-base` | `stabilityai/stable-audio-3-medium` |
+| `small-music` | `stabilityai/stable-audio-3-small-music-base` | `stabilityai/stable-audio-3-small-music` |
+| `small-sfx` | `stabilityai/stable-audio-3-small-sfx-base` | `stabilityai/stable-audio-3-small-sfx` |
+
+`sa3-train` therefore requires `stable-audio-3-<variant>-base-dit-*-F16.gguf` (or F32 according to
+`--encoding`) and deliberately refuses to fall back to the inference DiT. Convert the base checkpoint
+with `tools/convert_dit.py`, quantize it with `tools/quantize_gguf.py`, or pass its GGUF explicitly with
+`--dit`. The tokenizer, T5 encoder, conditioner, and SAME autoencoder remain the normal inference files.
+
 `sa3-generate --model <variant>` resolves this set from the naming convention above. lora adapters resolve the
 same way (`lora-<name>-*.gguf`) — see [`../loras`](../loras).

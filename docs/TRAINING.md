@@ -13,13 +13,24 @@ CUDA is the target backend for real training runs. CPU builds are useful for par
 
 ## Models
 
-Download the base GGUF models first:
+Download the normal inference GGUF set first:
 
 ```sh
 python tools/download_models.py --variant medium
 ```
 
-`sa3-train --model medium --models-dir models` resolves the tokenizer, T5/Gemma encoder, conditioner, DiT, and SAME GGUFs with the same naming convention as `sa3-generate`. Adapter checkpoint metadata and tensor shapes are documented in [lora_checkpoint_contract.md](lora_checkpoint_contract.md).
+Training additionally needs the matching base DiT. Adapters are trained on `medium-base`,
+`small-music-base`, or `small-sfx-base`, then applied to `medium`, `small-music`, or `small-sfx`
+respectively at inference. `sa3-train --model <variant>` resolves the normal tokenizer, T5/Gemma
+encoder, conditioner, and SAME files, but requires a separate
+`stable-audio-3-<variant>-base-dit-*-F16.gguf`; it will not silently train on the ARC/post-trained
+inference DiT. See [the models README](../models/README.md#lora-training-bases) for conversion details.
+Adapter checkpoint metadata and tensor shapes are documented in
+[lora_checkpoint_contract.md](lora_checkpoint_contract.md).
+
+F16 is the recommended training encoding. The frozen base DiT weights remain F16 while adapter
+parameters and optimizer state remain F32, matching the reference trainer's memory-saving
+`--base_precision fp16` configuration.
 
 ## Dataset
 
@@ -56,6 +67,17 @@ build-cuda/bin/sa3-train \
 ```
 
 The current graph executes one physical sample at a time. Use `--batch-size 1`.
+
+The native target inventory contains the DiT's Linear/Conv weights: 228 targets for medium and 152
+for small. It intentionally does not adapt the separate `seconds_total` conditioner Linear (the
+optional 229th medium or 153rd small reference target).
+Stable Audio 3's training guide recommends `--exclude seconds_total` for small datasets to avoid
+conditioner hijacking; use that exclusion for direct cross-framework comparisons.
+
+Small-model training uses the same command with `--model small-music` or `--model small-sfx` and
+requires its matching `*-base` DiT. Small-music and small-sfx share the same standard-attention
+architecture and local/inpainting conditioning shape; a small-music smoke therefore exercises the
+same native graph structure used by small-sfx.
 
 `--adapter-type` accepts `lora`, `dora-rows`, `dora-cols`, `bora`, and their `-xs`
 variants (`lora-xs`, `dora-rows-xs`, `dora-cols-xs`, `bora-xs`). The `-xs` families
