@@ -20,6 +20,7 @@ quality-critical, so they're always F32.
 ```bash
 ./models.sh                          # medium f16   (Windows: models.cmd)
 ./models.sh --variant small-music    # or small-sfx; --encoding f32; --out DIR
+./models.sh --variant medium --training-base  # inference set + LoRA training base
 ```
 
 ## faster official downloader

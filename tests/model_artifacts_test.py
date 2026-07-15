@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Standard-library tests for published model naming and download manifests."""
 
+import os
+import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -48,6 +51,39 @@ class ModelArtifactsTest(unittest.TestCase):
         )
         self.assertIn("Powered by Stability AI", notice)
         self.assertIn("The model was not retrained.", notice)
+
+    def assert_downloader_plan(self, command):
+        result = subprocess.run(
+            command,
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        output = result.stdout.replace("\\", "/")
+        self.assertEqual(output.count("[plan]"), 6)
+        self.assertIn(
+            "thepatch/stable-audio-3-small-sfx-base-GGUF/resolve/main/"
+            "stable-audio-3-small-sfx-base-dit-0.5B-v1.0-F32.gguf",
+            output,
+        )
+        self.assertIn("t5gemma-b-b-ul2-v1.0-vocab.gguf", output)
+
+    def test_shell_downloader_training_base_plan(self):
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not installed")
+        self.assert_downloader_plan([
+            bash, "models.sh", "--variant", "small-sfx", "--encoding", "f32",
+            "--training-base", "--dry-run", "--out", "test-models",
+        ])
+
+    @unittest.skipUnless(os.name == "nt", "Windows command script")
+    def test_cmd_downloader_training_base_plan(self):
+        self.assert_downloader_plan([
+            "cmd.exe", "/d", "/c", "models.cmd", "--variant", "small-sfx",
+            "--encoding", "f32", "--training-base", "--dry-run", "--out", "test-models",
+        ])
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ cd sa3.cpp
 ./build.sh cuda        # or: cpu | vulkan | hip | metal | all     (windows: build.cmd cuda)
 
 # 2. download a model set into ./models  (no python — curl from HuggingFace)
-./models.sh            # windows: models.cmd    (or --variant small-music | --encoding f32)
+./models.sh            # windows: models.cmd    (add --training-base for native LoRA training)
 
 # 3. put the tools on PATH for this shell (points SA3_MODELS_DIR at ./models too)
 source ./env.sh        # windows:  env.cmd  (cmd)   or   . .\env.ps1  (powershell)
