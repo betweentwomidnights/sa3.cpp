@@ -152,7 +152,7 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
     const size_t data_base = 8 + (size_t)hlen;
 
     // one adapter tensor to emit: gguf name + shape (safetensors order) + pointer into buf
-    struct Emit { std::string name; std::vector<int64_t> shape; const float* data; size_t n; };
+    struct Emit { std::string name; std::vector<int64_t> shape; const void* data; size_t n; bool f16; };
     std::vector<Emit> emits;
     int n_targets = 0;
     {
@@ -172,17 +172,18 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
             if (base.empty()) continue;                            // non-DiT (conditioners.*) -> skip
             yyjson_val* t = yyjson_obj_iter_get_val(key);
             yyjson_val* vd = yyjson_obj_get(t, "dtype");
-            if (!vd || std::string(yyjson_get_str(vd)) != "F32") {
-                err = "expected F32 tensor, got '" + std::string(vd ? yyjson_get_str(vd) : "?") + "' for " + kname;
+            const std::string dtype = vd ? yyjson_get_str(vd) : "?";
+            if (dtype != "F32" && dtype != "F16") {   // f16 exports (gary4local fp16 training) are upcast below
+                err = "expected F32/F16 tensor, got '" + dtype + "' for " + kname;
                 yyjson_doc_free(doc); return false;
             }
-            Emit e; e.name = base + "." + kind;
+            Emit e; e.name = base + "." + kind; e.f16 = dtype == "F16";
             yyjson_val* vs = yyjson_obj_get(t, "shape");
             size_t n = 1; yyjson_val* dv; yyjson_arr_iter ai; yyjson_arr_iter_init(vs, &ai);
             while ((dv = yyjson_arr_iter_next(&ai))) { const int64_t d = yyjson_get_sint(dv); e.shape.push_back(d); n *= (size_t)d; }
             yyjson_val* vo = yyjson_obj_get(t, "data_offsets");
             const uint64_t begin = yyjson_get_uint(yyjson_arr_get(vo, 0));
-            e.data = (const float*)(buf.data() + data_base + begin);
+            e.data = buf.data() + data_base + begin;
             e.n = n;
             emits.push_back(std::move(e));
             mapped_modules[module] = 1;
@@ -213,7 +214,8 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
         for (int d = 0; d < nd; ++d) ne[d] = e.shape[nd - 1 - d];   // reverse to ggml ne order
         ggml_tensor* t = ggml_new_tensor(ctx, GGML_TYPE_F32, nd, ne);
         ggml_set_name(t, e.name.c_str());
-        std::memcpy(t->data, e.data, e.n * sizeof(float));
+        if (e.f16) ggml_fp16_to_fp32_row((const ggml_fp16_t*)e.data, (float*)t->data, (int64_t)e.n);
+        else       std::memcpy(t->data, e.data, e.n * sizeof(float));
         gguf_add_tensor(g, t);
     }
 

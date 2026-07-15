@@ -7,6 +7,7 @@
 
 #include "ggml-alloc.h"
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,8 @@ struct TrainDitParamTensors {
     ggml_tensor* magnitude = nullptr;
     ggml_tensor* magnitude_r = nullptr;
     ggml_tensor* magnitude_c = nullptr;
+    ggml_tensor* base_norm_sq = nullptr;    // functional dora-rows constant input [out]
+    std::vector<float> base_norm_sq_host;   // its (constant) host values, re-uploaded every step
 };
 
 struct TrainDitGraph {
@@ -41,6 +44,7 @@ struct TrainDitGraph {
     ggml_tensor* velocity = nullptr;
     ggml_tensor* loss = nullptr;
     std::vector<TrainDitParamTensors> params;
+    DitLora dl;                          // functional adapter map (lora / dora-rows); empty otherwise
 };
 
 inline void free_train_dit_graph(TrainDitGraph& g) {
@@ -85,6 +89,12 @@ inline bool build_train_dit_forward_graph(GgufModel& dit, const DitConfig& dc, c
 
     const bool xs = lora.adapter_type.size() >= 3 &&
                     lora.adapter_type.compare(lora.adapter_type.size() - 3, 3, "-xs") == 0;
+    // Functional adapter application (see functional-lora-speed-plan): keeps the backward off the
+    // full-weight out_prod that made the materialized-effective-weight path ~27x slower. Supported
+    // for plain lora and dora-rows (the ratatat-2 reference config); other families fall back to the
+    // materialized dit.overrides path below.
+    const bool functional = (lora.adapter_type == "lora" || lora.adapter_type == "dora-rows");
+    const bool dora_rows = (lora.adapter_type == "dora-rows");
     std::vector<std::string> overridden;
     for (const TrainLoraParam& hp : lora.params) {
         TrainDitParamTensors tp;
@@ -131,14 +141,35 @@ inline bool build_train_dit_forward_graph(GgufModel& dit, const DitConfig& dc, c
             gp.magnitude_c = tp.magnitude_c;
         }
         ggml_tensor* base = dit.get(hp.target.weight_name);
-        dit.overrides[hp.target.weight_name] =
-            train_lora_effective_weight(out.ctx, base, gp, lora.adapter_type, lora.rank, lora.alpha);
-        overridden.push_back(hp.target.weight_name);
+        if (functional) {
+            // Register the adapter tensors for functional application in dit_lin. The tiny A,B
+            // (+ dora magnitude) stay the only trained params; the frozen base is read only for the
+            // dora column-norm (cheaply, via mul_mat(W,A)), never materialized into a full W_eff.
+            DitLoraParam dp;
+            dp.A = tp.lora_A;
+            dp.B = tp.lora_B;
+            dp.scale = lora.alpha / (float)lora.rank;
+            dp.in = hp.target.in;
+            if (dora_rows) {
+                dp.dora = true;
+                dp.magnitude = tp.magnitude;
+                tp.base_norm_sq = ggml_new_tensor_1d(out.ctx, GGML_TYPE_F32, hp.target.out);
+                ggml_set_input(tp.base_norm_sq);
+                dp.base_norm_sq = tp.base_norm_sq;
+                tp.base_norm_sq_host = train_row_norm_sq(base, hp.target.in, hp.target.out, 1e-12f);
+            }
+            out.dl[hp.target.weight_name] = dp;
+        } else {
+            dit.overrides[hp.target.weight_name] =
+                train_lora_effective_weight(out.ctx, base, gp, lora.adapter_type, lora.rank, lora.alpha);
+            overridden.push_back(hp.target.weight_name);
+        }
         out.params.push_back(tp);
     }
 
+    const DitLora* dl = functional ? &out.dl : nullptr;
     out.velocity = ggml_cont(out.ctx, dit_forward(out.ctx, dit, out.x, out.tfeat, out.cross,
-                                                  out.global, out.pos, out.ones, dc, out.local));
+                                                  out.global, out.pos, out.ones, dc, out.local, dl));
     ggml_set_output(out.velocity);
     ggml_tensor* sq = ggml_sqr(out.ctx, ggml_sub(out.ctx, out.velocity, out.target));
     if (inpaint) {
@@ -177,6 +208,12 @@ inline bool build_train_dit_forward_graph(GgufModel& dit, const DitConfig& dc, c
         err = "failed to allocate DiT training graph (gallocr)";
         return false;
     }
+    std::fprintf(stderr, "[train] DiT fwd+bwd graph: %d nodes, gallocr buffer %.1f MiB\n",
+                 ggml_graph_n_nodes(out.graph),
+                 ggml_gallocr_get_buffer_size(out.alloc, 0) / (1024.0 * 1024.0));
+    // NB: the functional dora-rows base_norm_sq constants are uploaded per step in
+    // upload_train_lora_state, not here: gallocr reuses an input tensor's buffer once its last
+    // consumer has run, so a single build-time upload would be clobbered after the first step.
     return true;
 }
 

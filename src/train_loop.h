@@ -5,6 +5,7 @@
 #include "train_conditioning.h"
 #include "train_inpaint.h"
 #include "train_diffusion.h"
+#include "train_ckpt.h"
 #include "train_dit.h"
 #include "train_lora.h"
 #include "train_optimizer.h"
@@ -49,6 +50,10 @@ inline void upload_train_lora_state(const TrainLoraState& state, const TrainDitG
         if (tp.magnitude) ggml_backend_tensor_set(tp.magnitude, hp.magnitude.data(), 0, hp.magnitude.size() * sizeof(float));
         if (tp.magnitude_r) ggml_backend_tensor_set(tp.magnitude_r, hp.magnitude_r.data(), 0, hp.magnitude_r.size() * sizeof(float));
         if (tp.magnitude_c) ggml_backend_tensor_set(tp.magnitude_c, hp.magnitude_c.data(), 0, hp.magnitude_c.size() * sizeof(float));
+        // base_norm_sq (functional dora-rows) is a constant, but gallocr reuses input buffers after
+        // their last consumer within a step, so it must be re-set every step like the other inputs.
+        if (tp.base_norm_sq && !tp.base_norm_sq_host.empty())
+            ggml_backend_tensor_set(tp.base_norm_sq, tp.base_norm_sq_host.data(), 0, tp.base_norm_sq_host.size() * sizeof(float));
     }
 }
 
@@ -137,14 +142,16 @@ inline void train_average_grad(std::vector<float>& grad, int count) {
 // Average every accumulated gradient by count, then (if grad_clip > 0) scale them all so the
 // GLOBAL L2 norm across every trainable vector is <= grad_clip. Matches torch clip_grad_norm_
 // over all LoRA params, applied to the mean gradient of the accumulation window.
-inline void train_average_and_clip(TrainLoraGradAccum& accum, const TrainAdamWParams& hp) {
+// grad_norm_out (optional) reports the pre-clip global norm — comparable to the reference
+// trainer's train/grad_norm metric.
+inline void train_average_and_clip(TrainLoraGradAccum& accum, const TrainAdamWParams& hp,
+                                   double* grad_norm_out = nullptr) {
     const int count = accum.count;
     auto avg = [&](std::vector<float>& g) { if (count > 1) { const float inv = 1.0f/(float)count; for (float& v : g) v *= inv; } };
     for (size_t i = 0; i < accum.A.size(); ++i) {
         avg(accum.A[i]); avg(accum.B[i]); avg(accum.mxs[i]);
         avg(accum.mag[i]); avg(accum.mag_r[i]); avg(accum.mag_c[i]);
     }
-    if (hp.grad_clip <= 0.0f) return;
     double sumsq = 0.0;
     auto acc = [&](const std::vector<float>& g) { for (float v : g) sumsq += (double)v * v; };
     for (size_t i = 0; i < accum.A.size(); ++i) {
@@ -152,6 +159,8 @@ inline void train_average_and_clip(TrainLoraGradAccum& accum, const TrainAdamWPa
         acc(accum.mag[i]); acc(accum.mag_r[i]); acc(accum.mag_c[i]);
     }
     const double norm = std::sqrt(sumsq);
+    if (grad_norm_out) *grad_norm_out = norm;
+    if (hp.grad_clip <= 0.0f) return;
     if (norm <= (double)hp.grad_clip) return;
     const float scale = (float)((double)hp.grad_clip / (norm + 1e-6));
     auto scl = [&](std::vector<float>& g) { for (float& v : g) v *= scale; };
@@ -163,7 +172,7 @@ inline void train_average_and_clip(TrainLoraGradAccum& accum, const TrainAdamWPa
 
 inline bool train_apply_accumulated_adamw(TrainLoraState& state, TrainLoraGradAccum& accum,
                                           TrainLoopState& loop, const TrainAdamWParams& hp,
-                                          std::string& err) {
+                                          std::string& err, double* grad_norm_out = nullptr) {
     if (accum.count <= 0) {
         err = "cannot apply empty gradient batch";
         return false;
@@ -175,7 +184,7 @@ inline bool train_apply_accumulated_adamw(TrainLoraState& state, TrainLoraGradAc
     loop.mag_state.resize(state.params.size());
     loop.mag_r_state.resize(state.params.size());
     loop.mag_c_state.resize(state.params.size());
-    train_average_and_clip(accum, hp);   // mean over the accumulation window + global grad-norm clip
+    train_average_and_clip(accum, hp, grad_norm_out);   // mean over the accumulation window + global grad-norm clip
     for (size_t i = 0; i < state.params.size(); ++i) {
         TrainLoraParam& hpv = state.params[i];
         if (!hpv.lora_A.empty()) {
@@ -247,6 +256,129 @@ inline bool run_train_dit_accumulate(ggml_backend_t backend, TrainDitGraph& grap
     ggml_backend_graph_compute(backend, graph.graph);
     ggml_backend_tensor_get(graph.loss, &loss_out, 0, sizeof(float));
     return train_accumulate_adamw_gradients(graph, lora, accum, err);
+}
+
+// Read the A/B/magnitude gradients of the given param indices from one checkpointed graph into
+// the accumulator. Unlike the monolithic reader, a missing gradient here is a hard error: every
+// listed target is by construction consumed by its segment's graph.
+inline bool train_accum_read_subset(ggml_cgraph* graph, const TrainDitCkpt& ck,
+                                    const std::vector<size_t>& idx, TrainLoraGradAccum& accum,
+                                    std::string& err) {
+    std::vector<float> grad;
+    bool found = false;
+    for (size_t i : idx) {
+        const TrainDitParamTensors& tp = ck.params[i];
+        if (tp.lora_A) {
+            if (!train_read_grad(graph, tp.lora_A, grad, found, err)) return false;
+            if (!found) { err = "missing gradient for " + tp.stem + " lora_A"; return false; }
+            train_accum_add(accum.A[i], grad);
+        }
+        if (tp.lora_B) {
+            if (!train_read_grad(graph, tp.lora_B, grad, found, err)) return false;
+            if (!found) { err = "missing gradient for " + tp.stem + " lora_B"; return false; }
+            train_accum_add(accum.B[i], grad);
+        }
+        if (tp.magnitude) {
+            if (!train_read_grad(graph, tp.magnitude, grad, found, err)) return false;
+            if (!found) { err = "missing gradient for " + tp.stem + " magnitude"; return false; }
+            train_accum_add(accum.mag[i], grad);
+        }
+    }
+    return true;
+}
+
+// Gradient-checkpointed training step (see train_ckpt.h): forward once (F, storing block
+// boundaries), tail loss + dL/dx_depth (T), then per-block VJP backwards in reverse order on a
+// shared allocator, closing with the head graph (H). Peak activation memory is one block's
+// working set, so the whole step stays VRAM-resident.
+inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& ck,
+                                          const TrainLoraState& lora, TrainLoraGradAccum& accum,
+                                          const TrainDiffusionSample& sample, const TrainConditioning& cond,
+                                          const DitConfig& dc, float& loss_out, std::string& err,
+                                          const TrainInpaint* inpaint = nullptr) {
+    if (sample.x_t.empty() || sample.velocity_target.empty() || cond.cross.empty() || cond.global.empty()) {
+        err = "training step inputs are empty";
+        return false;
+    }
+    if ((ck.local != nullptr) != (inpaint != nullptr)) {
+        err = "inpaint graph/sample mismatch (local-cond present in one but not the other)";
+        return false;
+    }
+    // adapters: persistent tensors, so one upload per call is enough (base_norm_sq constants were
+    // uploaded once at build — no gallocr ever re-plans the persistent buffer)
+    for (size_t i = 0; i < lora.params.size(); ++i) {
+        const TrainLoraParam& hp = lora.params[i];
+        const TrainDitParamTensors& tp = ck.params[i];
+        if (tp.lora_A) ggml_backend_tensor_set(tp.lora_A, hp.lora_A.data(), 0, hp.lora_A.size() * sizeof(float));
+        if (tp.lora_B) ggml_backend_tensor_set(tp.lora_B, hp.lora_B.data(), 0, hp.lora_B.size() * sizeof(float));
+        if (tp.magnitude && !hp.magnitude.empty())
+            ggml_backend_tensor_set(tp.magnitude, hp.magnitude.data(), 0, hp.magnitude.size() * sizeof(float));
+    }
+    // step inputs
+    std::vector<float> tf;
+    expo_features(sample.t, tf, dc.time_dim, dc.time_min_freq, dc.time_max_freq);
+    ggml_backend_tensor_set(ck.x, sample.x_t.data(), 0, sample.x_t.size() * sizeof(float));
+    ggml_backend_tensor_set(ck.target, sample.velocity_target.data(), 0, sample.velocity_target.size() * sizeof(float));
+    ggml_backend_tensor_set(ck.tfeat, tf.data(), 0, tf.size() * sizeof(float));
+    ggml_backend_tensor_set(ck.cross, cond.cross.data(), 0, cond.cross.size() * sizeof(float));
+    ggml_backend_tensor_set(ck.global, cond.global.data(), 0, cond.global.size() * sizeof(float));
+    if (inpaint) {
+        ggml_backend_tensor_set(ck.local, inpaint->local.data(), 0, inpaint->local.size() * sizeof(float));
+        ggml_backend_tensor_set(ck.loss_weight, inpaint->loss_weight.data(), 0, inpaint->loss_weight.size() * sizeof(float));
+    }
+
+    accum.A.resize(lora.params.size());
+    accum.B.resize(lora.params.size());
+    accum.mxs.resize(lora.params.size());
+    accum.mag.resize(lora.params.size());
+    accum.mag_r.resize(lora.params.size());
+    accum.mag_c.resize(lora.params.size());
+
+    // F: forward, storing block boundaries + context/gcond into persistent tensors
+    ggml_backend_graph_compute(backend, ck.fgraph);
+    // T: tail + real loss; emits dL/dx_depth into the first ping-pong carrier
+    ggml_graph_reset(ck.tgraph);
+    ggml_backend_graph_compute(backend, ck.tgraph);
+    ggml_backend_tensor_get(ck.loss, &loss_out, 0, sizeof(float));  // also forces compute sync
+    if (!train_accum_read_subset(ck.tgraph, ck, ck.tail_param_idx, accum, err)) return false;
+
+    // B_l in reverse: re-plan the shared allocator, recompute the block, backprop the VJP.
+    // context/gcond receive a contribution from every block; accumulate host-side for H.
+    std::vector<float> gctx_sum((size_t)ggml_nelements(ck.Gctx_in), 0.0f);
+    std::vector<float> ggcond_sum((size_t)ggml_nelements(ck.Ggcond_in), 0.0f);
+    std::vector<float> tmp;
+    static bool balloc_logged = false;
+    for (int l = dc.depth - 1; l >= 0; --l) {
+        TrainCkptBlock& B = ck.blocks[(size_t)l];
+        if (!ggml_gallocr_alloc_graph(ck.balloc, B.graph)) {
+            err = "failed to allocate block training graph";
+            return false;
+        }
+        if (!balloc_logged) {
+            balloc_logged = true;
+            std::fprintf(stderr, "[train] block fwd+bwd gallocr buffer: %.1f MiB (shared by %d block graphs)\n",
+                         ggml_gallocr_get_buffer_size(ck.balloc, 0) / (1024.0 * 1024.0), dc.depth);
+        }
+        ggml_graph_reset(B.graph);
+        ggml_backend_graph_compute(backend, B.graph);
+        if (!train_accum_read_subset(B.graph, ck, B.param_idx, accum, err)) return false;
+        tmp.resize(gctx_sum.size());
+        ggml_backend_tensor_get(B.grad_ctx, tmp.data(), 0, tmp.size() * sizeof(float));
+        for (size_t k = 0; k < gctx_sum.size(); ++k) gctx_sum[k] += tmp[k];
+        tmp.resize(ggcond_sum.size());
+        ggml_backend_tensor_get(B.grad_gcond, tmp.data(), 0, tmp.size() * sizeof(float));
+        for (size_t k = 0; k < ggcond_sum.size(); ++k) ggcond_sum[k] += tmp[k];
+    }
+
+    // H: head backward against dL/dx_0 + the summed context/gcond gradients
+    ggml_backend_tensor_set(ck.Gctx_in, gctx_sum.data(), 0, gctx_sum.size() * sizeof(float));
+    ggml_backend_tensor_set(ck.Ggcond_in, ggcond_sum.data(), 0, ggcond_sum.size() * sizeof(float));
+    ggml_graph_reset(ck.hgraph);
+    ggml_backend_graph_compute(backend, ck.hgraph);
+    if (!train_accum_read_subset(ck.hgraph, ck, ck.head_param_idx, accum, err)) return false;
+
+    accum.count += 1;
+    return true;
 }
 
 inline bool run_train_dit_step(ggml_backend_t backend, TrainDitGraph& graph, TrainLoraState& lora,

@@ -151,8 +151,20 @@ struct TrainInpaint {
 
 // Assemble the local-add conditioning and the inpaint-aware per-position loss weight from the clean
 // latent z ([io, frames], idx = t*io + c) and a frame mask (1 keep / 0 generate).
+//
+// The loss weights reproduce underfit training/loss.py compute_masked_loss — the trainer the
+// reference ratatat runs actually used — NOT the stock stable-audio-3 diffusion.py loss:
+//   mask_padding_attention = true  (the sa3-medium model config; all ratatat runs):
+//       loss = gen_sum / (gen_count + 1e-8)          — the context region contributes ZERO and
+//                                                       mask_loss_weight is IGNORED
+//   mask_padding_attention = false:
+//       loss = (gen_sum + w*ctx_sum) / (gen_count + w*ctx_count + 1e-8)
+// (counts include channels: gen_count = io * n_gen). The earlier port summed two per-region
+// means (mean_gen + w*mean_ctx), which spent ~half the gradient signal of every segments/causal
+// step on a trivial copy-the-given-context task and produced prompt-ignoring collapsed adapters.
 inline TrainInpaint build_train_inpaint(const std::vector<float>& z, const std::vector<float>& mask,
-                                        int io, int frames, int local_dim, float mask_loss_weight) {
+                                        int io, int frames, int local_dim, float mask_loss_weight,
+                                        bool mask_padding_attention = true) {
     TrainInpaint out;
     out.local.assign((size_t)local_dim * frames, 0.0f);
     for (int t = 0; t < frames; ++t) {
@@ -161,8 +173,16 @@ inline TrainInpaint build_train_inpaint(const std::vector<float>& z, const std::
         for (int c = 0; c < io; ++c) out.local[(size_t)t * local_dim + 1 + c] = z[(size_t)t * io + c] * m;
         if (m > 0.5f) ++out.n_ctx; else ++out.n_gen;
     }
-    const float wg = out.n_gen > 0 ? 1.0f / ((float)io * (float)out.n_gen) : 0.0f;
-    const float wc = out.n_ctx > 0 ? mask_loss_weight / ((float)io * (float)out.n_ctx) : 0.0f;
+    float wg, wc;
+    if (mask_padding_attention) {
+        wg = 1.0f / ((float)io * (float)out.n_gen + 1e-8f);
+        wc = 0.0f;
+    } else {
+        const float denom = (float)io * (float)out.n_gen +
+                            mask_loss_weight * (float)io * (float)out.n_ctx + 1e-8f;
+        wg = 1.0f / denom;
+        wc = mask_loss_weight / denom;
+    }
     out.loss_weight.assign((size_t)io * frames, 0.0f);
     for (int t = 0; t < frames; ++t) {
         const float w = mask[(size_t)t] > 0.5f ? wc : wg;

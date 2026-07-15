@@ -15,18 +15,18 @@ inline std::string build_sa3_generate_lora_command(const std::string& exe, const
                                                    const std::string& lora_path,
                                                    const std::string& out_wav,
                                                    int frames, int steps, unsigned long long seed) {
-    std::string cmd = shell_quote_single(exe) +
-        " --tok " + shell_quote_single(paths.tok) +
-        " --t5 " + shell_quote_single(paths.t5) +
-        (paths.cond.empty() ? "" : " --cond " + shell_quote_single(paths.cond)) +
-        " --dit " + shell_quote_single(paths.dit) +
-        " --same " + shell_quote_single(paths.same) +
-        " --prompt " + shell_quote_single(prompt) +
-        " --lora " + shell_quote_single(lora_path) +
+    std::string cmd = shell_quote_path(exe) +
+        " --tok " + shell_quote_path(paths.tok) +
+        " --t5 " + shell_quote_path(paths.t5) +
+        (paths.cond.empty() ? "" : " --cond " + shell_quote_path(paths.cond)) +
+        " --dit " + shell_quote_path(paths.dit) +
+        " --same " + shell_quote_path(paths.same) +
+        " --prompt " + shell_quote_path(prompt) +
+        " --lora " + shell_quote_path(lora_path) +
         " --frames " + std::to_string(frames) +
         " --steps " + std::to_string(steps) +
         " --seed " + std::to_string(seed) +
-        " --out " + shell_quote_single(out_wav);
+        " --out " + shell_quote_path(out_wav);
     return cmd;
 }
 

@@ -60,10 +60,31 @@ struct TrainConfig {
     // Random-crop windowing (Stage 2): pick a random window start per sample instead of the
     // fixed front (start=0) window. Matches the reference pre-encode + random-crop regime.
     bool random_crop = false;
+    // Gradient-checkpointed backward (train_ckpt.h): run the DiT backward block-by-block so peak
+    // activation memory is one block's working set instead of the whole graph (the monolithic
+    // fwd+bwd graph needs ~9.6 GB at 512 frames and pages out of VRAM on 8 GB cards). Only the
+    // functional adapter families (lora, dora-rows) support it; others fall back to the
+    // monolithic graph automatically.
+    bool ckpt_backward = true;
+    // Pre-encoded latents (train_latents.h): encode each training file ONCE, full-length, at
+    // startup and random-crop in LATENT space per step — the reference training method (required
+    // per SA3's creator; also frees the autoencoder from VRAM after startup). false = legacy
+    // per-step audio-crop + encode.
+    bool pre_encode = true;
+    // Load latents from a gary4local pre-encode output dir (encoded/latents/<model>/) instead of
+    // encoding natively — trains on bit-identical data to a PyTorch reference run.
+    std::string latents_dir;
+    // Per-track latent-RMS loudness fix during native pre-encode (pre_encode.py
+    // --per-track-target-latent-rms). 0 = off. The ratatat reference runs used 0.9.
+    float target_latent_rms = 0.0f;
+    // Inpaint loss branch (underfit loss.py compute_masked_loss). true = the sa3-medium model
+    // config / all reference ratatat runs: loss over the GENERATE region only, mask_loss_weight
+    // ignored. false = weighted-pooled mean over gen+context.
+    bool mask_padding_attention = true;
     // Global gradient-norm clip (Stage 3): 0 = off. Reference training uses 1.0.
     float grad_clip = 0.0f;
     // Timestep sampler (Stage 5): "uniform" or "trunc_logit_normal" (the reference default).
-    std::string timestep_sampler = "uniform";
+    std::string timestep_sampler = "trunc_logit_normal";
     // Training-time distribution shift on sampled timesteps (Stage 10). The reference warps t
     // through the model's distribution_shift_options; for sa3-medium that is type "full" with
     // min_length 256 / max_length 4096 (base/max shift 0.5/1.15). Values map onto
@@ -244,12 +265,24 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
         if (!train_parse_bool(value, c.inpainting)) { err = "invalid boolean for --" + key + ": " + value; return false; }
     }
     else if (key == "inpaint-mask-probs" || key == "inpaint_mask_probs" || key == "mask-type-probabilities") c.inpaint_mask_probs = value;
+    else if (key == "mask-padding-attention" || key == "mask_padding_attention") {
+        if (!train_parse_bool(value, c.mask_padding_attention)) { err = "invalid boolean for --" + key + ": " + value; return false; }
+    }
     else if (key == "mask-loss-weight" || key == "mask_loss_weight") return set_f(c.mask_loss_weight);
     else if (key == "lr-scheduler" || key == "lr_scheduler" || key == "scheduler") c.lr_scheduler = value;
     else if (key == "lr-inv-gamma" || key == "lr_inv_gamma" || key == "inv-gamma" || key == "inv_gamma") return set_f(c.lr_inv_gamma);
     else if (key == "lr-power" || key == "lr_power") return set_f(c.lr_power);
     else if (key == "lr-warmup" || key == "lr_warmup" || key == "warmup") return set_f(c.lr_warmup);
     else if (key == "lr-final" || key == "lr_final" || key == "final-lr" || key == "final_lr") return set_f(c.lr_final);
+    else if (key == "checkpoint-backward" || key == "checkpoint_backward" || key == "ckpt-backward") {
+        if (!train_parse_bool(value, c.ckpt_backward)) { err = "invalid boolean for --" + key + ": " + value; return false; }
+    }
+    else if (key == "pre-encode" || key == "pre_encode") {
+        if (!train_parse_bool(value, c.pre_encode)) { err = "invalid boolean for --" + key + ": " + value; return false; }
+    }
+    else if (key == "latents-dir" || key == "latents_dir") c.latents_dir = value;
+    else if (key == "target-latent-rms" || key == "target_latent_rms" || key == "per-track-target-latent-rms")
+        return set_f(c.target_latent_rms);
     else if (key == "random-crop" || key == "random_crop") {
         if (!train_parse_bool(value, c.random_crop)) { err = "invalid boolean for --" + key + ": " + value; return false; }
     }
@@ -404,7 +437,11 @@ inline std::string train_config_usage(const char* argv0) {
        << "          --dist-shift-effective-length BOOL (full-file effective length vs crop frames)\n"
        << "conditioning: --prompt-mode caption|caption-lyrics|lyrics --cfg-dropout-prob F (default 0.1)\n"
        << "          --prompt-config dataset.json (tag/path prompt composition per sample)\n"
-       << "inpainting: --inpainting BOOL --inpaint-mask-probs \"0.2,0.6,0.2\" --mask-loss-weight F\n";
+       << "inpainting: --inpainting BOOL --inpaint-mask-probs \"0.2,0.6,0.2\" --mask-loss-weight F\n"
+       << "memory: --checkpoint-backward BOOL (default true; per-block backward, fits VRAM)\n"
+       << "latents: --pre-encode BOOL (default true; encode files once, crop in latent space)\n"
+       << "          --latents-dir DIR (train on a gary4local pre-encode output; overrides --pre-encode)\n"
+       << "          --target-latent-rms F (loudness fix during native pre-encode; ratatat runs used 0.9)\n";
     return ss.str();
 }
 

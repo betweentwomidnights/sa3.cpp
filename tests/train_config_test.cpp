@@ -91,6 +91,7 @@ int main() {
     {
         // Stage 9/10 defaults + parsing: dist-shift canonicalization (case-insensitive) and cfg-dropout.
         sa3::TrainConfig def;
+        fails += expect(def.timestep_sampler == "trunc_logit_normal", "default timestep sampler trunc_logit_normal");
         fails += expect(def.dist_shift == "Full", "default dist_shift Full");
         fails += expect(def.dist_shift_effective_length, "default effective-length true");
         fails += expect(def.cfg_dropout_prob > 0.099f && def.cfg_dropout_prob < 0.101f, "default cfg_dropout 0.1");

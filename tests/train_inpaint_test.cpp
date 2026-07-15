@@ -74,15 +74,27 @@ int main() {
                 if (ip.local[(size_t)t * local_dim + 1 + c] != z[(size_t)t * io + c] * mask[t]) layout_ok = false;
         }
         fails += expect(layout_ok, "local layout [mask | z*mask]");
-        // Loss-weight sums: generated region sums to 1, context region sums to mask_loss_weight.
+        // Default (mask_padding_attention=true, the reference underfit branch): loss is the mean
+        // over the GENERATE region only — gen weights sum to 1, context weights are ZERO.
         double sum_gen = 0, sum_ctx = 0;
         for (int t = 0; t < frames; ++t)
             for (int c = 0; c < io; ++c) {
                 double w = ip.loss_weight[(size_t)t * io + c];
                 if (mask[t] > 0.5f) sum_ctx += w; else sum_gen += w;
             }
-        fails += expect(std::fabs(sum_gen - 1.0) < 1e-5, "gen weights sum to 1");
-        fails += expect(std::fabs(sum_ctx - 1.0) < 1e-5, "ctx weights sum to mask_loss_weight(=1)");
+        fails += expect(std::fabs(sum_gen - 1.0) < 1e-5, "gen weights sum to 1 (mask_padding_attention)");
+        fails += expect(sum_ctx == 0.0, "ctx weights are zero (mask_padding_attention)");
+        // mask_padding_attention=false: weighted-pooled mean (gen_sum + w*ctx_sum)/(gen_n + w*ctx_n).
+        auto ip2 = sa3::build_train_inpaint(z, mask, io, frames, local_dim, 1.0f, false);
+        double sum_gen2 = 0, sum_ctx2 = 0;
+        for (int t = 0; t < frames; ++t)
+            for (int c = 0; c < io; ++c) {
+                double w = ip2.loss_weight[(size_t)t * io + c];
+                if (mask[t] > 0.5f) sum_ctx2 += w; else sum_gen2 += w;
+            }
+        const double gen_n = 4.0 * io, ctx_n = 2.0 * io;
+        fails += expect(std::fabs(sum_gen2 - gen_n / (gen_n + ctx_n)) < 1e-5, "pooled gen weight share");
+        fails += expect(std::fabs(sum_ctx2 - ctx_n / (gen_n + ctx_n)) < 1e-5, "pooled ctx weight share");
     }
     // FULL mask (all generate): loss weight reduces to the uniform mean 1/(io*frames).
     {

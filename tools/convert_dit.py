@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Convert the Stable Audio 3 medium DiT to GGUF for sa3.cpp.
+"""Convert a Stable Audio 3 DiT to GGUF for sa3.cpp.
 
 Reads the `model.model.*` tensors (the DiffusionTransformer) from the medium
 checkpoint, squeezes the k=1 pre/post convs to matrices, and renames to compact
-GGML names. Skips the inpaint `to_local_embed` (Phase 5) for now. All F32.
+GGML names. All F32.
+
+For medium LoRA training, --src must be the stabilityai/stable-audio-3-medium-base
+checkpoint. Adapters trained on medium-base are applied to medium at inference.
 
 Usage:
   python tools/convert_dit.py --src <model.safetensors> --config <model_config.json> \
-                              --out models/sa3-dit-f32.gguf
+                              --out models/stable-audio-3-medium-base-dit-1.5B-v1.0-F32.gguf
 """
 import argparse, json, sys
 from pathlib import Path

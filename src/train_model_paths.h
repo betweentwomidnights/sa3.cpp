@@ -14,6 +14,33 @@ inline bool resolve_train_model_paths(const TrainConfig& cfg, ModelPaths& paths,
     if (!has_explicit_required) {
         if (!ModelPaths::resolve(cfg.models_dir, cfg.model_variant, cfg.encoding, paths, err)) return false;
     }
+
+    // Stable Audio 3 adapters are trained against the distinct base DiT and applied to the
+    // inference-tuned model. This is true for medium, small-music, and small-sfx. The
+    // conditioner, tokenizer, encoder, and SAME model still use the inference convention;
+    // only the training DiT changes. Never fall back silently to the ARC/post-trained DiT:
+    // its weights are close enough to train, but the LoRA then spends capacity compensating
+    // for the base-model delta.
+    if (cfg.dit_path.empty() &&
+        (cfg.model_variant == "medium" || cfg.model_variant == "small-music" ||
+         cfg.model_variant == "small-sfx")) {
+        const std::string enc = (cfg.encoding == "f32" || cfg.encoding == "F32") ? "F32" : "F16";
+        const std::string base_variant = cfg.model_variant + "-base";
+        bool ambiguous = false;
+        paths.dit = resolve_one(cfg.models_dir, "stable-audio-3-" + base_variant + "-dit-",
+                                "-" + enc + ".gguf", &ambiguous);
+        if (paths.dit.empty() || ambiguous) {
+            err = ambiguous
+                ? "multiple " + base_variant + " training DiTs match in " + cfg.models_dir
+                : "no " + base_variant + " training DiT (stable-audio-3-" + base_variant +
+                  "-dit-*-" + enc +
+                  ".gguf) in " + cfg.models_dir;
+            err += "; " + cfg.model_variant + " LoRA training requires stabilityai/stable-audio-3-" +
+                   base_variant + " (inference still uses " + cfg.model_variant +
+                   "). Convert/download that checkpoint or pass --dit explicitly";
+            return false;
+        }
+    }
     if (!cfg.tok_path.empty())  paths.tok = cfg.tok_path;
     if (!cfg.t5_path.empty())   paths.t5 = cfg.t5_path;
     if (!cfg.cond_path.empty()) paths.cond = cfg.cond_path;

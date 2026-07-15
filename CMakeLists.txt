@@ -156,11 +156,14 @@ target_include_directories(sa3-train-prompt-test PRIVATE ${CMAKE_CURRENT_SOURCE_
 add_executable(sa3-train-inpaint-test tests/train_inpaint_test.cpp)
 target_link_libraries(sa3-train-inpaint-test PRIVATE sa3)
 
+add_executable(sa3-dit-lin-functional-test tests/dit_lin_functional_test.cpp)
+target_link_libraries(sa3-dit-lin-functional-test PRIVATE sa3)
+
 if(BUILD_TESTING)
     add_test(NAME sa3-train-config-test COMMAND sa3-train-config-test)
     add_test(NAME sa3-train-dataset-test COMMAND sa3-train-dataset-test)
     add_test(NAME sa3-train-model-paths-test COMMAND sa3-train-model-paths-test)
-    add_test(NAME sa3-train-audio-test COMMAND sa3-train-audio-test ${CMAKE_CURRENT_SOURCE_DIR}/../datasets/mnesia-audio-v1/test/audio/single-fluke.mp3)
+    add_test(NAME sa3-train-audio-test COMMAND sa3-train-audio-test)
     add_test(NAME sa3-train-same-compile-test COMMAND sa3-train-same-compile-test)
     add_test(NAME sa3-train-conditioning-compile-test COMMAND sa3-train-conditioning-compile-test)
     add_test(NAME sa3-train-diffusion-test COMMAND sa3-train-diffusion-test)
@@ -172,12 +175,14 @@ if(BUILD_TESTING)
     add_test(NAME sa3-train-generation-test COMMAND sa3-train-generation-test)
     add_test(NAME sa3-train-prompt-test COMMAND sa3-train-prompt-test)
     add_test(NAME sa3-train-inpaint-test COMMAND sa3-train-inpaint-test)
+    add_test(NAME sa3-dit-lin-functional-test COMMAND sa3-dit-lin-functional-test)
     set_tests_properties(
         sa3-train-config-test sa3-train-dataset-test sa3-train-model-paths-test
         sa3-train-audio-test sa3-train-same-compile-test sa3-train-conditioning-compile-test
         sa3-train-diffusion-test sa3-train-lora-test sa3-train-dit-compile-test
         sa3-train-optimizer-test sa3-train-loop-compile-test sa3-train-checkpoint-test
         sa3-train-generation-test sa3-train-prompt-test sa3-train-inpaint-test
+        sa3-dit-lin-functional-test
         PROPERTIES LABELS "non-gpu;training;lora")
 endif()
 

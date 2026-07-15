@@ -106,6 +106,25 @@ inline std::vector<float> train_row_norms(ggml_tensor* w, int64_t in, int64_t ou
     return norms;
 }
 
+// Per-output squared column norm Σ_in W[in,out]² + in·eps, for the functional dora-rows path.
+// This is the constant base term of ||W + s·A@B||_col² (the A,B contributions are added in-graph);
+// folding in·eps here reproduces the materialized rms_norm denominator sqrt(Σv² + in·eps).
+inline std::vector<float> train_row_norm_sq(ggml_tensor* w, int64_t in, int64_t out, float eps) {
+    std::vector<float> data;
+    train_tensor_to_f32(w, data);
+    std::vector<float> nsq((size_t)out, (float)((double)in * eps));
+    if (data.size() < (size_t)(in * out)) return nsq;
+    for (int64_t o = 0; o < out; ++o) {
+        double s = 0.0;
+        for (int64_t i = 0; i < in; ++i) {
+            const float v = data[(size_t)o * in + i];
+            s += (double)v * v;
+        }
+        nsq[(size_t)o] = (float)(s + (double)in * eps);
+    }
+    return nsq;
+}
+
 inline std::vector<float> train_col_norms(ggml_tensor* w, int64_t in, int64_t out) {
     std::vector<float> data;
     train_tensor_to_f32(w, data);
@@ -148,7 +167,6 @@ inline bool init_train_lora_state(const GgufModel& dit, const std::vector<TrainL
     out.rank = rank;
     out.alpha = alpha;
     std::mt19937_64 rng(seed);
-    std::normal_distribution<float> normal(0.0f, 0.01f);
     const bool xs = adapter_type.size() >= 3 && adapter_type.compare(adapter_type.size() - 3, 3, "-xs") == 0;
     for (const TrainLoraTarget& t : targets) {
         if (rank > t.in || rank > t.out) {
@@ -183,9 +201,15 @@ inline bool init_train_lora_state(const GgufModel& dit, const std::vector<TrainL
             }
             p.M_xs.assign((size_t)rank * rank, 0.0f);
         } else {
+            // Reference init (models/lora/model.py): A ~ kaiming_uniform_(a=sqrt(5)) = U(-1/sqrt(in),
+            // +1/sqrt(in)) — per-layer scale, NOT a fixed std — and B = 0. The previous fixed
+            // normal(0, 0.01) started A ~32% cooler on dim-1536 layers (and off for every other in),
+            // skewing the A/B learning balance relative to the reference trainer.
             p.lora_A.resize((size_t)rank * t.in);
             p.lora_B.assign((size_t)t.out * rank, 0.0f);
-            for (float& v : p.lora_A) v = normal(rng);
+            const float bound = 1.0f / std::sqrt((float)t.in);
+            std::uniform_real_distribution<float> kaiming(-bound, bound);
+            for (float& v : p.lora_A) v = kaiming(rng);
         }
         if (adapter_type == "dora-rows" || adapter_type == "dora-rows-xs") {
             p.magnitude = train_row_norms(w, t.in, t.out);

@@ -24,7 +24,12 @@ int main() {
         "t5gemma-b-b-ul2-encoder-0.3B-v1.0-F32.gguf",
         "stable-audio-3-medium-conditioner-v1.0-F32.gguf",
         "stable-audio-3-medium-dit-1.5B-v1.0-F16.gguf",
+        "stable-audio-3-medium-base-dit-1.5B-v1.0-F16.gguf",
         "stable-audio-3-medium-same-1.5B-v1.0-F16.gguf",
+        "stable-audio-3-small-music-conditioner-v1.0-F32.gguf",
+        "stable-audio-3-small-music-dit-0.5B-v1.0-F16.gguf",
+        "stable-audio-3-small-music-base-dit-0.5B-v1.0-F16.gguf",
+        "stable-audio-3-small-music-same-s-v1.0-F16.gguf",
     };
     for (const char* n : names) std::ofstream(root / n) << "stub";
 
@@ -35,7 +40,29 @@ int main() {
     fails += expect(sa3::resolve_train_model_paths(cfg, p, err), "convention model paths resolve");
     fails += expect(p.tok.find("vocab") != std::string::npos, "tokenizer resolved");
     fails += expect(p.cond.find("conditioner") != std::string::npos, "conditioner resolved");
-    fails += expect(p.dit.find("-dit-") != std::string::npos, "dit resolved");
+    fails += expect(p.dit.find("medium-base-dit") != std::string::npos, "medium-base training dit resolved");
+
+    fs::remove(root / "stable-audio-3-medium-base-dit-1.5B-v1.0-F16.gguf");
+    err.clear();
+    p = sa3::ModelPaths{};
+    fails += expect(!sa3::resolve_train_model_paths(cfg, p, err), "inference medium dit rejected for training");
+    fails += expect(err.find("medium-base") != std::string::npos, "missing medium-base hint");
+
+    sa3::TrainConfig small_cfg;
+    small_cfg.models_dir = root.string();
+    small_cfg.model_variant = "small-music";
+    err.clear();
+    p = sa3::ModelPaths{};
+    fails += expect(sa3::resolve_train_model_paths(small_cfg, p, err), "small convention paths resolve");
+    fails += expect(p.dit.find("small-music-base-dit") != std::string::npos,
+                    "small-music-base training dit resolved");
+
+    fs::remove(root / "stable-audio-3-small-music-base-dit-0.5B-v1.0-F16.gguf");
+    err.clear();
+    p = sa3::ModelPaths{};
+    fails += expect(!sa3::resolve_train_model_paths(small_cfg, p, err),
+                    "inference small-music dit rejected for training");
+    fails += expect(err.find("small-music-base") != std::string::npos, "missing small-base hint");
 
     sa3::TrainConfig explicit_cfg;
     explicit_cfg.tok_path = "tok.gguf";
