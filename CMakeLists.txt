@@ -188,6 +188,7 @@ add_executable(sa3-dit-lin-functional-test tests/dit_lin_functional_test.cpp)
 target_link_libraries(sa3-dit-lin-functional-test PRIVATE sa3)
 
 if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
     add_test(NAME sa3-train-config-test COMMAND sa3-train-config-test)
     add_test(NAME sa3-train-dataset-test COMMAND sa3-train-dataset-test)
     add_test(NAME sa3-train-model-paths-test COMMAND sa3-train-model-paths-test)
@@ -204,6 +205,11 @@ if(BUILD_TESTING)
     add_test(NAME sa3-train-prompt-test COMMAND sa3-train-prompt-test)
     add_test(NAME sa3-train-inpaint-test COMMAND sa3-train-inpaint-test)
     add_test(NAME sa3-dit-lin-functional-test COMMAND sa3-dit-lin-functional-test)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME sa3-model-artifacts-test
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_artifacts_test.py")
+        set_tests_properties(sa3-model-artifacts-test PROPERTIES LABELS "non-gpu;tooling")
+    endif()
     set_tests_properties(
         sa3-train-config-test sa3-train-dataset-test sa3-train-model-paths-test
         sa3-train-audio-test sa3-train-same-compile-test sa3-train-conditioning-compile-test

@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Convert a Stable Audio 3 DiT to GGUF for sa3.cpp.
 
-Reads the `model.model.*` tensors (the DiffusionTransformer) from the medium
-checkpoint, squeezes the k=1 pre/post convs to matrices, and renames to compact
-GGML names. All F32.
+Reads the `model.model.*` tensors (the DiffusionTransformer) from a Stable Audio
+3 checkpoint, squeezes the k=1 pre/post convs to matrices, and renames to compact
+GGML names. The converter emits F32; use quantize_gguf.py for F16.
 
-For medium LoRA training, --src must be the stabilityai/stable-audio-3-medium-base
-checkpoint. Adapters trained on medium-base are applied to medium at inference.
+For LoRA training, --src must be the matching Stability AI ``-base`` checkpoint
+and --training-base must be set. Adapters trained on a base model are applied to
+the corresponding post-trained model at inference.
 
 Usage:
   python tools/convert_dit.py --src <model.safetensors> --config <model_config.json> \
+                              --variant medium --training-base \
                               --out models/stable-audio-3-medium-base-dit-1.5B-v1.0-F32.gguf
 """
 import argparse, json, sys
@@ -18,6 +20,7 @@ import numpy as np
 from safetensors import safe_open
 from gguf import GGUFWriter
 import gguf_meta
+from model_artifacts import dit_identity
 
 PREF = "model.model."
 TR   = "transformer."
@@ -86,6 +89,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--variant", default="medium", choices=list(gguf_meta.VARIANTS),
                     help="model family this DiT belongs to (sets general.* metadata)")
+    ap.add_argument("--training-base", action="store_true",
+                    help="stamp this DiT as the matching -base training model")
     args = ap.parse_args()
 
     cfg = json.loads(Path(args.config).read_text())["model"]["diffusion"]["config"]
@@ -109,6 +114,7 @@ def main():
     w.add_float32("dit.qk_eps",    1e-6)   # qk RMSNorm
     w.add_float32("dit.time_min_freq", 0.5)
     w.add_float32("dit.time_max_freq", 10000.0)
+    w.add_bool("dit.training_base", args.training_base)
 
     n, skip, nparams = 0, 0, 0
     with safe_open(args.src, framework="numpy") as f:
@@ -126,9 +132,15 @@ def main():
             w.add_tensor(name, t)
             n += 1; nparams += t.size
 
-    gguf_meta.add_general(w, basename=f"stable-audio-3-{args.variant}-dit",
-                          name=f"stable-audio-3-{args.variant} DiT",
-                          finetune=args.variant, n_params=nparams)
+    identity = dit_identity(args.variant, args.training_base)
+    gguf_meta.add_general(w, basename=identity["basename"], name=identity["name"],
+                          finetune=identity["finetune"], n_params=nparams)
+    if args.training_base:
+        w.add_base_model_count(1)
+        w.add_base_model_name(0, "Stable Audio 3 " + args.variant.replace("-", " ").title() + " Base")
+        w.add_base_model_organization(0, "Stability AI")
+        w.add_base_model_version(0, identity["upstream_revision"])
+        w.add_base_model_repo_url(0, identity["upstream_repo"])
     w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
     print(f"wrote {out}  ({n} tensors, skipped {skip})  dim={dim} depth={cfg['depth']} "
           f"heads={cfg['num_heads']}x{dim//cfg['num_heads']} mem={cfg['num_memory_tokens']}")
