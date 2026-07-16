@@ -2,9 +2,10 @@
 
 `sa3-train` trains a DiT LoRA/DoRA adapter directly in C++/ggml from MP3/caption pairs and writes an adapter GGUF that loads through the existing `sa3-generate --lora` path.
 
-Training is currently validated on CUDA, Vulkan, and CPU. Vulkan v1 supports both discrete GPUs and
-integrated GPUs, although iGPU throughput still has substantial room for improvement. Metal is
-planned next. These training additions do not alter the existing inference path.
+Training is currently validated on CUDA, Vulkan, Metal, and CPU. Vulkan v1 supports both discrete
+and integrated GPUs. Metal training is validated on Apple M4 with both small and medium models;
+its correctness and memory use are strong, while the first scalar backward kernels still leave
+substantial throughput work. These training additions do not alter the existing inference path.
 
 Measured training throughput and reproducible backend comparisons are collected in
 [TRAINING_BENCHMARKS.md](TRAINING_BENCHMARKS.md).
@@ -15,11 +16,12 @@ Measured training throughput and reproducible backend comparisons are collected 
 ./build.sh cpu
 ./build.sh cuda
 ./build.sh vulkan
+./build.sh metal
 ```
 
 CUDA is the fastest validated backend for real training runs. Vulkan training is supported on both
-integrated and discrete GPUs, and CPU training honors the same thread controls as inference. See
-[TRAINING_BENCHMARKS.md](TRAINING_BENCHMARKS.md) for measured throughput and
+integrated and discrete GPUs, Metal training is supported on Apple Silicon, and CPU training honors
+the same thread controls as inference. See [TRAINING_BENCHMARKS.md](TRAINING_BENCHMARKS.md) for measured throughput and
 [NON_GPU_TESTS.md](NON_GPU_TESTS.md) for the registered CTest suite.
 
 ## Models

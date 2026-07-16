@@ -27,6 +27,15 @@ At candidate `9915b8f1`, all three sa3.cpp builds and their 16 registered tests 
 training outputs are byte-identical to the v0.15.3 pin. Do not publish a release tag or update the
 table below until final downstream terminal validation is complete.
 
+Metal training is layered on that candidate in `feature/sa3-training-metal-v0.16.0`. The untagged
+development line adds native Metal `REPEAT_BACK`, F32/F16-weight `OUT_PROD`, `SILU_BACK`,
+`RMS_NORM_BACK`, and `SOFT_MAX_BACK`; generalizes F32 binary operations for autodiff's strided
+views; and fixes the wide-row non-inplace `ACC` copy dispatch. On Apple M4, all 37 registered tests
+pass, Metal `OUT_PROD` passes 92/92 cases, small CPU/Metal aggregate gradient cosine is 0.9999853,
+CPU trainer state resumes on Metal, medium-base trains at 512 frames, and the frozen inference WAV
+is byte-identical before and after the patch. The branch remains untagged until the user's final
+terminal and ear checks pass.
+
 ## Updating the fork
 
 Keep the official repository as `upstream` and the SA3 fork as `origin` inside the submodule:

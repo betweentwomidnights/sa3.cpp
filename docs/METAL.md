@@ -1,8 +1,8 @@
 # metal backend — validation checklist (for the m4)
 
-status: **GENERATION PASS on Apple M4.** medium f16 text-to-music generates successfully on the
-ggml Metal backend, matches CPU closely, is deterministic run-to-run, and now exits cleanly with
-ggml's default Metal residency sets enabled.
+status: **GENERATION + TRAINING PASS on Apple M4.** medium f16 text-to-music is deterministic and
+native small/medium LoRA/DoRA training completes on ggml Metal. The training path is correct and
+memory-efficient, but its first scalar `OUT_PROD` kernel still leaves substantial performance work.
 
 ## 0. prerequisites
 
@@ -162,7 +162,50 @@ Takeaway: ggml Metal is not the fastest short-generation path versus MLX, but it
 than the generic MLX SAME decode. For long-form UX, it roughly ties generic MLX with chunked decode
 and trails the official optimized MLX SAME-L decoder.
 
-## 7. metal optimization notes
+## 7. native training results (2026-07-16)
+
+Test machine: Apple M4, 32 GB unified memory, macOS 15.7.3. Candidate base: ggml v0.16.0 plus the
+downstream Metal training branch. The implementation adds native Metal `REPEAT_BACK`, `OUT_PROD`,
+`SILU_BACK`, `RMS_NORM_BACK`, and `SOFT_MAX_BACK`, supports the strided F32 binary views produced by
+autodiff, and fixes the non-inplace `ACC` copy dispatch for rows wider than one Metal threadgroup.
+Unsupported shapes remain explicit; training operations are not silently routed to CPU.
+
+Correctness gates passed:
+
+- all 37 registered CTest tests, including ggml's full backend-op suite;
+- Metal backend-op coverage: `OUT_PROD` 92/92, `REPEAT_BACK` 10/10, `ACC` 7/7,
+  `SILU_BACK` 1/1, `RMS_NORM_BACK` 10/10, and `SOFT_MAX_BACK` 24/24;
+- a two-step small-music run with finite losses/gradient norms and valid adapter/trainer-state files;
+- CPU trainer-state resume on Metal, with a finite resumed update and valid output checkpoints;
+- matched one-step CPU/Metal parity using the exact same latent, noise, noised input, target, and
+  conditioning tensors: aggregate adapter-gradient cosine `0.9999853`, relative L2 `0.005433`;
+- all 576 first-step adapter gradients were compared, and every `lora_A` gradient was zero on both
+  backends as required by zero-initialized `lora_B`;
+- the frozen medium inference WAV remained byte-identical before and after the training patch
+  (`SHA-256 32276296285ec02487d1882688a8baaecc58d07343028ec3a5fa40da1576a0e6`).
+
+The real 512-frame gate used the ten-track Ratatat dataset and the exact medium latents produced by
+the earlier gary4local/PyTorch job. Default medium DoRA-rows rank/alpha 16 adapts 228 DiT targets.
+Steps 2-5 exclude graph setup and pipeline compilation:
+
+| frames | sampled steps | T5 | prep | DiT fwd/bwd | AdamW | total / step | peak RSS |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 512 | 2-5 | 35.3 ms | 1.0 ms | 22,273.8 ms | 53.8 ms | **22,364.3 ms** | **5.76 GiB** |
+
+A matched local gary4local MLX run used the same medium RF architecture, 512-frame crop,
+DoRA-rows rank/alpha 16, and all 228 targets. MLX averaged **7.29 s/step** over steps 2-5, so the
+current C++ Metal path is 3.07x slower. MLX used **16.27 GiB maximum RSS** and a 23.79 GiB peak
+memory footprint; C++ used 5.76 GiB maximum RSS and a 5.52 GiB peak footprint. This is a throughput
+comparison, not exact loss parity: the trainers use different latent encodes, random streams, and
+slightly different optimizer details.
+
+The main performance target is the deliberately simple scalar Metal `OUT_PROD` kernel. It computes
+one full dot product per output element and established correctness across arbitrary strides and
+batches, but it does not yet use threadgroup tiling, SIMD-group matrix operations, or a batched
+matmul decomposition. Optimize that kernel before trading away the checkpointed graph's large
+memory advantage.
+
+## 8. metal optimization notes
 
 The practical Metal-specific fix was backend lifetime: keep one `ggml_backend_t` alive for every model
 buffer used by a generation, then free it after all GGUF buffers are released. That avoids repeated

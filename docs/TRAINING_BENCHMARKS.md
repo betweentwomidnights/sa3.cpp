@@ -72,6 +72,55 @@ conditioner target and trains the 228 DiT Linear/Conv targets recommended for sm
 one-target scope difference is disclosed for precision; it is not large enough to explain the
 measured speedup by itself.
 
+## Apple M4: native Metal training and matched MLX A/B
+
+The ggml v0.16.0 Metal candidate completed the full native training path on an Apple M4 with 32 GB
+unified memory. The reference gate used medium-base F16, 512 latent frames, batch size 1,
+DoRA-rows rank/alpha 16, all 228 DiT targets, and the exact pre-encoded Ratatat latents from the
+completed gary4local/PyTorch job. Step 1 was excluded for graph setup and Metal pipeline compilation.
+
+| implementation | sampled steps | target count | steady step | throughput | projected 2,500 updates | maximum RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| **sa3.cpp Metal** | 2-5 | 228 | **22.364 s** | 0.0447 steps/s | **15 h 32 min** | **5.76 GiB** |
+| gary4local MLX | 2-5 | 228 | **7.285 s** | 0.1373 steps/s | **5 h 4 min** | **16.27 GiB** |
+
+The matched target inventory matters. Gary's existing production-style MLX run adapts only the 36
+Linear/Conv layers in transformer blocks 20-23 and reached roughly 2.2-2.3 s/step at 512 frames;
+that is not a fair comparison with the native trainer's full 228-target default. With MLX explicitly
+set to all 228 targets, C++ Metal is currently **3.07x slower**.
+
+Memory moves in the opposite direction. `/usr/bin/time -l` reported a 5.52 GiB peak memory
+footprint for C++ and 23.79 GiB for MLX, in addition to the maximum-RSS values above. The native
+checkpointed graph therefore uses about 35% of MLX's maximum RSS and 23% of its peak footprint.
+
+The trainers are matched for model architecture, crop, adapter family/rank, learning rate, and
+target count, but this is a throughput A/B rather than an exact loss comparison. The C++ run reads
+the PyTorch job's F32 pre-encoded latents and uses the native reference optimizer/scheduler recipe;
+the MLX trainer performs its own F16 latent encode and has different random-stream and AdamW details.
+The native small-model parity gate separately compared identical inputs and all adapter gradients.
+
+The C++ steady-step breakdown was:
+
+| sampled steps | T5 | prep | DiT forward/backward | AdamW | total / step |
+|---:|---:|---:|---:|---:|---:|
+| 2-5 | 35.3 ms | 1.0 ms | 22,273.8 ms | 53.8 ms | **22,364.3 ms** |
+
+The scalar correctness-first Metal `OUT_PROD` kernel is the leading optimization target. A tiled or
+SIMD-group implementation should be benchmarked independently while preserving the current 92/92
+operation coverage, CPU/Metal gradient parity, and the checkpointed graph's memory advantage.
+
+The native measurement used:
+
+```sh
+SA3_TRAIN_PROFILE=1 ./build-metal/bin/sa3-train \
+  --model medium \
+  --dataset train-runs/ratatat-macos-dataset \
+  --latents-dir "$HOME/Downloads/ratatat-3-1784005242/encoded/latents/sa3-medium" \
+  --prompt-config "$HOME/Downloads/ratatat-3-1784005242/ratatat-3-1784005242_dataset.json" \
+  --frames 512 --steps 5 --checkpoint-every 0 --seed 42 \
+  --out train-runs/metal-medium-ratatat-512-5
+```
+
 ## Validated full run: small-music CUDA
 
 The `train-runs/ratatat-train` run provides a complete native end-to-end measurement rather than a
