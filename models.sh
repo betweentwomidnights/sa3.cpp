@@ -2,17 +2,20 @@
 # Download the sa3.cpp GGUF model set from HuggingFace (public repos) with curl — no Python.
 #
 # Usage: ./models.sh [--variant medium|small-music|small-sfx] [--encoding f16|f32]
-#                    [--namespace <hf-user>] [--out DIR]
+#                    [--training-base] [--namespace <hf-user>] [--out DIR] [--dry-run]
 #   default: medium f16 into ./models
 #
 # Grabs one variant's DiT + SAME at the chosen encoding, its (always-F32) conditioner, plus the shared
-# T5Gemma encoder + tokenizer. Cross-platform via git-bash on Windows (or use models.cmd).
+# T5Gemma encoder + tokenizer. --training-base also grabs the matching base DiT used by sa3-train.
+# Cross-platform via git-bash on Windows (or use models.cmd).
 set -eu
 
 VARIANT="medium"
 ENCODING="f16"
 NAMESPACE="thepatch"
 OUT="models"
+TRAINING_BASE=0
+DRY_RUN=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -20,11 +23,23 @@ while [ $# -gt 0 ]; do
     --encoding)  ENCODING="$2"; shift ;;
     --namespace) NAMESPACE="$2"; shift ;;
     --out)       OUT="$2"; shift ;;
+    --training-base) TRAINING_BASE=1 ;;
+    --dry-run)   DRY_RUN=1 ;;
     -h|--help)   sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)           echo "unknown option: $1" >&2; exit 1 ;;
   esac
   shift
 done
+
+# PowerShell may resolve `bash` to WSL. Normalize a Windows drive path so
+# `--out C:/models` does not become a literal relative `C:` directory there.
+case "$OUT" in
+  [A-Za-z]:/*)
+    if command -v wslpath >/dev/null 2>&1; then
+      OUT=$(wslpath -u "$OUT")
+    fi
+    ;;
+esac
 
 case "$VARIANT" in
   medium)                DIT_SIZE="1.5B"; SAME="same-l" ;;
@@ -33,7 +48,12 @@ case "$VARIANT" in
 esac
 
 ENC=$(printf '%s' "$ENCODING" | tr '[:lower:]' '[:upper:]')   # F16 / F32
+case "$ENC" in
+  F16|F32) ;;
+  *) echo "unknown encoding: $ENCODING (f16|f32)" >&2; exit 1 ;;
+esac
 VAR_REPO="$NAMESPACE/stable-audio-3-$VARIANT-GGUF"
+BASE_REPO="$NAMESPACE/stable-audio-3-$VARIANT-base-GGUF"
 SHARED="$NAMESPACE/t5gemma-b-b-ul2-GGUF"
 BASE="stable-audio-3-$VARIANT"
 
@@ -42,6 +62,10 @@ mkdir -p "$OUT"
 dl() {   # dl <repo> <filename>
   local repo="$1" file="$2"
   local dst="$OUT/$file"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[plan] https://huggingface.co/$repo/resolve/main/$file -> $dst"
+    return
+  fi
   if [ -f "$dst" ]; then
     echo "[check/resume] $file"
   else
@@ -51,9 +75,16 @@ dl() {   # dl <repo> <filename>
 }
 
 dl "$VAR_REPO" "$BASE-dit-$DIT_SIZE-v1.0-$ENC.gguf"
+if [ "$TRAINING_BASE" -eq 1 ]; then
+  dl "$BASE_REPO" "$BASE-base-dit-$DIT_SIZE-v1.0-$ENC.gguf"
+fi
 dl "$VAR_REPO" "$BASE-$SAME-v1.0-$ENC.gguf"
 dl "$VAR_REPO" "$BASE-conditioner-v1.0-F32.gguf"
 dl "$SHARED"   "t5gemma-b-b-ul2-encoder-0.3B-v1.0-F32.gguf"
 dl "$SHARED"   "t5gemma-b-b-ul2-v1.0-vocab.gguf"
 
-echo "[done] $VARIANT ($ENCODING) -> $OUT"
+if [ "$TRAINING_BASE" -eq 1 ]; then
+  echo "[done] $VARIANT ($ENCODING) + training base -> $OUT"
+else
+  echo "[done] $VARIANT ($ENCODING) -> $OUT"
+fi

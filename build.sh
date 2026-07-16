@@ -54,3 +54,4 @@ export SA3_MODELS_DIR="$(pwd)/models"
 EOF
 echo "[sa3] to run the tools from any dir:  source ./env.sh"
 echo "[sa3]   then, e.g.:  sa3-generate --model medium --prompt \"...\" --out song.wav"
+echo "[sa3]                 sa3-train --dataset /path/to/dataset --steps 1500"

@@ -26,8 +26,12 @@ loras/*
 models/*
 !models/README.md
 checkpoints/
+train-runs/
 *.gguf
 *.safetensors
+metrics.jsonl
+config.snapshot.txt
+command.txt
 
 # Python
 __pycache__/

@@ -66,6 +66,11 @@ t5gemma-b-b-ul2-v1.0-vocab.gguf
 
 # adapters (live with the repo they target, or a loras repo)
 <name>-v1.0-F32-LoRA.gguf        # e.g. kev-v1.0-F32-LoRA.gguf
+
+# training-only base DiTs (one dedicated repo per variant)
+stable-audio-3-medium-base-dit-1.5B-v1.0-{F32,F16}.gguf
+stable-audio-3-small-music-base-dit-0.5B-v1.0-{F32,F16}.gguf
+stable-audio-3-small-sfx-base-dit-0.5B-v1.0-{F32,F16}.gguf
 ```
 
 ## metadata (`general.*`) the converters must stamp
@@ -83,6 +88,10 @@ dit/ae/t5gemma/conditioner converters):
 | `general.version`    | `v1.0` |
 | `general.license`    | `stabilityai-community` |
 
+Training-base DiTs additionally set `dit.training_base = true` and the standard
+`general.base_model.0.{name,organization,version,repo_url}` fields. `version` is the exact pinned
+upstream revision, so the source of a standalone GGUF remains recoverable without its model card.
+
 ## hf repo layout
 
 de-facto gguf norm (TheBloke / acestep.cpp): **one repo per model, all components + all
@@ -94,9 +103,11 @@ quants as files, one card with a "grab one of each" table** — not a repo per q
 | `stable-audio-3-small-music-GGUF`  | small-music DiT + SAME-S + conditioner |
 | `stable-audio-3-small-sfx-GGUF`    | small-sfx DiT + SAME-S + conditioner |
 | `t5gemma-b-b-ul2-GGUF` *(shared)*  | encoder + tokenizer |
+| `stable-audio-3-<variant>-base-GGUF` | training-only base DiT, F16 + F32 |
 
 grouped under an hf **collection** "Stable Audio 3 (GGUF)". the `models` downloader fetches one
-variant repo (DiT + SAME + conditioner) + the shared encoder repo.
+variant repo (DiT + SAME + conditioner) + the shared encoder repo. Passing `--training-base`
+also fetches the matching dedicated base-DiT repo used by `sa3-train`.
 
 ## quant matrix (initial)
 
@@ -108,8 +119,21 @@ quantize), mirroring acestep keeping its VAE at BF16.
 ## license
 
 stable-audio-3 is under the **Stability AI Community License**. user is in the Stability org and
-in contact with Zach for the proper hf packaging (license tag, gating, card boilerplate). cards
-are drafted to the convention here; **confirm license tagging/gating with Zach before publishing.**
+the published GGUF repositories mirror the upstream license/gating pattern. Each training-base
+repository includes the pinned upstream `LICENSE.md`, the required Stability attribution in
+`NOTICE`, its model card, and `SHA256SUMS`.
+
+## training-base release staging
+
+`tools/stage_training_base_repos.py` is optional maintainer tooling, not a runtime downloader or an
+automatic uploader. Given the converted F16/F32 GGUF directory, it prepares all three repository
+trees, fetches and checksum-verifies the pinned upstream license, refuses to replace mismatched
+files, hard-links large GGUFs when possible, and writes release checksums. Review the staged trees
+before uploading them with the standard Hugging Face tooling.
+
+```sh
+python tools/stage_training_base_repos.py --gguf-dir /path/to/converted --out /path/to/staging
+```
 
 ## download contract
 

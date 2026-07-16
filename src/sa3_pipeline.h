@@ -888,6 +888,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         }
         printf("inpaint: regenerating frames [%d,%d) of %d (%.2f-%.2fs), keeping the rest\n",
                f0, f1, T, f0 * (float)ds / 44100.0f, f1 * (float)ds / 44100.0f);
+    } else if (dc.local_dim > 0 && getenv("SA3_LOCAL_ZEROS")) {
+        // Diagnostic (SA3_LOCAL_ZEROS=1): run the local-cond block with an all-zero
+        // [mask | masked_input] like the reference trainer/sampler do for plain generation,
+        // instead of skipping the block. Mask 0 = "generate everything".
+        localb.assign((size_t)dc.local_dim * T, 0.0f);
+        printf("local-cond: feeding zeros (SA3_LOCAL_ZEROS)\n");
     }
 
     // Free T5 (and AE if it was loaded for init audio) before DiT sampling.
@@ -947,7 +953,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     ggml_tensor* ones  = ggml_new_tensor_1d(dctx, GGML_TYPE_F32, 1);
     for (ggml_tensor* t : {x_in, tfeat, cross, glob, pos_d, ones}) ggml_set_input(t);
     ggml_tensor* local = nullptr;
-    if (inpaint) { local = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, dc.local_dim, T); ggml_set_input(local); }
+    if (!localb.empty()) { local = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, dc.local_dim, T); ggml_set_input(local); }
     ggml_tensor* vel = ggml_cont(dctx, sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local));
     ggml_set_output(vel);
     ggml_cgraph* gf_dit = ggml_new_graph_custom(dctx, 32768, false);

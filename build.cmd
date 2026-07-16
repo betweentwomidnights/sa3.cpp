@@ -49,9 +49,16 @@ rem Write env files so the tools run from any dir without the long path.
 set "BIN=%CD%\%DIR%\bin\Release"
 > env.cmd echo @set "PATH=%BIN%;%%PATH%%"
 >> env.cmd echo @set "SA3_MODELS_DIR=%CD%\models"
+>> env.cmd echo @echo [sa3] environment ready. Example:
+>> env.cmd echo @echo [sa3]   sa3-generate --model medium --prompt "..." --out song.wav
+>> env.cmd echo @echo [sa3]   sa3-train --dataset C:\path\to\dataset --steps 1500
 > env.ps1 echo $env:Path = "%BIN%;$env:Path"
 >> env.ps1 echo $env:SA3_MODELS_DIR = "%CD%\models"
+>> env.ps1 echo Write-Host '[sa3] environment ready. Example:'
+>> env.ps1 echo Write-Host '[sa3]   sa3-generate --model medium --prompt "..." --out song.wav'
+>> env.ps1 echo Write-Host '[sa3]   sa3-train --dataset C:\path\to\dataset --steps 1500'
 echo [sa3] to run the tools from any dir:
 echo [sa3]   cmd:         env.cmd
 echo [sa3]   powershell:  . .\env.ps1
 echo [sa3]   then, e.g.:  sa3-generate --model medium --prompt "..." --out song.wav
+echo [sa3]                 sa3-train --dataset C:\path\to\dataset --steps 1500

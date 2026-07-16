@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(sa3_cpp LANGUAGES C CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
@@ -60,7 +62,54 @@ if(SA3_HIP)
     set(GGML_HIP ON CACHE BOOL "" FORCE)
 endif()
 
-# Vanilla GGML (no custom ops needed — the whole SA3 stack is attention/linear/norm/conv1d).
+# The pinned SA3 ggml fork carries the small autodiff/backend patch stack documented in
+# docs/GGML_FORK.md; the model itself still uses standard ggml operations.
+# Fresh checkouts that were not cloned with --recurse-submodules have an empty ggml/.
+# Initialize it here so clean CMake/CTest configure runs do not depend on out-of-tree copies.
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ggml/CMakeLists.txt")
+    find_package(Git QUIET)
+    if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+        message(STATUS "Initializing ggml submodule")
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" submodule update --init --recursive ggml
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            RESULT_VARIABLE SA3_GGML_SUBMODULE_RESULT)
+    endif()
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ggml/CMakeLists.txt")
+        message(FATAL_ERROR
+            "ggml checkout is missing. Run `git submodule update --init --recursive ggml` "
+            "from ${CMAKE_CURRENT_SOURCE_DIR} and reconfigure.")
+    endif()
+endif()
+
+# Existing clones can retain an older submodule checkout after pulling a parent-repository update.
+# Detect that state without modifying the checkout: maintainers may intentionally have local ggml
+# work, so configuration should explain the reproducible update command rather than overwrite it.
+find_package(Git QUIET)
+if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ggml/.git")
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD:ggml
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE SA3_GGML_PIN_RESULT
+        OUTPUT_VARIABLE SA3_GGML_PIN
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C ggml rev-parse HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE SA3_GGML_HEAD_RESULT
+        OUTPUT_VARIABLE SA3_GGML_HEAD
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(SA3_GGML_PIN_RESULT EQUAL 0 AND SA3_GGML_HEAD_RESULT EQUAL 0 AND
+       NOT SA3_GGML_PIN STREQUAL SA3_GGML_HEAD)
+        message(WARNING
+            "ggml is checked out at ${SA3_GGML_HEAD}, but this sa3.cpp revision pins "
+            "${SA3_GGML_PIN}. To use the tested dependency, run `git submodule sync --recursive` "
+            "then `git submodule update --init --recursive`. Local ggml work was not modified.")
+    endif()
+endif()
 add_subdirectory(ggml)
 
 # src/ is header-driven (acestep style); add library/tool targets here as phases land.
@@ -90,6 +139,10 @@ target_link_libraries(sa3-tokenize PRIVATE sa3)
 add_executable(sa3-generate tools/sa3-generate.cpp)
 target_link_libraries(sa3-generate PRIVATE sa3)
 
+add_executable(sa3-train tools/sa3-train.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train PRIVATE sa3)
+target_include_directories(sa3-train PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
 # sa3-server: HTTP over the pipeline. Vendored cpp-httplib (split impl) + yyjson (C).
 find_package(Threads REQUIRED)
 add_executable(sa3-server tools/sa3-server.cpp
@@ -109,6 +162,89 @@ endif()
 add_executable(sa3-lora-convert tools/sa3-lora-convert.cpp vendor/yyjson/yyjson.c)
 target_link_libraries(sa3-lora-convert PRIVATE sa3)
 target_include_directories(sa3-lora-convert PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-config-test tests/train_config_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-config-test PRIVATE sa3)
+target_include_directories(sa3-train-config-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-dataset-test tests/train_dataset_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-dataset-test PRIVATE sa3)
+target_include_directories(sa3-train-dataset-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-model-paths-test tests/train_model_paths_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-model-paths-test PRIVATE sa3)
+target_include_directories(sa3-train-model-paths-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-audio-test tests/train_audio_test.cpp)
+target_link_libraries(sa3-train-audio-test PRIVATE sa3)
+
+add_executable(sa3-train-same-compile-test tests/train_same_compile_test.cpp)
+target_link_libraries(sa3-train-same-compile-test PRIVATE sa3)
+
+add_executable(sa3-train-conditioning-compile-test tests/train_conditioning_compile_test.cpp)
+target_link_libraries(sa3-train-conditioning-compile-test PRIVATE sa3)
+
+add_executable(sa3-train-diffusion-test tests/train_diffusion_test.cpp)
+target_link_libraries(sa3-train-diffusion-test PRIVATE sa3)
+
+add_executable(sa3-train-lora-test tests/train_lora_test.cpp)
+target_link_libraries(sa3-train-lora-test PRIVATE sa3)
+
+add_executable(sa3-train-dit-compile-test tests/train_dit_compile_test.cpp)
+target_link_libraries(sa3-train-dit-compile-test PRIVATE sa3)
+
+add_executable(sa3-train-optimizer-test tests/train_optimizer_test.cpp)
+target_link_libraries(sa3-train-optimizer-test PRIVATE sa3)
+
+add_executable(sa3-train-loop-compile-test tests/train_loop_compile_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-loop-compile-test PRIVATE sa3)
+target_include_directories(sa3-train-loop-compile-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-checkpoint-test tests/train_checkpoint_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-checkpoint-test PRIVATE sa3)
+target_include_directories(sa3-train-checkpoint-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-prompt-test tests/train_prompt_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-prompt-test PRIVATE sa3)
+target_include_directories(sa3-train-prompt-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
+add_executable(sa3-train-inpaint-test tests/train_inpaint_test.cpp)
+target_link_libraries(sa3-train-inpaint-test PRIVATE sa3)
+
+add_executable(sa3-dit-lin-functional-test tests/dit_lin_functional_test.cpp)
+target_link_libraries(sa3-dit-lin-functional-test PRIVATE sa3)
+
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    add_test(NAME sa3-train-config-test COMMAND sa3-train-config-test)
+    add_test(NAME sa3-train-dataset-test COMMAND sa3-train-dataset-test)
+    add_test(NAME sa3-train-model-paths-test COMMAND sa3-train-model-paths-test)
+    add_test(NAME sa3-train-audio-test COMMAND sa3-train-audio-test)
+    add_test(NAME sa3-train-same-compile-test COMMAND sa3-train-same-compile-test)
+    add_test(NAME sa3-train-conditioning-compile-test COMMAND sa3-train-conditioning-compile-test)
+    add_test(NAME sa3-train-diffusion-test COMMAND sa3-train-diffusion-test)
+    add_test(NAME sa3-train-lora-test COMMAND sa3-train-lora-test)
+    add_test(NAME sa3-train-dit-compile-test COMMAND sa3-train-dit-compile-test)
+    add_test(NAME sa3-train-optimizer-test COMMAND sa3-train-optimizer-test)
+    add_test(NAME sa3-train-loop-compile-test COMMAND sa3-train-loop-compile-test)
+    add_test(NAME sa3-train-checkpoint-test COMMAND sa3-train-checkpoint-test)
+    add_test(NAME sa3-train-prompt-test COMMAND sa3-train-prompt-test)
+    add_test(NAME sa3-train-inpaint-test COMMAND sa3-train-inpaint-test)
+    add_test(NAME sa3-dit-lin-functional-test COMMAND sa3-dit-lin-functional-test)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME sa3-model-artifacts-test
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_artifacts_test.py")
+        set_tests_properties(sa3-model-artifacts-test PROPERTIES LABELS "non-gpu;tooling")
+    endif()
+    set_tests_properties(
+        sa3-train-config-test sa3-train-dataset-test sa3-train-model-paths-test
+        sa3-train-audio-test sa3-train-same-compile-test sa3-train-conditioning-compile-test
+        sa3-train-diffusion-test sa3-train-lora-test sa3-train-dit-compile-test
+        sa3-train-optimizer-test sa3-train-loop-compile-test sa3-train-checkpoint-test
+        sa3-train-prompt-test sa3-train-inpaint-test
+        sa3-dit-lin-functional-test
+        PROPERTIES LABELS "non-gpu;training;lora")
+endif()
 
 # --- libsa3: C ABI shared library (embed sa3 in a host app; see src/libsa3.h) ---------------
 # Windows: sa3.dll + sa3.lib (import lib).  Unix/macOS: libsa3.so / libsa3.dylib.

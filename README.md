@@ -1,5 +1,11 @@
 # stable-audio-3 in c++
 
+> **update 7/15/2026 — CUDA and CPU LoRA training are now implemented via CLI. training is currently
+> tested on CUDA and CPU only. the trainer is in very active development, so expect changes as i
+> work toward all-backend training. Vulkan is in active development, with Metal planned shortly after.**
+>
+> **nothing should be different for you at inference time, but plz let me know if any issues surface.**
+
 trying to make this as composable and extensible as i can without over-engineering it too much. my hope is that this might eventually replace the sa3 backend i already use in [gary4local](https://github.com/betweentwomidnights/gary-localhost-installer), and start unifying that application for mac/pc. 
 
 it might also just allow us to embed sa3 directly inside a JUCE/iPlug2 project. see [docs/EMBEDDING.md](docs/EMBEDDING.md).
@@ -21,7 +27,7 @@ cd sa3.cpp
 ./build.sh cuda        # or: cpu | vulkan | hip | metal | all     (windows: build.cmd cuda)
 
 # 2. download a model set into ./models  (no python — curl from HuggingFace)
-./models.sh            # windows: models.cmd    (or --variant small-music | --encoding f32)
+./models.sh            # windows: models.cmd    (add --training-base for native LoRA training)
 
 # 3. put the tools on PATH for this shell (points SA3_MODELS_DIR at ./models too)
 source ./env.sh        # windows:  env.cmd  (cmd)   or   . .\env.ps1  (powershell)
@@ -33,6 +39,22 @@ sa3-generate --model small-music --duration 12 --prompt "upbeat funk groove with
 # adapters resolve the same way: --lora <name> finds models/lora-<name>-*.gguf
 sa3-generate --model medium --lora kev --lora keygen --prompt "neo-classical lofi hiphop 90bpm C# minor" --out song.wav
 ```
+
+updating an existing checkout across the one-time ggml URL migration:
+
+```bash
+git -c fetch.recurseSubmodules=false pull --ff-only
+git submodule sync --recursive
+git submodule update --init --recursive
+```
+
+sa3.cpp pins an exact revision of its public
+[`betweentwomidnights/ggml`](https://github.com/betweentwomidnights/ggml) fork. existing checkouts
+cache the old submodule URL. disabling recursive submodule fetching for that first pull lets Git
+receive the new parent revision before `sync` replaces the cached URL; otherwise some Git setups
+try to fetch the new pin from the old `ggml-org/ggml` remote and report `not our ref`. `update`
+then moves ggml to the backend patch revision tested by that sa3.cpp commit. none of these commands
+uses a moving ggml branch. if you have local changes inside `ggml/`, commit or stash them first.
 
 (`--model` is a convenience over the explicit `--tok/--t5/--cond/--dit/--same` flags, which still
 work and override it per-slot. `--encoding f32` and `--models-dir DIR` adjust what it resolves.
@@ -55,6 +77,18 @@ Toolkit; vulkan needs the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home); meta
 backend + packaging details: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) ·
 [docs/VULKAN.md](docs/VULKAN.md) · [docs/METAL.md](docs/METAL.md) · [docs/HIP.md](docs/HIP.md).
 there's also a small HTTP server (`./server.sh` / `server.cmd`) — see [docs/SERVER.md](docs/SERVER.md).
+native adapter training is documented in [docs/TRAINING.md](docs/TRAINING.md).
+With the matching base DiT downloaded (`models.cmd --training-base` on Windows), the common training
+path is deliberately just one command after `env.cmd`:
+
+```powershell
+sa3-train --dataset C:\dev\datasets\my-training-set --steps 1500
+```
+
+The validated medium-base DoRA recipe is the default; model, optimizer, crop, conditioning, and
+output settings remain available as overrides for advanced runs. Periodic checkpoints are
+restart-safe: `--resume trainer-state-step-N.gguf --steps TOTAL` restores the adapter, AdamW,
+dataset cursor, and stochastic streams exactly.
 
 what works:
 
