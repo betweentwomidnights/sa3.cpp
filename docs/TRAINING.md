@@ -151,7 +151,8 @@ order, plus the stochastic states used for crops, prompts, CFG dropout, inpainti
 diffusion noise. Keeping those tensors separate prevents inference from loading optimizer state.
 
 Pass either member of the pair to `--resume`. `--steps` is the total target step, not the number of
-additional updates. For example, this continues a step-500 CPU or CUDA run through step 1500:
+additional updates. For example, this continues a step-500 CPU, CUDA, or Vulkan run through step
+1500:
 
 ```powershell
 sa3-train --dataset C:\datasets\my-training-set --resume C:\dev\sa3.cpp\train-runs\my-training-set\trainer-state-step-500.gguf --steps 1500
