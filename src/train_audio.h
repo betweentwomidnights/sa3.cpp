@@ -22,7 +22,8 @@ inline FILE* sa3_popen(const char* cmd, const char* mode) {
 #ifdef _WIN32
     return _popen(cmd, mode);
 #else
-    return popen(cmd, mode);
+    const char posix_mode[2] = {mode[0], '\0'};
+    return popen(cmd, posix_mode);
 #endif
 }
 

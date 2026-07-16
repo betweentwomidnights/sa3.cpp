@@ -190,6 +190,21 @@ inline bool train_validate_resume_adapter_fingerprint(const std::string& path,
     return true;
 }
 
+template <typename Integer>
+inline std::string train_resume_integer_to_string(Integer value) {
+    const bool negative = value < 0;
+    std::string result;
+    do {
+        const Integer remainder = value % 10;
+        const unsigned digit = static_cast<unsigned>(negative ? -remainder : remainder);
+        result.push_back(static_cast<char>('0' + digit));
+        value /= 10;
+    } while (value != 0);
+    if (negative) result.push_back('-');
+    std::reverse(result.begin(), result.end());
+    return result;
+}
+
 inline std::string train_resume_file_identity(const std::string& path, bool include_contents) {
     namespace fs = std::filesystem;
     if (path.empty()) return "(none)";
@@ -210,7 +225,7 @@ inline std::string train_resume_file_identity(const std::string& path, bool incl
             const auto stamp = it->last_write_time(ec).time_since_epoch().count();
             if (ec) break;
             entries.push_back(rel.generic_string() + "|" + std::to_string(entry_size) + "|" +
-                              std::to_string(stamp));
+                              train_resume_integer_to_string(stamp));
         }
         std::sort(entries.begin(), entries.end());
         for (const std::string& entry : entries) out << "|entry=" << entry;
@@ -221,7 +236,7 @@ inline std::string train_resume_file_identity(const std::string& path, bool incl
     if (!ec) out << "|size=" << size;
     ec.clear();
     const auto stamp = fs::last_write_time(path, ec).time_since_epoch().count();
-    if (!ec) out << "|mtime=" << stamp;
+    if (!ec) out << "|mtime=" << train_resume_integer_to_string(stamp);
     if (include_contents) {
         std::ifstream f(path, std::ios::binary);
         std::string contents((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
