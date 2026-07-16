@@ -1,8 +1,9 @@
 # stable-audio-3 in c++
 
-> **update 7/15/2026 — CUDA and CPU LoRA training are now implemented via CLI. training is currently
-> tested on CUDA and CPU only. the trainer is in very active development, so expect changes as i
-> work toward all-backend training. Vulkan is in active development, with Metal planned shortly after.**
+> **update 7/16/2026 — Vulkan backend LoRA training is now implemented via CLI. Metal is up next.**
+>
+> **i'm still not super happy with training speed using iGPUs. hoping to improve that over the next
+> few days once we get the Metal backend working and i can circle back.**
 >
 > **nothing should be different for you at inference time, but plz let me know if any issues surface.**
 
@@ -77,13 +78,18 @@ Toolkit; vulkan needs the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home); meta
 backend + packaging details: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) ·
 [docs/VULKAN.md](docs/VULKAN.md) · [docs/METAL.md](docs/METAL.md) · [docs/HIP.md](docs/HIP.md).
 there's also a small HTTP server (`./server.sh` / `server.cmd`) — see [docs/SERVER.md](docs/SERVER.md).
-native adapter training is documented in [docs/TRAINING.md](docs/TRAINING.md).
+native adapter training is documented in [docs/TRAINING.md](docs/TRAINING.md), with measured backend
+and PyTorch comparisons in [docs/TRAINING_BENCHMARKS.md](docs/TRAINING_BENCHMARKS.md).
 With the matching base DiT downloaded (`models.cmd --training-base` on Windows), the common training
 path is deliberately just one command after `env.cmd`:
 
 ```powershell
 sa3-train --dataset C:\dev\datasets\my-training-set --steps 1500
 ```
+
+On the 8 GB laptop 5070 used for development, the default medium-base CUDA recipe currently averages
+1.065 seconds per update: a projected 44 minutes for 2,500 steps, versus 74 minutes for the completed
+PyTorch reference job on the same machine.
 
 The validated medium-base DoRA recipe is the default; model, optimizer, crop, conditioning, and
 output settings remain available as overrides for advanced runs. Periodic checkpoints are

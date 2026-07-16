@@ -2,19 +2,25 @@
 
 `sa3-train` trains a DiT LoRA/DoRA adapter directly in C++/ggml from MP3/caption pairs and writes an adapter GGUF that loads through the existing `sa3-generate --lora` path.
 
-Training is currently validated on CUDA and CPU. Vulkan training is in active development; Metal is
+Training is currently validated on CUDA, Vulkan, and CPU. Vulkan v1 supports both discrete GPUs and
+integrated GPUs, although iGPU throughput still has substantial room for improvement. Metal is
 planned next. These training additions do not alter the existing inference path.
+
+Measured training throughput and reproducible backend comparisons are collected in
+[TRAINING_BENCHMARKS.md](TRAINING_BENCHMARKS.md).
 
 ## Build
 
 ```sh
 ./build.sh cpu
 ./build.sh cuda
+./build.sh vulkan
 ```
 
-CUDA is the fastest validated backend for real training runs. CPU training is also supported and
-honors the same thread controls as inference. See [NON_GPU_TESTS.md](NON_GPU_TESTS.md) for the
-registered CTest suite.
+CUDA is the fastest validated backend for real training runs. Vulkan training is supported on both
+integrated and discrete GPUs, and CPU training honors the same thread controls as inference. See
+[TRAINING_BENCHMARKS.md](TRAINING_BENCHMARKS.md) for measured throughput and
+[NON_GPU_TESTS.md](NON_GPU_TESTS.md) for the registered CTest suite.
 
 ## Models
 
@@ -186,3 +192,4 @@ build-cuda/bin/sa3-generate \
 - Split contamination: remove the duplicate item from train or held-out splits.
 - FFmpeg decode failure: confirm `ffmpeg` is installed and can decode the MP3.
 - CUDA build failure: verify the CUDA Toolkit is installed and rerun `./build.sh cuda`.
+- Vulkan build failure: verify the Vulkan SDK is installed and rerun `./build.sh vulkan`.

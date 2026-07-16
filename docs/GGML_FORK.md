@@ -14,6 +14,12 @@ The initial patch branch is `feature/sa3-training-v0.15.3`, based on upstream gg
 5. CPU and CUDA F16-weight support in `OUT_PROD` backward.
 6. Contiguous materialization for strided `GGML_OP_CONT` gradients.
 
+Vulkan training is layered on that reviewed pin in
+`feature/sa3-training-vulkan-v0.15.3`. Its four additional commits add Vulkan `OUT_PROD`
+backward support, tile and thread-tile the shader, cover the new F32/F16 and partial-tile cases in
+ggml's backend-op tests, and prevent a stale Windows `MATH_LIBRARY-NOTFOUND` cache entry from
+breaking reconfiguration.
+
 ## Updating the fork
 
 Keep the official repository as `upstream` and the SA3 fork as `origin` inside the submodule:
@@ -30,11 +36,12 @@ after confirming that upstream contains an equivalent implementation.
 
 Before updating the parent repository's gitlink:
 
-1. Build both CPU and CUDA configurations.
-2. Run the registered CTest suite on both configurations.
-3. Run one medium-base and one small-base training step.
-4. Apply each resulting adapter through `sa3-generate`.
-5. Push the ggml branch and verify its exact commit is visible on the fork.
+1. Build every affected CPU, CUDA, Vulkan, or Metal configuration.
+2. Run the registered CTest suite on every affected configuration.
+3. Run ggml backend-op coverage for any newly supported operation and device class.
+4. Run one medium-base and one small-base training step.
+5. Apply each resulting adapter through `sa3-generate`.
+6. Push the ggml branch and verify its exact commit is visible on the fork.
 
 Then update the pinned commit in `sa3.cpp`. A fresh-clone check is required before merging:
 
@@ -57,12 +64,13 @@ tag when Vulkan, Metal, or another backend adds patches; push a new tag and upda
 gitlink to its exact commit. Keep every published pin reachable from the public fork so old
 `sa3.cpp` revisions remain buildable.
 
-| sa3.cpp milestone | upstream base | fork branch | pinned commit | trained backends |
-| --- | --- | --- | --- | --- |
-| trainer v1 | ggml `v0.15.3` (`eced84c`) | `feature/sa3-training-v0.15.3` | `cfec69c` | CPU, CUDA |
+| sa3.cpp milestone | immutable tag | upstream base | fork branch | pinned commit | trained backends |
+| --- | --- | --- | --- | --- | --- |
+| trainer v1 | `sa3-training-v1-cpu-cuda` | ggml `v0.15.3` (`eced84c`) | `feature/sa3-training-v0.15.3` | `cfec69c` | CPU, CUDA |
+| Vulkan v1 | `sa3-training-v1-vulkan` | ggml `v0.15.3` (`eced84c`) | `feature/sa3-training-vulkan-v0.15.3` | `5a87d69c` | CPU, CUDA, Vulkan |
 
-Add a row when the parent pin changes. A Vulkan milestone, for example, receives a new immutable
-tag and row rather than changing the trainer-v1 tag.
+Add a row when the parent pin changes. Metal and later backend milestones receive new immutable
+tags and rows rather than changing either existing trainer-v1 tag.
 
 ## Updating existing clones and downstream forks
 
