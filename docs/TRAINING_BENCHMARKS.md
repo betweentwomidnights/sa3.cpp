@@ -15,6 +15,29 @@ checkpoint writes.
 - Batch size 1, pre-encoded ratatat latents, seed 42
 - sa3.cpp `d7939a2`, ggml `5a87d69c`
 
+## ggml v0.16.0 matched Intel validation
+
+Before changing the dependency pin, the v0.15.3 and v0.16.0 builds were run back-to-back with the
+same small-music F16 base, 256 frames, pre-encoded latents, dataset order, seed, timesteps, and
+inpainting masks. Step 1 was excluded for graph setup; the table averages steps 2-8 from each
+eight-step run.
+
+| ggml base | T5 | prep | DiT | AdamW | total / step | projected 2,500 steps |
+|---|---:|---:|---:|---:|---:|---:|
+| v0.15.3 (`5a87d69c` SA3 pin) | 111.3 ms | 1.0 ms | 6,054.3 ms | 34.1 ms | **6,200.4 ms** | **4 h 18 min** |
+| v0.16.0 (`9915b8f1` SA3 candidate) | 114.0 ms | 1.0 ms | 5,995.3 ms | 33.7 ms | **6,143.7 ms** | **4 h 16 min** |
+
+The candidate is 0.9% faster in this matched pass, which is too small to claim beyond normal
+iGPU power and thermal variance. More importantly, every printed loss and gradient norm matched,
+and the final adapters and trainer-state files were byte-identical across versions. This run was
+slower than the earlier 5,518.6 ms sample below on both builds, illustrating why the back-to-back
+comparison is more useful for judging the ggml update than either absolute result.
+
+The Intel device still reports `matrix cores: none`: driver `32.0.101.6629` does not expose
+`VK_KHR_cooperative_matrix`, so ggml v0.16.0 cannot activate its new Xe1 cooperative-matrix path.
+The dependency update is therefore correctness-neutral here, not the hoped-for iGPU training
+breakthrough.
+
 ## Headline: medium-base CUDA versus PyTorch
 
 This is the default production recipe: medium-base F16, 512 latent frames (~23.8 seconds), batch

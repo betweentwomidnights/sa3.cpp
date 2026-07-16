@@ -20,6 +20,13 @@ backward support, tile and thread-tile the shader, cover the new F32/F16 and par
 ggml's backend-op tests, and prevent a stale Windows `MATH_LIBRARY-NOTFOUND` cache entry from
 breaking reconfiguration.
 
+The v0.16.0 validation line is `feature/sa3-training-vulkan-v0.16.0`, based on upstream tag
+`v0.16.0` (`524f974b`). The complete CPU/CUDA/Vulkan patch stack cherry-picks without conflicts.
+At candidate `9915b8f1`, all three sa3.cpp builds and their 16 registered tests pass, Vulkan
+`OUT_PROD` passes 91/91 backend-op cases on both Intel and NVIDIA, and matched Intel inference and
+training outputs are byte-identical to the v0.15.3 pin. Do not publish a release tag or update the
+table below until final downstream terminal validation is complete.
+
 ## Updating the fork
 
 Keep the official repository as `upstream` and the SA3 fork as `origin` inside the submodule:

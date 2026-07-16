@@ -7,6 +7,25 @@ stable-audio-3-medium, 8 steps, cuda backend. `total` is end-to-end wall time
 *including* loading the three nets from disk (~2-3s of it); `decode` is just the
 SAME-L decoder compute, `dit` is the 8-step sampler.
 
+## ggml v0.16.0: Intel iGPU inference validation
+
+The v0.16.0 candidate was compared directly with the prior v0.15.3 pin on the Intel Graphics
+iGPU (device `0x7d67`, driver `32.0.101.6629`). Both runs used medium F16, the prompt `upbeat funk
+groove with slap bass`, seed 42, 12 seconds, eight steps, no duration padding, and
+`SA3_GPU=intel`. One warm-up run was excluded and the table reports the median of three complete
+processes, including model loading.
+
+| ggml base | matrix-core path | median end-to-end | result |
+|---|---|---:|---|
+| v0.15.3 (`5a87d69c` SA3 pin) | none | **23.47 s** | baseline |
+| v0.16.0 (`9915b8f1` SA3 candidate) | none | **23.94 s** | +2.0%, within run/power variance |
+
+All six measured WAV files were byte-identical. The v0.16.0 Intel Xe1 detection recognizes the
+device's subgroup and integer-dot capabilities, but this driver does not expose
+`VK_KHR_cooperative_matrix`; ggml therefore correctly stays on the scalar matrix path. The new
+version is a correctness-preserving upgrade on this machine, but it does not unlock an iGPU
+inference speedup without cooperative-matrix support from the driver.
+
 ## the levers
 
 - **fp16 quantization** (`tools/quantize_gguf.py`) — halves the weight matrices so all
