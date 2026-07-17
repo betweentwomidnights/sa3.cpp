@@ -2,7 +2,8 @@
 
 status: **GENERATION + TRAINING PASS on Apple M4.** medium f16 text-to-music is deterministic and
 native small/medium LoRA/DoRA training completes on ggml Metal. The training path is correct and
-memory-efficient, but its first scalar `OUT_PROD` kernel still leaves substantial performance work.
+memory-efficient; the optimized `OUT_PROD` path brings matched 512-frame training to within 19% of
+MLX while retaining the checkpointed graph's much lower memory use.
 
 ## 0. prerequisites
 
@@ -188,22 +189,26 @@ The real 512-frame gate used the ten-track Ratatat dataset and the exact medium 
 the earlier gary4local/PyTorch job. Default medium DoRA-rows rank/alpha 16 adapts 228 DiT targets.
 Steps 2-5 exclude graph setup and pipeline compilation:
 
-| frames | sampled steps | T5 | prep | DiT fwd/bwd | AdamW | total / step | peak RSS |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 512 | 2-5 | 35.3 ms | 1.0 ms | 22,273.8 ms | 53.8 ms | **22,364.3 ms** | **5.76 GiB** |
+| kernel | frames | sampled steps | T5 | prep | DiT fwd/bwd | AdamW | total / step | peak RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| scalar correctness baseline | 512 | 2-5 | 35.3 ms | 1.0 ms | 22,273.8 ms | 53.8 ms | **22,364.3 ms** | **5.76 GiB** |
+| 32x16 SIMD-group tile | 512 | 2-5 | 29.8 ms | 1.0 ms | 8,574.5 ms | 43.0 ms | **8,648.8 ms** | **5.75 GiB** |
 
 A matched local gary4local MLX run used the same medium RF architecture, 512-frame crop,
 DoRA-rows rank/alpha 16, and all 228 targets. MLX averaged **7.29 s/step** over steps 2-5, so the
-current C++ Metal path is 3.07x slower. MLX used **16.27 GiB maximum RSS** and a 23.79 GiB peak
-memory footprint; C++ used 5.76 GiB maximum RSS and a 5.52 GiB peak footprint. This is a throughput
-comparison, not exact loss parity: the trainers use different latent encodes, random streams, and
-slightly different optimizer details.
+optimized C++ Metal path is **1.19x slower**, down from 3.07x for the scalar kernel. MLX used
+**16.27 GiB maximum RSS** and a 23.79 GiB peak memory footprint; C++ used 5.75 GiB maximum RSS and
+a 5.52 GiB peak footprint. This is a throughput comparison, not exact loss parity: the trainers
+use different latent encodes, random streams, and slightly different optimizer details.
 
-The main performance target is the deliberately simple scalar Metal `OUT_PROD` kernel. It computes
-one full dot product per output element and established correctness across arbitrary strides and
-batches, but it does not yet use threadgroup tiling, SIMD-group matrix operations, or a batched
-matmul decomposition. Optimize that kernel before trading away the checkpointed graph's large
-memory advantage.
+The optimized Metal `OUT_PROD` kernel stages 32x16 and 16x16 operand tiles in threadgroup memory
+and uses eight SIMD-group matrix accumulators to produce a 32x16 output tile. It retains arbitrary
+byte strides, batch broadcasting, partial tiles, F32/F32, and frozen-F16/F32 support. Relative to
+the scalar correctness kernel it improves matched medium training by **2.59x**. The two-step small
+adapter and five-step medium loss trajectory remained byte-for-byte/print-identical, the frozen
+inference WAV remained byte-identical, all 92 focused `OUT_PROD` cases passed, and the complete
+37-test suite passed. A 2,500-update run now projects to about **6 h 0 min**, versus 15 h 32 min for
+the scalar path and 5 h 4 min for MLX.
 
 ## 8. metal optimization notes
 

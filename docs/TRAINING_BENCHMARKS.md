@@ -81,13 +81,15 @@ completed gary4local/PyTorch job. Step 1 was excluded for graph setup and Metal 
 
 | implementation | sampled steps | target count | steady step | throughput | projected 2,500 updates | maximum RSS |
 |---|---:|---:|---:|---:|---:|---:|
-| **sa3.cpp Metal** | 2-5 | 228 | **22.364 s** | 0.0447 steps/s | **15 h 32 min** | **5.76 GiB** |
+| sa3.cpp Metal, scalar `OUT_PROD` | 2-5 | 228 | **22.364 s** | 0.0447 steps/s | **15 h 32 min** | **5.76 GiB** |
+| **sa3.cpp Metal, 32x16 SIMD-group tile** | 2-5 | 228 | **8.649 s** | 0.1156 steps/s | **6 h 0 min** | **5.75 GiB** |
 | gary4local MLX | 2-5 | 228 | **7.285 s** | 0.1373 steps/s | **5 h 4 min** | **16.27 GiB** |
 
 The matched target inventory matters. Gary's existing production-style MLX run adapts only the 36
 Linear/Conv layers in transformer blocks 20-23 and reached roughly 2.2-2.3 s/step at 512 frames;
 that is not a fair comparison with the native trainer's full 228-target default. With MLX explicitly
-set to all 228 targets, C++ Metal is currently **3.07x slower**.
+set to all 228 targets, optimized C++ Metal is **1.19x slower**. The original scalar kernel was
+3.07x slower; tiling and SIMD-group matrix accumulation improved the native path by **2.59x**.
 
 Memory moves in the opposite direction. `/usr/bin/time -l` reported a 5.52 GiB peak memory
 footprint for C++ and 23.79 GiB for MLX, in addition to the maximum-RSS values above. The native
@@ -101,13 +103,15 @@ The native small-model parity gate separately compared identical inputs and all 
 
 The C++ steady-step breakdown was:
 
-| sampled steps | T5 | prep | DiT forward/backward | AdamW | total / step |
-|---:|---:|---:|---:|---:|---:|
-| 2-5 | 35.3 ms | 1.0 ms | 22,273.8 ms | 53.8 ms | **22,364.3 ms** |
+| kernel | sampled steps | T5 | prep | DiT forward/backward | AdamW | total / step |
+|---|---:|---:|---:|---:|---:|---:|
+| scalar | 2-5 | 35.3 ms | 1.0 ms | 22,273.8 ms | 53.8 ms | **22,364.3 ms** |
+| 32x16 SIMD-group tile | 2-5 | 29.8 ms | 1.0 ms | 8,574.5 ms | 43.0 ms | **8,648.8 ms** |
 
-The scalar correctness-first Metal `OUT_PROD` kernel is the leading optimization target. A tiled or
-SIMD-group implementation should be benchmarked independently while preserving the current 92/92
-operation coverage, CPU/Metal gradient parity, and the checkpointed graph's memory advantage.
+The optimized kernel cooperatively stages a 32x16 A tile and 16x16 B tile, then uses eight Metal
+SIMD groups to compute the 32x16 result. It preserves the scalar path's arbitrary-stride, broadcast,
+partial-tile, F32/F32, and F16/F32 contract. The final adapter is byte-identical to the scalar/tiled
+reference for matched two-step runs; all 92 focused operation cases and all 37 project tests pass.
 
 The native measurement used:
 
@@ -118,7 +122,7 @@ SA3_TRAIN_PROFILE=1 ./build-metal/bin/sa3-train \
   --latents-dir "$HOME/Downloads/ratatat-3-1784005242/encoded/latents/sa3-medium" \
   --prompt-config "$HOME/Downloads/ratatat-3-1784005242/ratatat-3-1784005242_dataset.json" \
   --frames 512 --steps 5 --checkpoint-every 0 --seed 42 \
-  --out train-runs/metal-medium-ratatat-512-5
+  --out train-runs/metal-medium-ratatat-512-simdgroup-final-5
 ```
 
 ## Validated full run: small-music CUDA

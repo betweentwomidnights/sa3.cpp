@@ -33,8 +33,9 @@ development line adds native Metal `REPEAT_BACK`, F32/F16-weight `OUT_PROD`, `SI
 views; and fixes the wide-row non-inplace `ACC` copy dispatch. On Apple M4, all 37 registered tests
 pass, Metal `OUT_PROD` passes 92/92 cases, small CPU/Metal aggregate gradient cosine is 0.9999853,
 CPU trainer state resumes on Metal, medium-base trains at 512 frames, and the frozen inference WAV
-is byte-identical before and after the patch. The branch remains untagged until the user's final
-terminal and ear checks pass.
+is byte-identical before and after the patch. A 32x16 threadgroup/SIMD-group `OUT_PROD` tile reduces
+the matched medium steady step from 22.364 s to 8.649 s while keeping the adapter byte-identical and
+peak RSS at 5.75 GiB. The branch remains untagged until the user's final terminal and ear checks pass.
 
 ## Updating the fork
 

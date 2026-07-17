@@ -16,6 +16,19 @@ v0.16.0 plus Metal training over two consecutive submodule-only updates.
 
 Do not tag either candidate branch until Metal validation and the user's terminal/ear checks pass.
 
+## Current result (2026-07-16)
+
+The bring-up and pre-full-run optimization gates are complete on the M4. Native training passes all
+37 registered tests and all 92 focused Metal `OUT_PROD` cases. Restoring a separate validated
+inference graph fixed the temporary corrupted-audio regression; the retained inference WAV is again
+byte-identical and the user confirmed the base/preview ear check is healthy.
+
+The final 32x16 threadgroup/SIMD-group `OUT_PROD` tile averages 8.649 s/step on the matched
+512-frame, 228-target Ratatat sample, down from 22.364 s for the scalar kernel (2.59x faster). The
+matched MLX trainer averages 7.285 s/step, leaving an 18.7% gap while native maximum RSS remains
+5.75 GiB versus MLX's 16.27 GiB. Do not start the full run automatically; the next decision is the
+user's acceptance of this speed/correctness gate.
+
 ## Exact starting state
 
 Parent repository:
