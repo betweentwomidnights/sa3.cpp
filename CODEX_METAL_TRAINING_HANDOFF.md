@@ -26,8 +26,13 @@ byte-identical and the user confirmed the base/preview ear check is healthy.
 The final 32x16 threadgroup/SIMD-group `OUT_PROD` tile averages 8.649 s/step on the matched
 512-frame, 228-target Ratatat sample, down from 22.364 s for the scalar kernel (2.59x faster). The
 matched MLX trainer averages 7.285 s/step, leaving an 18.7% gap while native maximum RSS remains
-5.75 GiB versus MLX's 16.27 GiB. Do not start the full run automatically; the next decision is the
-user's acceptance of this speed/correctness gate.
+5.75 GiB versus MLX's 16.27 GiB.
+
+The user accepted the gate and the full 2,000-update run completed in 5 h 29 min 55 s, including
+startup and checkpoint writes. All 2,000 metrics were finite; checkpoint pairs exist at steps 500,
+1,000, 1,500, and 2,000; and the final adapter matches the step-2,000 adapter byte-for-byte. The
+8-step/CFG-1 base render matches the retained healthy inference WAV, and the adapted preview is
+ready for the user's final ear check.
 
 ## Exact starting state
 

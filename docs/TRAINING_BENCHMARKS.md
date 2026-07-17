@@ -125,6 +125,13 @@ SA3_TRAIN_PROFILE=1 ./build-metal/bin/sa3-train \
   --out train-runs/metal-medium-ratatat-512-simdgroup-final-5
 ```
 
+The subsequent full 2,000-update run completed successfully with checkpoints at 500-update
+intervals. It took **5 h 29 min 55 s** wall time including startup and checkpoint writes
+(9.898 s/update overall); the profile average over steps 2-2,000 was 9.895 s/update. Sustained
+thermal performance over steps 1,501-2,000 averaged 10.301 s/update. Maximum RSS was **5.76 GiB**
+and peak memory footprint was **5.52 GiB**. All 2,000 metric records had finite loss and gradient
+norm, and `adapter-final.gguf` was byte-identical to `adapter-step-2000.gguf`.
+
 ## Validated full run: small-music CUDA
 
 The `train-runs/ratatat-train` run provides a complete native end-to-end measurement rather than a

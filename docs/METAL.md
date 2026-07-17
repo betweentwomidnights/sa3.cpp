@@ -210,6 +210,12 @@ inference WAV remained byte-identical, all 92 focused `OUT_PROD` cases passed, a
 37-test suite passed. A 2,500-update run now projects to about **6 h 0 min**, versus 15 h 32 min for
 the scalar path and 5 h 4 min for MLX.
 
+The full 2,000-update Ratatat run then completed in **5 h 29 min 55 s** including startup and four
+checkpoint writes. Steps 2-2,000 averaged 9.895 s under sustained load (10.301 s over the final 500
+steps), with 5.76 GiB maximum RSS and a 5.52 GiB peak footprint. All metric records were finite,
+the final adapter matched the step-2,000 checkpoint byte-for-byte, and an 8-step/CFG-1 base render
+remained byte-identical to the retained healthy inference reference.
+
 ## 8. metal optimization notes
 
 The practical Metal-specific fix was backend lifetime: keep one `ggml_backend_t` alive for every model
