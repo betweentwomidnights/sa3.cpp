@@ -22,20 +22,20 @@ breaking reconfiguration.
 
 The v0.16.0 validation line is `feature/sa3-training-vulkan-v0.16.0`, based on upstream tag
 `v0.16.0` (`524f974b`). The complete CPU/CUDA/Vulkan patch stack cherry-picks without conflicts.
-At candidate `9915b8f1`, all three sa3.cpp builds and their 16 registered tests pass, Vulkan
-`OUT_PROD` passes 91/91 backend-op cases on both Intel and NVIDIA, and matched Intel inference and
-training outputs are byte-identical to the v0.15.3 pin. Do not publish a release tag or update the
-table below until final downstream terminal validation is complete.
+At the pre-Metal candidate `9915b8f1`, all three sa3.cpp builds and their 16 registered tests pass,
+Vulkan `OUT_PROD` passes 91/91 backend-op cases on both Intel and NVIDIA, and matched Intel inference
+and training outputs are byte-identical to the v0.15.3 pin.
 
-Metal training is layered on that candidate in `feature/sa3-training-metal-v0.16.0`. The untagged
-development line adds native Metal `REPEAT_BACK`, F32/F16-weight `OUT_PROD`, `SILU_BACK`,
-`RMS_NORM_BACK`, and `SOFT_MAX_BACK`; generalizes F32 binary operations for autodiff's strided
-views; and fixes the wide-row non-inplace `ACC` copy dispatch. On Apple M4, all 37 registered tests
-pass, Metal `OUT_PROD` passes 92/92 cases, small CPU/Metal aggregate gradient cosine is 0.9999853,
-CPU trainer state resumes on Metal, medium-base trains at 512 frames, and the frozen inference WAV
-is byte-identical before and after the patch. A 32x16 threadgroup/SIMD-group `OUT_PROD` tile reduces
-the matched medium steady step from 22.364 s to 8.649 s while keeping the adapter byte-identical and
-peak RSS at 5.75 GiB. The branch remains untagged until the user's final terminal and ear checks pass.
+Metal training was developed on `feature/sa3-training-metal-v0.16.0` and merged into the v0.16.0
+patch line through ggml PR #1. It adds native Metal `REPEAT_BACK`, F32/F16-weight `OUT_PROD`,
+`SILU_BACK`, `RMS_NORM_BACK`, and `SOFT_MAX_BACK`; generalizes F32 binary operations for autodiff's
+strided views; and fixes the wide-row non-inplace `ACC` copy dispatch. On Apple M4, all 37 registered
+tests pass, Metal `OUT_PROD` passes 92/92 cases, small CPU/Metal aggregate gradient cosine is
+0.9999853, CPU trainer state resumes on Metal, medium-base trains at 512 frames, and the frozen
+inference WAV is byte-identical before and after the patch. A 32x16 threadgroup/SIMD-group
+`OUT_PROD` tile reduces the matched medium steady step from 22.364 s to 8.649 s while keeping the
+adapter byte-identical and peak RSS at 5.75 GiB. The immutable tag `sa3-training-v1-metal` points to
+the exact audited commit `922875a6`; PR #1's merge commit `f75b63f6` has the same source tree.
 
 ## Updating the fork
 
@@ -85,9 +85,10 @@ gitlink to its exact commit. Keep every published pin reachable from the public 
 | --- | --- | --- | --- | --- | --- |
 | trainer v1 | `sa3-training-v1-cpu-cuda` | ggml `v0.15.3` (`eced84c`) | `feature/sa3-training-v0.15.3` | `cfec69c` | CPU, CUDA |
 | Vulkan v1 | `sa3-training-v1-vulkan` | ggml `v0.15.3` (`eced84c`) | `feature/sa3-training-vulkan-v0.15.3` | `5a87d69c` | CPU, CUDA, Vulkan |
+| Metal v1 | `sa3-training-v1-metal` | ggml `v0.16.0` (`524f974b`) | `feature/sa3-training-vulkan-v0.16.0` (PR #1) | `922875a6` | CPU, CUDA, Vulkan, Metal |
 
-Add a row when the parent pin changes. Metal and later backend milestones receive new immutable
-tags and rows rather than changing either existing trainer-v1 tag.
+Add a row when the parent pin changes. Later backend milestones receive new immutable tags and rows
+rather than changing any existing trainer-v1 tag.
 
 ## Updating existing clones and downstream forks
 
