@@ -135,6 +135,9 @@ what's next:
 
 credits:
 
+[dada-bots/underfit](https://github.com/dada-bots/underfit) is our source of truth for all things
+LoRA/DoRA training with Stable Audio 3.
+
 [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) was used as a bit of a guide here.
 
 official upstream repo:
