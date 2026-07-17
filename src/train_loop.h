@@ -296,6 +296,13 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
                                           const TrainDiffusionSample& sample, const TrainConditioning& cond,
                                           const DitConfig& dc, float& loss_out, std::string& err,
                                           const TrainInpaint* inpaint = nullptr) {
+    const bool profile = getenv("SA3_TRAIN_PROFILE") != nullptr;
+    const auto profile_start = std::chrono::steady_clock::now();
+    auto profile_mark = profile_start;
+    double profile_forward_ms = 0.0;
+    double profile_tail_ms = 0.0;
+    double profile_blocks_ms = 0.0;
+    double profile_head_ms = 0.0;
     if (sample.x_t.empty() || sample.velocity_target.empty() || cond.cross.empty() || cond.global.empty()) {
         err = "training step inputs are empty";
         return false;
@@ -340,7 +347,17 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
     ggml_graph_reset(ck.tgraph);
     ggml_backend_graph_compute(backend, ck.tgraph);
     ggml_backend_tensor_get(ck.loss, &loss_out, 0, sizeof(float));  // also forces compute sync
+    if (profile) {
+        const auto now = std::chrono::steady_clock::now();
+        profile_forward_ms = std::chrono::duration<double, std::milli>(now - profile_mark).count();
+        profile_mark = now;
+    }
     if (!train_accum_read_subset(ck.tgraph, ck, ck.tail_param_idx, accum, err)) return false;
+    if (profile) {
+        const auto now = std::chrono::steady_clock::now();
+        profile_tail_ms = std::chrono::duration<double, std::milli>(now - profile_mark).count();
+        profile_mark = now;
+    }
 
     // B_l in reverse: re-plan the shared allocator, recompute the block, backprop the VJP.
     // context/gcond receive a contribution from every block; accumulate host-side for H.
@@ -369,6 +386,11 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
         ggml_backend_tensor_get(B.grad_gcond, tmp.data(), 0, tmp.size() * sizeof(float));
         for (size_t k = 0; k < ggcond_sum.size(); ++k) ggcond_sum[k] += tmp[k];
     }
+    if (profile) {
+        const auto now = std::chrono::steady_clock::now();
+        profile_blocks_ms = std::chrono::duration<double, std::milli>(now - profile_mark).count();
+        profile_mark = now;
+    }
 
     // H: head backward against dL/dx_0 + the summed context/gcond gradients
     ggml_backend_tensor_set(ck.Gctx_in, gctx_sum.data(), 0, gctx_sum.size() * sizeof(float));
@@ -376,6 +398,15 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
     ggml_graph_reset(ck.hgraph);
     ggml_backend_graph_compute(backend, ck.hgraph);
     if (!train_accum_read_subset(ck.hgraph, ck, ck.head_param_idx, accum, err)) return false;
+    if (profile) {
+        const auto now = std::chrono::steady_clock::now();
+        profile_head_ms = std::chrono::duration<double, std::milli>(now - profile_mark).count();
+        const double total_ms = std::chrono::duration<double, std::milli>(now - profile_start).count();
+        std::fprintf(stderr,
+                     "[prof]   ckpt forward+tail-sync=%.0f tail-grad=%.0f blocks=%.0f (%.0f/block) head=%.0f total=%.0f ms\n",
+                     profile_forward_ms, profile_tail_ms, profile_blocks_ms,
+                     profile_blocks_ms / dc.depth, profile_head_ms, total_ms);
+    }
 
     accum.count += 1;
     return true;
