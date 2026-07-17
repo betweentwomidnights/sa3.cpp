@@ -4,8 +4,9 @@
 
 Training is currently validated on CUDA, Vulkan, Metal, and CPU. Vulkan v1 supports both discrete
 and integrated GPUs. Metal training is validated on Apple M4 with both small and medium models;
-its correctness and memory use are strong, while the first scalar backward kernels still leave
-substantial throughput work. These training additions do not alter the existing inference path.
+its correctness and memory use are strong, and the tiled Metal `OUT_PROD` kernel brings the
+full-target medium trainer close to matched MLX throughput. Further graph and model-shape
+optimization remains possible. These training additions do not alter the existing inference path.
 
 Measured training throughput and reproducible backend comparisons are collected in
 [TRAINING_BENCHMARKS.md](TRAINING_BENCHMARKS.md).
