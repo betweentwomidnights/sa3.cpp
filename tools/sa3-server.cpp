@@ -1057,6 +1057,77 @@ int main(int argc, char** argv) {
         res.set_content(body, "application/json");
     });
 
+    svr.Get("/init-audio", [&aidir](const httplib::Request&, httplib::Response& res) {
+        namespace fs = std::filesystem;
+        std::vector<std::string> files;
+        std::error_code ec;
+        if (fs::is_directory(aidir, ec)) {
+            for (const auto& e : fs::directory_iterator(aidir, ec)) {
+                if (ec) break;
+                if (!e.is_regular_file(ec)) continue;
+                if (lower_ascii(e.path().extension().string()) != ".wav") continue;
+                files.push_back(e.path().filename().string());
+            }
+        }
+        std::string body = "{\"success\":true,\"files\":[";
+        for (size_t i = 0; i < files.size(); i++) {
+            if (i) body += ",";
+            body += "{\"name\":\"" + json_escape(files[i]) + "\",\"path\":\"" + json_escape((fs::path(aidir) / files[i]).string()) + "\"}";
+        }
+        body += "],\"audio_in_dir\":\"" + json_escape(fs::absolute(fs::path(aidir)).string()) + "\"}";
+        res.set_content(body, "application/json");
+    });
+
+    svr.Post("/init-audio/upload", [&aidir](const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& content_reader) {
+        namespace fs = std::filesystem;
+        std::string filename;
+        std::vector<char> data;
+        bool save_ok = true;
+
+        content_reader(
+            [&](const httplib::FormData& file) -> bool {
+                if (file.name == "file") {
+                    filename = file.filename;
+                    return true; // read the content
+                }
+                return false; // skip other parts
+            },
+            [&](const char* chunk, size_t chunk_len) -> bool {
+                data.insert(data.end(), chunk, chunk + chunk_len);
+                return true;
+            }
+        );
+
+        if (filename.empty() || data.empty()) {
+            res.status = 400;
+            res.set_content("{\"success\":false,\"error\":\"no file uploaded\"}", "application/json");
+            return;
+        }
+
+        std::error_code ec;
+        if (!fs::is_directory(aidir, ec)) {
+            fs::create_directories(aidir, ec);
+            if (ec) { res.status = 500; res.set_content("{\"success\":false,\"error\":\"cannot create audio-in dir\"}", "application/json"); return; }
+        }
+
+        const fs::path dest = fs::path(aidir) / filename;
+        std::ofstream ofs(dest, std::ios::binary);
+        if (!ofs) {
+            res.status = 500;
+            res.set_content("{\"success\":false,\"error\":\"cannot write file\"}", "application/json");
+            return;
+        }
+        ofs.write(data.data(), data.size());
+        if (!ofs) {
+            res.status = 500;
+            res.set_content("{\"success\":false,\"error\":\"write failed\"}", "application/json");
+            return;
+        }
+
+        std::string body = "{\"success\":true,\"name\":\"" + json_escape(filename) + "\",\"path\":\"" + json_escape(dest.string()) + "\"}";
+        res.set_content(body, "application/json");
+    });
+
     svr.Get("/prompts", [&pdir](const httplib::Request& req, httplib::Response& res) {
         namespace fs = std::filesystem;
         DiceMap dice;
@@ -1240,7 +1311,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        const bool in_prog = status == "queued" || status == "generating" || status == "encoding";
+        const bool in_prog = status == "queued" || status == "generating" || status == "encoding" || status == "decoding" || status == "finalizing";
         std::string qs = status == "queued"
             ? "{\"status\":\"queued\",\"position\":1,\"total_queued\":1,\"message\":\"queued locally\",\"estimated_seconds\":5}"
             : in_prog ? "{\"status\":\"ready\"}" : "{}";

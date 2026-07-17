@@ -8,6 +8,25 @@ interface LoraSpec {
   strength: number;
 }
 
+interface InitAudioFile {
+  name: string;
+  path: string;
+}
+
+interface InitAudioResponse {
+  success: boolean;
+  files: InitAudioFile[];
+  audio_in_dir: string;
+}
+
+interface PastSongEntry {
+  timestamp: number;
+  seed: number;
+  audioUrl: string;
+  params: Record<string, unknown>;
+  prompt: string;
+}
+
 interface GenerateRequest {
   prompt: string;
   duration: number;
@@ -114,6 +133,11 @@ const DIST_SHIFT_LABELS: Record<string, [string, string, string, string]> = {
 const server = { host: "127.0.0.1", port: 8006 };
 let loraList: LoraEntry[] = [];
 let activeLoras: LoraSpec[] = [];
+let pastSongs: PastSongEntry[] = [];
+let lastGenParams: Record<string, unknown> | null = null;
+let lastGenSeed: number = 0;
+let uploadInProgress = false;
+let currentResult: PastSongEntry | null = null;
 
 // ─── DOM helpers ────────────────────────────────────────────────────────────
 
@@ -240,10 +264,29 @@ async function checkHealth(): Promise<void> {
     modelInfo.textContent = `${h.model} / ${h.encoding} ${h.loaded ? "(loaded)" : "(unloaded)"}`;
     modelInfo.style.display = "";
     loadLoras();
+    loadInitAudioList();
+    applyLoudnessDefaults(h.loudness_defaults);
   } catch {
     statusEl.textContent = "✗ Server unreachable";
     statusEl.className = "err";
     modelInfo.style.display = "none";
+  }
+}
+
+function applyLoudnessDefaults(defaults: Record<string, unknown>): void {
+  if (defaults.latent_rescale != null) setVal("#latent-rescale", defaults.latent_rescale as number);
+  if (defaults.latent_shift != null) setVal("#latent-shift", defaults.latent_shift as number);
+  if (defaults.latent_adapt_min != null) setVal("#latent-adapt-min", defaults.latent_adapt_min as number);
+  if (defaults.latent_adapt_max != null) setVal("#latent-adapt-max", defaults.latent_adapt_max as number);
+  if (defaults.limiter_knee != null) setVal("#limiter-knee", defaults.limiter_knee as number);
+  if (defaults.latent_target_std != null) {
+    setVal("#latent-target-std", defaults.latent_target_std as number);
+  }
+  if (defaults.peak_normalize_db != null) {
+    setVal("#peak-normalize-db", defaults.peak_normalize_db as number);
+  }
+  if (defaults.limiter_ceiling_db != null) {
+    setVal("#limiter-ceiling-db", defaults.limiter_ceiling_db as number);
   }
 }
 
@@ -299,6 +342,58 @@ function renderActiveLoras(): void {
   }
 }
 
+// ─── Init Audio ────────────────────────────────────────────────────────────
+
+async function loadInitAudioList(): Promise<void> {
+  try {
+    const r = await apiGet<InitAudioResponse>("/init-audio");
+    const sel = $<HTMLSelectElement>("#init-audio-select");
+    sel.innerHTML = '<option value="">-- none (text-to-music) --</option>';
+    for (const f of r.files) {
+      const opt = document.createElement("option");
+      opt.value = f.path;
+      opt.textContent = f.name;
+      sel.appendChild(opt);
+    }
+  } catch {
+    // server not available
+  }
+}
+
+function onInitAudioSelect(): void {
+  const sel = $<HTMLSelectElement>("#init-audio-select");
+  const path = sel.value;
+  setVal("#init-path", path);
+}
+
+async function uploadInitAudio(): Promise<void> {
+  const input = $<HTMLInputElement>("#init-audio-upload");
+  const file = input.files?.[0];
+  if (!file) return;
+
+  const btn = $<HTMLButtonElement>("#init-audio-upload-btn");
+  btn.disabled = true;
+  btn.textContent = "Uploading…";
+
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    const r = await fetch(`${apiBase()}/init-audio/upload`, {
+      method: "POST",
+      body: form,
+    });
+    if (!r.ok) throw new Error(`Upload failed: ${r.status}`);
+    await loadInitAudioList();
+    showError("");
+  } catch (e: unknown) {
+    showError(e instanceof Error ? e.message : "Upload failed");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Upload";
+    input.value = "";
+  }
+}
+
 // ─── Dist-shift parameter defaults ──────────────────────────────────────────
 
 function onDistShiftChange(): void {
@@ -317,20 +412,191 @@ function onDistShiftChange(): void {
   }
 }
 
+// ─── Theme ─────────────────────────────────────────────────────────────────
+
+function toggleTheme(): void {
+  const root = document.documentElement;
+  const current = root.dataset.theme || "dark";
+  const next = current === "dark" ? "light" : "dark";
+  root.dataset.theme = next;
+  localStorage.setItem("sa3-theme", next);
+  const btn = $<HTMLButtonElement>("#theme-btn");
+  btn.textContent = next === "dark" ? "☀️" : "🌙";
+}
+
+function loadTheme(): void {
+  const saved = localStorage.getItem("sa3-theme");
+  if (saved === "light" || saved === "dark") {
+    document.documentElement.dataset.theme = saved;
+    const btn = $<HTMLButtonElement>("#theme-btn");
+    btn.textContent = saved === "dark" ? "☀️" : "🌙";
+  }
+}
+
+// ─── Past Songs ────────────────────────────────────────────────────────────
+
+function pushPastSong(entry: PastSongEntry): void {
+  pastSongs.push(entry);
+  localStorage.setItem("sa3-past-songs", JSON.stringify(pastSongs));
+  renderPastSongs();
+}
+
+function renderPastSongs(): void {
+  const container = $("#past-songs");
+  const countEl = $("#past-count");
+  if (countEl) countEl.textContent = String(pastSongs.length);
+  container.innerHTML = "";
+  for (let i = pastSongs.length - 1; i >= 0; i--) {
+    const s = pastSongs[i];
+    const div = document.createElement("div");
+    div.className = "song-entry";
+    div.innerHTML = `<span class="song-name" title="${escapeHtml(s.prompt || "")}">${escapeHtml((s.prompt || "(no prompt)").slice(0, 30))}</span>
+      <audio controls src="${s.audioUrl}"></audio>
+      <span class="song-params">seed: ${s.seed}</span>
+      <span class="song-actions">
+        <button class="small load-params-btn" data-index="${i}" title="Load generation params">📋</button>
+        <button class="small download-song-btn" data-index="${i}" title="Download WAV">⬇</button>
+        <button class="small danger delete-song-btn" data-index="${i}" title="Delete">&times;</button>
+      </span>`;
+    container.appendChild(div);
+  }
+  for (const btn of container.querySelectorAll(".delete-song-btn")) {
+    btn.addEventListener("click", () => {
+      const idx = parseInt((btn as HTMLButtonElement).dataset.index || "0", 10);
+      pastSongs.splice(idx, 1);
+      localStorage.setItem("sa3-past-songs", JSON.stringify(pastSongs));
+      renderPastSongs();
+    });
+  }
+  for (const btn of container.querySelectorAll(".download-song-btn")) {
+    btn.addEventListener("click", () => {
+      const idx = parseInt((btn as HTMLButtonElement).dataset.index || "0", 10);
+      const s = pastSongs[idx];
+      if (!s) return;
+      const ts = new Date(s.timestamp).toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
+      const a = document.createElement("a");
+      a.href = s.audioUrl;
+      a.download = `sa3-${s.seed}-${ts}.wav`;
+      a.click();
+    });
+  }
+  for (const btn of container.querySelectorAll(".load-params-btn")) {
+    btn.addEventListener("click", () => {
+      const idx = parseInt((btn as HTMLButtonElement).dataset.index || "0", 10);
+      const s = pastSongs[idx];
+      if (!s || !s.params) return;
+      loadParamsFromSnapshot(s.params);
+    });
+  }
+}
+
+function loadParamsFromSnapshot(params: Record<string, unknown>): void {
+  const set = (id: string, val: unknown) => {
+    if (val != null) setVal(id, val as string | number | boolean);
+  };
+  set("#prompt", params.prompt);
+  set("#negative-prompt", params.negative_prompt || "");
+  set("#duration", params.duration);
+  set("#duration-num", params.duration);
+  set("#steps", params.steps);
+  set("#steps-num", params.steps);
+  set("#seed", params.seed);
+  set("#duration-padding", params.duration_padding_sec);
+  set("#duration-padding-num", params.duration_padding_sec);
+  set("#cfg-scale", params.cfg_scale);
+  set("#cfg-rescale", params.cfg_rescale);
+  set("#apg-scale", params.apg_scale);
+  set("#cfg-norm-threshold", params.cfg_norm_threshold);
+  set("#cfg-interval-min", params.cfg_interval_min);
+  set("#cfg-interval-max", params.cfg_interval_max);
+  set("#dist-shift", params.dist_shift);
+  const dsp = params.dist_shift_params as number[] | undefined;
+  if (dsp) {
+    for (let i = 0; i < 4 && i < dsp.length; i++) {
+      const inp = $<HTMLInputElement>(`#dsp${i + 1}`);
+      inp.value = String(dsp[i]);
+      inp.dataset.userEdited = "true";
+    }
+  }
+  onDistShiftChange();
+  set("#keep-models", params.keep_models);
+  set("#encode-chunk-size", params.encode_chunk_size);
+  set("#encode-overlap", params.encode_overlap);
+  set("#decode-chunk-size", params.decode_chunk_size);
+  set("#decode-overlap", params.decode_overlap);
+  set("#latent-rescale", params.latent_rescale);
+  set("#latent-shift", params.latent_shift);
+  const lts = params.latent_target_std;
+  set("#latent-target-std", lts != null && lts !== false ? String(lts) : "");
+  set("#latent-adapt-min", params.latent_adapt_min);
+  set("#latent-adapt-max", params.latent_adapt_max);
+  const pndb = params.peak_normalize_db;
+  set("#peak-normalize-db", pndb != null && pndb !== false ? String(pndb) : "");
+  const lcdb = params.limiter_ceiling_db;
+  set("#limiter-ceiling-db", lcdb != null && lcdb !== false ? String(lcdb) : "");
+  set("#limiter-knee", params.limiter_knee);
+  set("#init-path", params.init_path || "");
+  set("#init-noise-level", params.init_noise_level);
+  set("#inpaint-start", params.inpaint_start);
+  set("#inpaint-end", params.inpaint_end);
+  const bpm = params.bpm;
+  if (bpm != null) set("#loop-bpm", bpm);
+  const bars = params.bars;
+  if (bars != null) set("#loop-bars", bars);
+
+  // restore LoRAs
+  const loras = params.loras as LoraSpec[] | undefined;
+  if (loras) {
+    activeLoras = loras.map((l) => ({ ...l }));
+    renderActiveLoras();
+  }
+}
+
+function clearPastSongs(): void {
+  pastSongs = [];
+  localStorage.removeItem("sa3-past-songs");
+  renderPastSongs();
+}
+
+function deleteCurrentSong(): void {
+  if (!currentResult) return;
+  currentResult = null;
+  const resultSection = $("#result-section");
+  const resultAudio = $<HTMLAudioElement>("#result-audio");
+  resultSection.style.display = "none";
+  resultAudio.src = "";
+}
+
+function loadPastSongs(): void {
+  try {
+    const saved = localStorage.getItem("sa3-past-songs");
+    if (saved) {
+      pastSongs = JSON.parse(saved) as PastSongEntry[];
+      renderPastSongs();
+    }
+  } catch {
+    // ignore corrupt data
+  }
+}
+
 // ─── Generate ───────────────────────────────────────────────────────────────
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 async function generate(): Promise<void> {
   clearPolling();
+  if (currentResult) { pushPastSong(currentResult); currentResult = null; }
   const body = readForm();
+  lastGenParams = { ...body } as unknown as Record<string, unknown>;
   const btn = $<HTMLButtonElement>("#gen-btn");
   btn.disabled = true;
   btn.textContent = "Generating…";
   try {
     const r = await apiPost<GenerateResponse>("/generate", body);
+    lastGenSeed = r.seed;
     startPolling(r.session_id);
   } catch (e: unknown) {
+    lastGenParams = null;
     showError(e instanceof Error ? e.message : "Request failed");
     btn.disabled = false;
     btn.textContent = "Generate";
@@ -339,18 +605,22 @@ async function generate(): Promise<void> {
 
 async function generateLoop(): Promise<void> {
   clearPolling();
+  if (currentResult) { pushPastSong(currentResult); currentResult = null; }
   const body: LoopGenerateRequest = {
     ...readForm(),
     bpm: num("#loop-bpm"),
     bars: int("#loop-bars"),
   };
+  lastGenParams = { ...body } as unknown as Record<string, unknown>;
   const btn = $<HTMLButtonElement>("#loop-btn");
   btn.disabled = true;
   btn.textContent = "Generating loop…";
   try {
     const r = await apiPost<GenerateResponse>("/generate/loop", body);
+    lastGenSeed = r.seed;
     startPolling(r.session_id);
   } catch (e: unknown) {
+    lastGenParams = null;
     showError(e instanceof Error ? e.message : "Request failed");
     btn.disabled = false;
     btn.textContent = "Generate Loop";
@@ -378,7 +648,7 @@ function startPolling(sessionId: string): void {
 
       if (r.status === "queued") {
         progressLabel.textContent = "queued…";
-      } else if (r.status === "generating" || r.status === "encoding") {
+      } else if (r.status === "generating" || r.status === "encoding" || r.status === "decoding" || r.status === "finalizing") {
         progressLabel.textContent = `${r.status} step ${r.step}/${r.total_steps} (${r.progress}%)`;
       } else if (r.status === "completed") {
         progressLabel.textContent = `completed (${r.progress}%)`;
@@ -386,14 +656,27 @@ function startPolling(sessionId: string): void {
           resultAudio.src = `data:audio/wav;base64,${r.audio_data}`;
           resultSection.style.display = "block";
         }
+        const resolvedSeed = r.meta?.seed ?? lastGenSeed;
         const metaParts: string[] = [];
-        if (r.meta?.seed != null) metaParts.push(`Seed: ${r.meta.seed}`);
+        if (resolvedSeed != null) metaParts.push(`Seed: ${resolvedSeed}`);
         if (r.meta?.loudness) {
           const lm = r.meta.loudness as Record<string, unknown>;
           if (lm.final_peak != null) metaParts.push(`Peak: ${Number(lm.final_peak).toFixed(3)}`);
           if (lm.decoded_peak != null) metaParts.push(`Decoded: ${Number(lm.decoded_peak).toFixed(3)}`);
         }
         seedInfo.textContent = metaParts.join(" · ");
+
+        if (lastGenParams && r.audio_data) {
+          currentResult = {
+            timestamp: Date.now(),
+            seed: resolvedSeed,
+            audioUrl: `data:audio/wav;base64,${r.audio_data}`,
+            params: { ...lastGenParams },
+            prompt: (lastGenParams.prompt as string) || "",
+          };
+          lastGenParams = null;
+        }
+
         clearPolling();
         enableButtons();
       } else if (r.status === "failed") {
@@ -634,6 +917,8 @@ function setupCollapsibles(): void {
 
 document.addEventListener("DOMContentLoaded", () => {
   setupCollapsibles();
+  loadTheme();
+  loadPastSongs();
 
   // Sync range sliders with their number companions
   syncSliderToNum("#duration", "#duration-num");
@@ -651,6 +936,12 @@ document.addEventListener("DOMContentLoaded", () => {
   $<HTMLButtonElement>("#save-config-btn").addEventListener("click", saveConfig);
   $<HTMLButtonElement>("#load-config-btn").addEventListener("click", loadConfig);
   $<HTMLInputElement>("#load-config-input").addEventListener("change", onConfigFileSelected);
+  $<HTMLButtonElement>("#theme-btn").addEventListener("click", toggleTheme);
+  $<HTMLButtonElement>("#init-audio-refresh-btn").addEventListener("click", loadInitAudioList);
+  $<HTMLButtonElement>("#init-audio-upload-btn").addEventListener("click", uploadInitAudio);
+  $<HTMLSelectElement>("#init-audio-select").addEventListener("change", onInitAudioSelect);
+  $<HTMLButtonElement>("#clear-all-btn").addEventListener("click", clearPastSongs);
+  $<HTMLButtonElement>("#delete-current-btn").addEventListener("click", deleteCurrentSong);
 
   // Mark dist-shift params as user-edited on first input
   for (let i = 1; i <= 4; i++) {

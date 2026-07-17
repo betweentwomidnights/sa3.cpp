@@ -19,6 +19,11 @@ const DIST_SHIFT_LABELS = {
 const server = { host: "127.0.0.1", port: 8006 };
 let loraList = [];
 let activeLoras = [];
+let pastSongs = [];
+let lastGenParams = null;
+let lastGenSeed = 0;
+let uploadInProgress = false;
+let currentResult = null;
 // ─── DOM helpers ────────────────────────────────────────────────────────────
 const $ = (s) => document.querySelector(s);
 function val(s) {
@@ -130,11 +135,34 @@ async function checkHealth() {
         modelInfo.textContent = `${h.model} / ${h.encoding} ${h.loaded ? "(loaded)" : "(unloaded)"}`;
         modelInfo.style.display = "";
         loadLoras();
+        loadInitAudioList();
+        applyLoudnessDefaults(h.loudness_defaults);
     }
     catch {
         statusEl.textContent = "✗ Server unreachable";
         statusEl.className = "err";
         modelInfo.style.display = "none";
+    }
+}
+function applyLoudnessDefaults(defaults) {
+    if (defaults.latent_rescale != null)
+        setVal("#latent-rescale", defaults.latent_rescale);
+    if (defaults.latent_shift != null)
+        setVal("#latent-shift", defaults.latent_shift);
+    if (defaults.latent_adapt_min != null)
+        setVal("#latent-adapt-min", defaults.latent_adapt_min);
+    if (defaults.latent_adapt_max != null)
+        setVal("#latent-adapt-max", defaults.latent_adapt_max);
+    if (defaults.limiter_knee != null)
+        setVal("#limiter-knee", defaults.limiter_knee);
+    if (defaults.latent_target_std != null) {
+        setVal("#latent-target-std", defaults.latent_target_std);
+    }
+    if (defaults.peak_normalize_db != null) {
+        setVal("#peak-normalize-db", defaults.peak_normalize_db);
+    }
+    if (defaults.limiter_ceiling_db != null) {
+        setVal("#limiter-ceiling-db", defaults.limiter_ceiling_db);
     }
 }
 // ─── Loras ──────────────────────────────────────────────────────────────────
@@ -186,6 +214,57 @@ function renderActiveLoras() {
         container.appendChild(tag);
     }
 }
+// ─── Init Audio ────────────────────────────────────────────────────────────
+async function loadInitAudioList() {
+    try {
+        const r = await apiGet("/init-audio");
+        const sel = $("#init-audio-select");
+        sel.innerHTML = '<option value="">-- none (text-to-music) --</option>';
+        for (const f of r.files) {
+            const opt = document.createElement("option");
+            opt.value = f.path;
+            opt.textContent = f.name;
+            sel.appendChild(opt);
+        }
+    }
+    catch {
+        // server not available
+    }
+}
+function onInitAudioSelect() {
+    const sel = $("#init-audio-select");
+    const path = sel.value;
+    setVal("#init-path", path);
+}
+async function uploadInitAudio() {
+    const input = $("#init-audio-upload");
+    const file = input.files?.[0];
+    if (!file)
+        return;
+    const btn = $("#init-audio-upload-btn");
+    btn.disabled = true;
+    btn.textContent = "Uploading…";
+    try {
+        const form = new FormData();
+        form.append("file", file);
+        const r = await fetch(`${apiBase()}/init-audio/upload`, {
+            method: "POST",
+            body: form,
+        });
+        if (!r.ok)
+            throw new Error(`Upload failed: ${r.status}`);
+        await loadInitAudioList();
+        showError("");
+    }
+    catch (e) {
+        showError(e instanceof Error ? e.message : "Upload failed");
+    }
+    finally {
+        btn.disabled = false;
+        btn.textContent = "Upload";
+        input.value = "";
+    }
+}
 // ─── Dist-shift parameter defaults ──────────────────────────────────────────
 function onDistShiftChange() {
     const type = val("#dist-shift");
@@ -203,19 +282,190 @@ function onDistShiftChange() {
         input.disabled = type === "None";
     }
 }
+// ─── Theme ─────────────────────────────────────────────────────────────────
+function toggleTheme() {
+    const root = document.documentElement;
+    const current = root.dataset.theme || "dark";
+    const next = current === "dark" ? "light" : "dark";
+    root.dataset.theme = next;
+    localStorage.setItem("sa3-theme", next);
+    const btn = $("#theme-btn");
+    btn.textContent = next === "dark" ? "☀️" : "🌙";
+}
+function loadTheme() {
+    const saved = localStorage.getItem("sa3-theme");
+    if (saved === "light" || saved === "dark") {
+        document.documentElement.dataset.theme = saved;
+        const btn = $("#theme-btn");
+        btn.textContent = saved === "dark" ? "☀️" : "🌙";
+    }
+}
+// ─── Past Songs ────────────────────────────────────────────────────────────
+function pushPastSong(entry) {
+    pastSongs.push(entry);
+    localStorage.setItem("sa3-past-songs", JSON.stringify(pastSongs));
+    renderPastSongs();
+}
+function renderPastSongs() {
+    const container = $("#past-songs");
+    const countEl = $("#past-count");
+    if (countEl)
+        countEl.textContent = String(pastSongs.length);
+    container.innerHTML = "";
+    for (let i = pastSongs.length - 1; i >= 0; i--) {
+        const s = pastSongs[i];
+        const div = document.createElement("div");
+        div.className = "song-entry";
+        div.innerHTML = `<span class="song-name" title="${escapeHtml(s.prompt || "")}">${escapeHtml((s.prompt || "(no prompt)").slice(0, 30))}</span>
+      <audio controls src="${s.audioUrl}"></audio>
+      <span class="song-params">seed: ${s.seed}</span>
+      <span class="song-actions">
+        <button class="small load-params-btn" data-index="${i}" title="Load generation params">📋</button>
+        <button class="small download-song-btn" data-index="${i}" title="Download WAV">⬇</button>
+        <button class="small danger delete-song-btn" data-index="${i}" title="Delete">&times;</button>
+      </span>`;
+        container.appendChild(div);
+    }
+    for (const btn of container.querySelectorAll(".delete-song-btn")) {
+        btn.addEventListener("click", () => {
+            const idx = parseInt(btn.dataset.index || "0", 10);
+            pastSongs.splice(idx, 1);
+            localStorage.setItem("sa3-past-songs", JSON.stringify(pastSongs));
+            renderPastSongs();
+        });
+    }
+    for (const btn of container.querySelectorAll(".download-song-btn")) {
+        btn.addEventListener("click", () => {
+            const idx = parseInt(btn.dataset.index || "0", 10);
+            const s = pastSongs[idx];
+            if (!s)
+                return;
+            const ts = new Date(s.timestamp).toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
+            const a = document.createElement("a");
+            a.href = s.audioUrl;
+            a.download = `sa3-${s.seed}-${ts}.wav`;
+            a.click();
+        });
+    }
+    for (const btn of container.querySelectorAll(".load-params-btn")) {
+        btn.addEventListener("click", () => {
+            const idx = parseInt(btn.dataset.index || "0", 10);
+            const s = pastSongs[idx];
+            if (!s || !s.params)
+                return;
+            loadParamsFromSnapshot(s.params);
+        });
+    }
+}
+function loadParamsFromSnapshot(params) {
+    const set = (id, val) => {
+        if (val != null)
+            setVal(id, val);
+    };
+    set("#prompt", params.prompt);
+    set("#negative-prompt", params.negative_prompt || "");
+    set("#duration", params.duration);
+    set("#duration-num", params.duration);
+    set("#steps", params.steps);
+    set("#steps-num", params.steps);
+    set("#seed", params.seed);
+    set("#duration-padding", params.duration_padding_sec);
+    set("#duration-padding-num", params.duration_padding_sec);
+    set("#cfg-scale", params.cfg_scale);
+    set("#cfg-rescale", params.cfg_rescale);
+    set("#apg-scale", params.apg_scale);
+    set("#cfg-norm-threshold", params.cfg_norm_threshold);
+    set("#cfg-interval-min", params.cfg_interval_min);
+    set("#cfg-interval-max", params.cfg_interval_max);
+    set("#dist-shift", params.dist_shift);
+    const dsp = params.dist_shift_params;
+    if (dsp) {
+        for (let i = 0; i < 4 && i < dsp.length; i++) {
+            const inp = $(`#dsp${i + 1}`);
+            inp.value = String(dsp[i]);
+            inp.dataset.userEdited = "true";
+        }
+    }
+    onDistShiftChange();
+    set("#keep-models", params.keep_models);
+    set("#encode-chunk-size", params.encode_chunk_size);
+    set("#encode-overlap", params.encode_overlap);
+    set("#decode-chunk-size", params.decode_chunk_size);
+    set("#decode-overlap", params.decode_overlap);
+    set("#latent-rescale", params.latent_rescale);
+    set("#latent-shift", params.latent_shift);
+    const lts = params.latent_target_std;
+    set("#latent-target-std", lts != null && lts !== false ? String(lts) : "");
+    set("#latent-adapt-min", params.latent_adapt_min);
+    set("#latent-adapt-max", params.latent_adapt_max);
+    const pndb = params.peak_normalize_db;
+    set("#peak-normalize-db", pndb != null && pndb !== false ? String(pndb) : "");
+    const lcdb = params.limiter_ceiling_db;
+    set("#limiter-ceiling-db", lcdb != null && lcdb !== false ? String(lcdb) : "");
+    set("#limiter-knee", params.limiter_knee);
+    set("#init-path", params.init_path || "");
+    set("#init-noise-level", params.init_noise_level);
+    set("#inpaint-start", params.inpaint_start);
+    set("#inpaint-end", params.inpaint_end);
+    const bpm = params.bpm;
+    if (bpm != null)
+        set("#loop-bpm", bpm);
+    const bars = params.bars;
+    if (bars != null)
+        set("#loop-bars", bars);
+    // restore LoRAs
+    const loras = params.loras;
+    if (loras) {
+        activeLoras = loras.map((l) => ({ ...l }));
+        renderActiveLoras();
+    }
+}
+function clearPastSongs() {
+    pastSongs = [];
+    localStorage.removeItem("sa3-past-songs");
+    renderPastSongs();
+}
+function deleteCurrentSong() {
+    if (!currentResult)
+        return;
+    currentResult = null;
+    const resultSection = $("#result-section");
+    const resultAudio = $("#result-audio");
+    resultSection.style.display = "none";
+    resultAudio.src = "";
+}
+function loadPastSongs() {
+    try {
+        const saved = localStorage.getItem("sa3-past-songs");
+        if (saved) {
+            pastSongs = JSON.parse(saved);
+            renderPastSongs();
+        }
+    }
+    catch {
+        // ignore corrupt data
+    }
+}
 // ─── Generate ───────────────────────────────────────────────────────────────
 let pollTimer = null;
 async function generate() {
     clearPolling();
+    if (currentResult) {
+        pushPastSong(currentResult);
+        currentResult = null;
+    }
     const body = readForm();
+    lastGenParams = { ...body };
     const btn = $("#gen-btn");
     btn.disabled = true;
     btn.textContent = "Generating…";
     try {
         const r = await apiPost("/generate", body);
+        lastGenSeed = r.seed;
         startPolling(r.session_id);
     }
     catch (e) {
+        lastGenParams = null;
         showError(e instanceof Error ? e.message : "Request failed");
         btn.disabled = false;
         btn.textContent = "Generate";
@@ -223,19 +473,26 @@ async function generate() {
 }
 async function generateLoop() {
     clearPolling();
+    if (currentResult) {
+        pushPastSong(currentResult);
+        currentResult = null;
+    }
     const body = {
         ...readForm(),
         bpm: num("#loop-bpm"),
         bars: int("#loop-bars"),
     };
+    lastGenParams = { ...body };
     const btn = $("#loop-btn");
     btn.disabled = true;
     btn.textContent = "Generating loop…";
     try {
         const r = await apiPost("/generate/loop", body);
+        lastGenSeed = r.seed;
         startPolling(r.session_id);
     }
     catch (e) {
+        lastGenParams = null;
         showError(e instanceof Error ? e.message : "Request failed");
         btn.disabled = false;
         btn.textContent = "Generate Loop";
@@ -260,7 +517,7 @@ function startPolling(sessionId) {
             if (r.status === "queued") {
                 progressLabel.textContent = "queued…";
             }
-            else if (r.status === "generating" || r.status === "encoding") {
+            else if (r.status === "generating" || r.status === "encoding" || r.status === "decoding" || r.status === "finalizing") {
                 progressLabel.textContent = `${r.status} step ${r.step}/${r.total_steps} (${r.progress}%)`;
             }
             else if (r.status === "completed") {
@@ -269,9 +526,10 @@ function startPolling(sessionId) {
                     resultAudio.src = `data:audio/wav;base64,${r.audio_data}`;
                     resultSection.style.display = "block";
                 }
+                const resolvedSeed = r.meta?.seed ?? lastGenSeed;
                 const metaParts = [];
-                if (r.meta?.seed != null)
-                    metaParts.push(`Seed: ${r.meta.seed}`);
+                if (resolvedSeed != null)
+                    metaParts.push(`Seed: ${resolvedSeed}`);
                 if (r.meta?.loudness) {
                     const lm = r.meta.loudness;
                     if (lm.final_peak != null)
@@ -280,6 +538,16 @@ function startPolling(sessionId) {
                         metaParts.push(`Decoded: ${Number(lm.decoded_peak).toFixed(3)}`);
                 }
                 seedInfo.textContent = metaParts.join(" · ");
+                if (lastGenParams && r.audio_data) {
+                    currentResult = {
+                        timestamp: Date.now(),
+                        seed: resolvedSeed,
+                        audioUrl: `data:audio/wav;base64,${r.audio_data}`,
+                        params: { ...lastGenParams },
+                        prompt: lastGenParams.prompt || "",
+                    };
+                    lastGenParams = null;
+                }
                 clearPolling();
                 enableButtons();
             }
@@ -477,6 +745,8 @@ function setupCollapsibles() {
 // ─── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
     setupCollapsibles();
+    loadTheme();
+    loadPastSongs();
     // Sync range sliders with their number companions
     syncSliderToNum("#duration", "#duration-num");
     syncSliderToNum("#steps", "#steps-num");
@@ -491,6 +761,12 @@ document.addEventListener("DOMContentLoaded", () => {
     $("#save-config-btn").addEventListener("click", saveConfig);
     $("#load-config-btn").addEventListener("click", loadConfig);
     $("#load-config-input").addEventListener("change", onConfigFileSelected);
+    $("#theme-btn").addEventListener("click", toggleTheme);
+    $("#init-audio-refresh-btn").addEventListener("click", loadInitAudioList);
+    $("#init-audio-upload-btn").addEventListener("click", uploadInitAudio);
+    $("#init-audio-select").addEventListener("change", onInitAudioSelect);
+    $("#clear-all-btn").addEventListener("click", clearPastSongs);
+    $("#delete-current-btn").addEventListener("click", deleteCurrentSong);
     // Mark dist-shift params as user-edited on first input
     for (let i = 1; i <= 4; i++) {
         const inp = $(`#dsp${i}`);
