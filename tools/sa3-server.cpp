@@ -15,6 +15,7 @@
 #include "sa3_pipeline.h"
 #include "env.h"
 #include "wav.h"
+#include "embedded_web.h"
 
 #include "httplib.h"
 #include "yyjson.h"
@@ -1035,6 +1036,14 @@ int main(int argc, char** argv) {
         std::string body = "{\"success\":true,\"name\":\"" + json_escape(name) + "\",\"path\":\""
                          + json_escape(resolved.string()) + "\",\"bytes\":" + std::to_string((unsigned long long)written) + "}";
         res.set_content(body, "application/json");
+    });
+
+    svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(embedded_web::index_html, "text/html");
+    });
+
+    svr.Get("/app.js", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(embedded_web::app_js, "application/javascript");
     });
 
     svr.Get("/loras", [&adir, &sldir](const httplib::Request&, httplib::Response& res) {
