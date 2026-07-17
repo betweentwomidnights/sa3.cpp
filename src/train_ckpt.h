@@ -258,14 +258,14 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
         out.fctx = graph_ctx(16384, false);
         if (!out.fctx) return fail("ggml_init failed for forward graph");
         out.fgraph = ggml_new_graph_custom(out.fctx, 16384, false);
-        DitHeadOut h = dit_head(out.fctx, dit, out.x, out.tfeat, out.cross, out.global, dc, &out.dl);
+        DitHeadOut h = dit_head(out.fctx, dit, out.x, out.tfeat, out.cross, out.global, dc, &out.dl, true);
         ggml_build_forward_expand(out.fgraph, ggml_cpy(out.fctx, h.context, out.context_p));
         ggml_build_forward_expand(out.fgraph, ggml_cpy(out.fctx, h.gcond, out.gcond_p));
         ggml_tensor* xc = h.x0;
         ggml_build_forward_expand(out.fgraph, ggml_cpy(out.fctx, xc, out.xb[0]));
         for (int l = 0; l < dc.depth; ++l) {
             xc = dit_block(out.fctx, dit, "dit." + std::to_string(l) + ".", xc, h.context, h.gcond,
-                           out.pos, out.ones, dc, out.local, &out.dl);
+                           out.pos, out.ones, dc, out.local, &out.dl, true);
             ggml_build_forward_expand(out.fgraph, ggml_cpy(out.fctx, xc, out.xb[(size_t)l + 1]));
         }
         out.falloc = ggml_gallocr_new(buft);
@@ -278,7 +278,7 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
         out.tctx = graph_ctx(2048, true);
         if (!out.tctx) return fail("ggml_init failed for tail graph");
         out.tgraph = ggml_new_graph_custom(out.tctx, 2048, true);
-        ggml_tensor* vel = ggml_cont(out.tctx, dit_tail(out.tctx, dit, out.xb[(size_t)dc.depth], dc, &out.dl));
+        ggml_tensor* vel = ggml_cont(out.tctx, dit_tail(out.tctx, dit, out.xb[(size_t)dc.depth], dc, &out.dl, true));
         out.velocity = vel;
         ggml_set_output(vel);
         ggml_tensor* sq = ggml_sqr(out.tctx, ggml_sub(out.tctx, vel, out.target));
@@ -309,7 +309,7 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
             if (!B.ctx) return fail("ggml_init failed for block graph");
             B.graph = ggml_new_graph_custom(B.ctx, 6144, true);
             ggml_tensor* xo = dit_block(B.ctx, dit, "dit." + std::to_string(l) + ".", out.xb[(size_t)l],
-                                        out.context_p, out.gcond_p, out.pos, out.ones, dc, out.local, &out.dl);
+                                        out.context_p, out.gcond_p, out.pos, out.ones, dc, out.local, &out.dl, true);
             ggml_tensor* vjp = ggml_sum(B.ctx, ggml_mul(B.ctx, xo, out.g_in(l)));
             ggml_set_loss(vjp);
             ggml_build_forward_expand(B.graph, vjp);
@@ -331,7 +331,7 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
         out.hctx = graph_ctx(4096, true);
         if (!out.hctx) return fail("ggml_init failed for head graph");
         out.hgraph = ggml_new_graph_custom(out.hctx, 4096, true);
-        DitHeadOut h = dit_head(out.hctx, dit, out.x, out.tfeat, out.cross, out.global, dc, &out.dl);
+        DitHeadOut h = dit_head(out.hctx, dit, out.x, out.tfeat, out.cross, out.global, dc, &out.dl, true);
         ggml_tensor* vjp = ggml_add(out.hctx,
             ggml_add(out.hctx,
                 ggml_sum(out.hctx, ggml_mul(out.hctx, h.x0, out.g_out(0))),

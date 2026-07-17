@@ -169,7 +169,7 @@ inline bool build_train_dit_forward_graph(GgufModel& dit, const DitConfig& dc, c
 
     const DitLora* dl = functional ? &out.dl : nullptr;
     out.velocity = ggml_cont(out.ctx, dit_forward(out.ctx, dit, out.x, out.tfeat, out.cross,
-                                                  out.global, out.pos, out.ones, dc, out.local, dl));
+                                                  out.global, out.pos, out.ones, dc, out.local, dl, true));
     ggml_set_output(out.velocity);
     ggml_tensor* sq = ggml_sqr(out.ctx, ggml_sub(out.ctx, out.velocity, out.target));
     if (inpaint) {
