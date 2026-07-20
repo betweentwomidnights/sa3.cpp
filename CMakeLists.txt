@@ -191,6 +191,25 @@ else()
     set_source_files_properties(vendor/yyjson/yyjson.c vendor/cpp-httplib/httplib.cpp PROPERTIES COMPILE_FLAGS -w)
 endif()
 
+# sa3-train-web: standalone HTTP companion that drives `sa3-train` behind a browser UI.
+# Does NOT modify sa3-server or the training code; spawns sa3-train as a subprocess,
+# streams metrics.jsonl + stdout, and serves training artifacts. Pure C++, no Node.
+add_executable(sa3-train-web tools/sa3-train-web.cpp
+    src/train_web_run.h
+    src/embedded_train_web.h
+    vendor/cpp-httplib/httplib.cpp
+    vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-train-web PRIVATE sa3 Threads::Threads)
+target_include_directories(sa3-train-web PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cpp-httplib
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(MSVC)
+    set_source_files_properties(vendor/yyjson/yyjson.c vendor/cpp-httplib/httplib.cpp PROPERTIES COMPILE_FLAGS /w)
+else()
+    set_source_files_properties(vendor/yyjson/yyjson.c vendor/cpp-httplib/httplib.cpp PROPERTIES COMPILE_FLAGS -w)
+endif()
+
 # sa3-lora-convert: native safetensors->gguf LoRA conversion (no Python; src/lora_convert.h). Uses yyjson.
 add_executable(sa3-lora-convert tools/sa3-lora-convert.cpp vendor/yyjson/yyjson.c)
 target_link_libraries(sa3-lora-convert PRIVATE sa3)

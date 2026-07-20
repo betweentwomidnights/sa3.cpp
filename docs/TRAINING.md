@@ -9,7 +9,8 @@ full-target medium trainer close to matched MLX throughput. Further graph and mo
 optimization remains possible. These training additions do not alter the existing inference path.
 
 Measured training throughput and reproducible backend comparisons are collected in
-[TRAINING_BENCHMARKS.md](TRAINING_BENCHMARKS.md).
+[TRAINING_BENCHMARKS.md](TRAINING_BENCHMARKS.md). A browser UI for configuring, launching,
+and monitoring runs is documented in [TRAINING_WEB.md](TRAINING_WEB.md) (`sa3-train-web`).
 
 ## Quickstart
 
