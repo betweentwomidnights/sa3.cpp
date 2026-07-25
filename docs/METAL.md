@@ -332,3 +332,119 @@ Next high-leverage work is graph/model-shape optimization rather than toggling M
 - For an app/server backend, keep models resident and cache reusable graphs/allocators per duration
   bucket. The CLI numbers include load and pipeline setup; Gary's UX path should not pay that every
   request.
+
+## 9. quantization results (2026-07-25)
+
+Test machine: Apple M4, 32 GB unified memory, macOS 15 (Darwin 24.6.0). Branch
+`feature/q4km-quantization`, ggml submodule `e9c70fd6`. Model: stable-audio-3-medium, 30 s output
+(324 frames), 8 steps, prompt `cinematic orchestral build with strings and timpani`, seed `99`.
+
+Metal was the one backend the Q4_K_M / Q8_0 tooling had never run on. It is correct here, and the
+size wins carry over intact — but **the speed win does not**. On Metal, quantization is a footprint
+optimization, not a latency optimization.
+
+### the ggml pin is inert on Metal, as predicted
+
+The submodule bump adds CUDA k-quant `get_rows`; the diff against `main`'s pin touches only
+`src/ggml-cuda/*` plus two additive `gguf_get_tensor_*` accessors, and no Metal source at all.
+Confirmed empirically: an F16 run on this branch is **byte-identical** to the same run built from
+`main` (`md5 cfd0e775d12a6115661768e717db00a0`), at the same warm speed (14.51 s vs 14.53 s).
+
+Note this 14.5 s does *not* match the 12.14 s recorded for the same shape in section 6
+(2026-06-29). That gap is present on `main` too, so it predates this work — it arrived with the
+ggml base move to v0.16.0 plus the Metal training merge. Worth a separate look; not attributable
+to quantization.
+
+### size
+
+| artifact | F16 | Q8_0 | Q4_K_M |
+|---|---:|---:|---:|
+| medium DiT | 2773.4 MiB | 1483.4 | 962.4 |
+| medium SAME-L | 1626.1 MiB | 864.7 | 569.9 |
+| **set total** | **4399.5 MiB** | **2348.1** | **1532.3** |
+
+Byte-for-byte identical to the Windows outputs, as expected — quantization is host-side and
+backend-independent, so this also confirms the CI story is reproducible across hosts.
+
+`sa3-quant-check` against the F16 reference: DiT `compared=204 below-threshold=0`, SAME-L
+`compared=100 below-threshold=0`, at `threshold=0.990`, for both Q8_0 and Q4_K_M.
+
+### speed — no gain on Metal
+
+Best of three warm runs, first run per encoding discarded:
+
+| backend | F16 | Q8_0 | Q5_K_M | Q4_K_M |
+|---|---:|---:|---:|---:|
+| CUDA (RTX 5070 laptop) | 5.54 | 4.15 | 3.71 | 3.65 |
+| Vulkan (same GPU) | 6.61 | 5.23 | 4.62 | 4.50 |
+| CPU (default threads) | 122.70 | 79.68 | 84.32 | 72.48 |
+| **Metal (M4)** | **14.51** | **14.27** | — | **14.81** |
+
+Where the other two GPU backends gain ~33%, Metal is flat: Q8_0 is 1.7% faster, Q4_K_M is 2.1%
+*slower*. Run-to-run spread was under 0.2 s, so this is signal, not noise.
+
+`SA3_PROFILE=1` explains why. "load/init" is total minus the profiled stages:
+
+| stage | F16 | Q8_0 | Q4_K_M |
+|---|---:|---:|---:|
+| load / init | 1986.7 ms | 1359.5 | 1079.8 |
+| t5 compute | 49.6 ms | 41.6 | 49.0 |
+| dit_compute | 6598.4 ms | 6851.0 | 7282.7 |
+| dec_compute | 5688.6 ms | 5834.9 | 6089.8 |
+| **total** | **14349.8 ms** | **14113.5** | **14530.8** |
+
+Quantization does save load time — 0.63 s at Q8_0, 0.91 s at Q4_K_M — but it *costs* compute:
+`dit_compute` +3.8% / +10.4% and `dec_compute` +2.6% / +7.0%. The two effects cancel.
+
+This is the unified-memory result the handoff anticipated. On a discrete GPU the win comes from
+moving fewer bytes across PCIe at load and from lower VRAM bandwidth pressure during the matmuls.
+On M4 the first term barely exists — `dit_upload` is 0.5 ms because there is no copy — and at
+324 frames the DiT matmuls run the `mul_mm` path, which is ALU-bound rather than bandwidth-bound.
+There, dequantizing k-quant blocks into registers is pure added work against Metal's F16
+simdgroup-matrix path. Quantization only pays on Metal when memory is the binding constraint.
+
+### fidelity
+
+Waveform comparison of the three 30 s renders, identical prompt and seed:
+
+| comparison | raw waveform cosine | rms envelope cosine |
+|---|---:|---:|
+| F16 vs Q8_0 | 0.989968 | 0.999567 |
+| F16 vs Q4_K_M | 0.529443 | 0.956489 |
+| Q8_0 vs Q4_K_M | 0.524552 | 0.955519 |
+
+Q4_K_M's 0.53 raw cosine is the expected number, matching the ~0.55 seen on the other backends:
+quantization perturbs the diffusion trajectory, so the sample drifts while the musical envelope
+holds at 0.96. All three renders are music of the same character. The three outputs also have three
+distinct hashes, which is a direct check on the `--encoding` fix — before it, `q4_k_m` silently
+generated from the F16 weights and produced a bit-identical file.
+
+### quantized T5 encoder — the k-quant `get_rows` path
+
+`te.embed.weight` is the pipeline's only `ggml_get_rows` input, so this is the one place k-quants
+reach that kernel. Encoder is 1074 MiB at F32. Cosine of encoder hidden states vs F32, `--seed 7`:
+
+| encoder mix | embed type | size | CUDA | CPU | Vulkan | **Metal** |
+|---|---|---:|---:|---:|---:|---:|
+| q8_0 | Q8_0 | 285 MiB | 0.999301 | 0.999242 | 0.999641 | **0.999686** |
+| q4_k_m | Q6_K | 205 MiB | 0.979378 | 0.978046 | 0.980380 | **0.978471** |
+| q5_k | Q5_K | 184 MiB | 0.987014 | 0.986894 | 0.988893 | **0.988871** |
+
+Metal lands inside the ordinary backend-divergence band on all three. The Q5_K row is the
+meaningful one: it exercises the index mapping corrected in ggml `e9c70fd6`, and Metal's
+independent `kernel_get_rows_q5_K` agrees with the fixed CUDA kernel to 0.002 — effectively on top
+of Vulkan. A fourth implementation concurring is good evidence the fix is right; had it been wrong,
+CUDA would read as the outlier. An end-to-end `sa3-generate` with a Q5_K-embed encoder ran clean.
+
+Reaching Q5_K at all requires the `q5_k` coverage mix, since `q4_k_m` / `q5_k_m` promote
+`embed.weight` to Q6_K. `q5_k` remains a test-only mix, not for publication.
+
+Pass `--t5 <path>` explicitly: the encoder is not selectable through `--encoding`, and two
+`t5gemma-b-b-ul2-encoder-*.gguf` files in `models/` would make the prefix glob ambiguous.
+
+### recommendation for Metal
+
+Ship Q4_K_M and Q8_0 for the disk and memory savings — a 4399 → 1532 MiB set is the difference
+between fitting and not fitting on smaller Apple silicon, and that is the real win here. Do not
+advertise a speedup on Apple silicon; on M4 it is a wash. Q8_0 is the better default where space
+allows, being visually indistinguishable in fidelity terms (0.99 waveform cosine) at no speed cost.
