@@ -17,7 +17,12 @@ build-all/
 # Reference activation dumps (regenerate via tools/dump_refs.py) + C++ checkpoint dumps
 refdata*/
 cppout*/
+refstep*/
 bench/
+
+# Local audio output + stale run markers
+*.wav
+*.log.started
 
 # LoRA/DoRA adapter checkpoints + exports (large; convert to gguf via sa3-lora-convert / convert_lora.py)
 loras/*
