@@ -98,6 +98,57 @@ generation is basically a base generation plus ~0.1s per adapter. the in-place p
 a separate copy of the dora'd dit (~2.9gb) would push vram back over 8gb and thrash. on the
 host loops this same apply was ~14s.
 
+### functional apply — the path a quantized base needs (experimental)
+
+the in-place merge cannot run on a quantized base at all. it has to read `W` out and write
+`W_eff` back, and neither direction has a route for k-quant types: the graph path aborts in
+`ggml_cast` (`unsupported type combination (q6_K to f32)`) and the host path cannot re-pack an
+f32 result into Q4_K storage. so `--lora X --encoding q4_k_m` used to be a hard abort.
+
+the alternative is to not merge at all — hand the adapter tensors to `dit_lin` and let it fold
+them into the graph as `y = W@x + s·B@(A@x)` plus the dora row scale. `W` is then only ever an
+argument to `mul_mat`, and quantized `mul_mat` works everywhere. this is the same formulation
+the training graph already used; inference simply passed `dl = nullptr`. see `src/lora.h` for
+the derivation and the limits.
+
+medium, 20s output, 8 steps, kev (dora-rows, rank 16), warm, base-norm cache primed:
+
+| backend | path | dit_compute | total | peak vram |
+|---|---|---|---|---|
+| cuda | f16 + merged | 699 ms | 5653 ms | 2994 MiB |
+| cuda | q4_k_m + functional | 728 ms | **3545 ms** | **1278 MiB** |
+| vulkan | f16 + merged | 523 ms | 6674 ms | 3049 MiB |
+| vulkan | q4_k_m + functional | 712 ms | **4310 ms** | **1248 MiB** |
+
+37% faster end to end on cuda, 35% on vulkan, and ~58% less vram on both. note the win is not
+per-step: `dit_compute` is *worse* functionally (+4% cuda, +36% vulkan), because the residual
+matmuls are real per-step work that the merged path does once up front. the end-to-end gain
+comes from loading a 1532 MiB model instead of a 4399 MiB one. vulkan pays more per step than
+cuda for the same graph, so on a backend where load time did not dominate this could invert.
+
+two things make it viable rather than merely possible:
+
+- **precomputed row scale.** `dit_lin` recomputes the dora-rows norms every step via
+  `mul_mat(W, A)` over the full base weight, which it must do while training because A and B
+  move. at inference `W`, `A` and `B` are all frozen, so `magnitude/||W + s·A@B||_row` is a
+  constant. computing it once cut `dit_compute` from 885 ms to 722 ms (+47% → +20%).
+- **cached base norms.** `base_norm_sq` needs every targeted weight pulled to the host and
+  squared, ~1.5B elements for the medium dit: +3.4 s on q4_k_m and +4.6 s on f16 (worse there,
+  larger weights to transfer — not a quantization problem). it depends only on the base
+  weights, so it is cached in `<model>.gguf.norms`, keyed on the model's byte size. first run
+  6647 ms, every run after 3512 ms. the sidecar is 3.3 MB for 228 tensors and is
+  backend-independent — a cache written by cuda is reused by vulkan.
+
+output is unchanged. functional vs merged on the *same* f16 base is 0.991400 waveform cosine
+on cuda and 0.950966 on vulkan, against 0.9968 for identical weights across cuda/cpu and
+0.9714 for medium f16 across cuda/vulkan. vulkan is simply looser between any two paths; both
+sit far above the ~0.5 floor that two genuinely different trajectories produce.
+
+f16/f32 bases still merge by default — it costs nothing per step. the functional path engages
+when the base is quantized, or when `SA3_FUNCTIONAL_LORA` is set to a/b the two on f16.
+limits: one adapter, `lora` or `dora-rows` only. `DitLoraParam` holds a single A/B per target
+and dora does not commute, so composing several functionally is not a matter of summing them.
+
 ## flash attention (opt-in)
 
 `ggml_flash_attn_ext` is a fused attention op every gpu backend implements, so the same flag
