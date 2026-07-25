@@ -33,17 +33,26 @@ struct QuantMix {
     enum ggml_type critical;
 };
 
+// Names match the Encoding field in docs/DISTRIBUTION.md (and llama.cpp's spelling), so the
+// --mix value is also the -<NAME>.gguf suffix the resolver looks for once upper-cased.
 static const QuantMix MIXES[] = {
-    { "q4_km", GGML_TYPE_Q4_K, GGML_TYPE_Q6_K },
-    { "q5_km", GGML_TYPE_Q5_K, GGML_TYPE_Q6_K },
-    // Unpromoted Q5_K. The *_km mixes always lift embed.weight to Q6_K, which means a Q5_K
+    { "q4_k_m", GGML_TYPE_Q4_K, GGML_TYPE_Q6_K },
+    { "q5_k_m", GGML_TYPE_Q5_K, GGML_TYPE_Q6_K },
+    // Unpromoted Q5_K. The *_k_m mixes always lift embed.weight to Q6_K, which means a Q5_K
     // token-embedding table -- the one tensor that reaches ggml_get_rows -- is otherwise
     // unreachable, leaving the backends' q5_K get_rows kernels untested by this tool.
-    { "q5_k",  GGML_TYPE_Q5_K, GGML_TYPE_Q5_K },
-    { "q8_0",  GGML_TYPE_Q8_0, GGML_TYPE_Q8_0 },
+    { "q5_k",   GGML_TYPE_Q5_K, GGML_TYPE_Q5_K },
+    { "q8_0",   GGML_TYPE_Q8_0, GGML_TYPE_Q8_0 },
+};
+
+// Compact spellings accepted for convenience; they resolve to the canonical mix above.
+static const struct { const char * alias; const char * canonical; } MIX_ALIASES[] = {
+    { "q4_km", "q4_k_m" },
+    { "q5_km", "q5_k_m" },
 };
 
 static const QuantMix * find_mix(const char * name) {
+    for (const auto & a : MIX_ALIASES) if (!strcmp(a.alias, name)) name = a.canonical;
     for (const QuantMix & m : MIXES) if (!strcmp(m.name, name)) return &m;
     return nullptr;
 }
@@ -95,7 +104,7 @@ static void tensor_meta_init(struct ggml_tensor * t, enum ggml_type type, int n_
 int main(int argc, char ** argv) {
     const char * in_path  = nullptr;
     const char * out_path = nullptr;
-    const char * mix_name = "q4_km";
+    const char * mix_name = "q4_k_m";
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--in") && i + 1 < argc) {
@@ -111,11 +120,11 @@ int main(int argc, char ** argv) {
 
     if (!in_path || !out_path || !mixp) {
         if (in_path && out_path && !mixp) fprintf(stderr, "error: unknown --mix '%s'\n", mix_name);
-        fprintf(stderr, "Usage: sa3-quantize --in <input.gguf> --out <output.gguf> [--mix q4_km|q5_km|q5_k|q8_0]\n");
-        fprintf(stderr, "  q4_km  V/down/embed -> Q6_K, rest -> Q4_K   (default)\n");
-        fprintf(stderr, "  q5_km  V/down/embed -> Q6_K, rest -> Q5_K\n");
-        fprintf(stderr, "  q5_k   everything   -> Q5_K   (no Q6_K promotion; exercises q5_K get_rows)\n");
-        fprintf(stderr, "  q8_0   everything   -> Q8_0\n");
+        fprintf(stderr, "Usage: sa3-quantize --in <input.gguf> --out <output.gguf> [--mix q4_k_m|q5_k_m|q5_k|q8_0]\n");
+        fprintf(stderr, "  q4_k_m  V/down/embed -> Q6_K, rest -> Q4_K   (default)\n");
+        fprintf(stderr, "  q5_k_m  V/down/embed -> Q6_K, rest -> Q5_K\n");
+        fprintf(stderr, "  q5_k    everything   -> Q5_K   (no Q6_K promotion; exercises q5_K get_rows)\n");
+        fprintf(stderr, "  q8_0    everything   -> Q8_0\n");
         fprintf(stderr, "Skips sa3-conditioner/sa3-tokenizer (must stay F32).\n");
         return 1;
     }

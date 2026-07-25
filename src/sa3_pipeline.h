@@ -280,27 +280,32 @@ struct ModelPaths {
     std::string dit;     // stable-audio-3-<variant>-dit-*-<ENC>.gguf
     std::string same;    // stable-audio-3-<variant>-same-*-<ENC>.gguf
 
-    // variant in {medium, small-music, small-sfx}; encoding in {f16, f32, q4_km, q8_0}. Returns false
+    // variant in {medium, small-music, small-sfx}; encoding in {f16, f32, q4_k_m, q5_k_m, q5_k, q8_0}. Returns false
     // + a message in `err` if a required file is missing (so the caller can surface a friendly hint).
     static bool resolve(const std::string& models_dir, const std::string& variant,
                         const std::string& encoding, ModelPaths& out, std::string& err);
 };
 
 // Canonical file-suffix label for an --encoding value, or "" if unrecognised.
-// Keep in step with the --mix table in tools/sa3-quantize.cpp, which writes these suffixes.
+// Suffixes follow the Encoding field in docs/DISTRIBUTION.md (gguf-spec naming, same
+// spelling llama.cpp uses): Q4_K_M / Q5_K_M, not Q4_KM. The compact spellings are
+// accepted as input aliases so older locally-quantized files and commands still work,
+// but only the canonical form is ever written or resolved.
 inline std::string encoding_suffix(const std::string& encoding) {
-    if (encoding == "f32"   || encoding == "F32")   return "F32";
-    if (encoding == "f16"   || encoding == "F16")   return "F16";
-    if (encoding == "q4_km" || encoding == "Q4_KM") return "Q4_KM";
-    if (encoding == "q5_km" || encoding == "Q5_KM") return "Q5_KM";
-    if (encoding == "q5_k"  || encoding == "Q5_K")  return "Q5_K";
-    if (encoding == "q8_0"  || encoding == "Q8_0")  return "Q8_0";
+    if (encoding == "f32"     || encoding == "F32")     return "F32";
+    if (encoding == "f16"     || encoding == "F16")     return "F16";
+    if (encoding == "q4_k_m"  || encoding == "Q4_K_M")  return "Q4_K_M";
+    if (encoding == "q5_k_m"  || encoding == "Q5_K_M")  return "Q5_K_M";
+    if (encoding == "q5_k"    || encoding == "Q5_K")    return "Q5_K";
+    if (encoding == "q8_0"    || encoding == "Q8_0")    return "Q8_0";
+    if (encoding == "q4_km"   || encoding == "Q4_KM")   return "Q4_K_M";   // alias
+    if (encoding == "q5_km"   || encoding == "Q5_KM")   return "Q5_K_M";   // alias
     return "";
 }
 
-// Every encoding label, for "what else is available" diagnostics and CLI help.
+// Every canonical encoding label, for "what else is available" diagnostics and CLI help.
 inline const std::vector<std::string>& encoding_labels() {
-    static const std::vector<std::string> v = {"F16", "F32", "Q4_KM", "Q5_KM", "Q5_K", "Q8_0"};
+    static const std::vector<std::string> v = {"F16", "F32", "Q4_K_M", "Q5_K_M", "Q5_K", "Q8_0"};
     return v;
 }
 
@@ -311,7 +316,7 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
     // A missing file is an error naming what was looked for and what else is present.
     const std::string ENC = encoding_suffix(encoding);
     if (ENC.empty()) {
-        err = "unknown --encoding '" + encoding + "' (expected f16|f32|q4_km|q5_km|q5_k|q8_0)";
+        err = "unknown --encoding '" + encoding + "' (expected f16|f32|q4_k_m|q5_k_m|q5_k|q8_0)";
         return false;
     }
     auto one = [&](const std::string& prefix, const std::string& suffix, const char* what) {
