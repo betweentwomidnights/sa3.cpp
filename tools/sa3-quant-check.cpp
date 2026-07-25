@@ -5,6 +5,8 @@
 // which tensor the quantizer corrupted.
 //
 // Usage: sa3-quant-check --ref <f16.gguf> --quant <q4km.gguf> [--threshold 0.99]
+// Ported from pillopaus-project's sa3.cpp fork (branch q4km-webapp-fixes,
+// commit ccbb16d), with Windows/C++17 and k-quant block-size fixes on top.
 #include "gguf_model.h"
 #include "ggml.h"
 #include "ggml-cpu.h"

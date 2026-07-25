@@ -1,3 +1,8 @@
+// sa3-quantize: compress an SA3 gguf's 2D weights to a k-quant / Q8_0 mix.
+// Reads the gguf metadata only, re-plans every tensor's target type, and writes a
+// new file; the conditioner and tokenizer sidecars are refused (they must stay F32).
+// Ported from pillopaus-project's sa3.cpp fork (branch q4km-webapp-fixes,
+// commit ccbb16d), with Windows/C++17 and k-quant block-size fixes on top.
 #include "ggml.h"
 #include "gguf.h"
 

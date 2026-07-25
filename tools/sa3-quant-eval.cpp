@@ -1,6 +1,8 @@
 // sa3-quant-eval: compare original vs quantized SA3 model outputs.
 // Loads one model at a time (never both). Auto-detects architecture from
 // general.architecture. Reports MSE, cosine similarity, max abs error, L1.
+// Ported from pillopaus-project's sa3.cpp fork (branch q4km-webapp-fixes,
+// commit ccbb16d), with Windows/C++17 and k-quant block-size fixes on top.
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "gguf.h"
