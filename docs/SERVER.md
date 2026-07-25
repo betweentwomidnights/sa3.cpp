@@ -237,9 +237,11 @@ directory to its trailing-slash form.
 two behaviours worth knowing:
 
 - **static files are matched before route handlers, and only for GET/HEAD.** so a file named
-  `health`, `loras` or `prompts` in the web dir would shadow that GET endpoint. the server warns
-  at startup if it finds one. `POST` routes (`/generate`, `/generate/loop`, `/unload`) can never be
-  shadowed.
+  `health`, `loras` or `prompts`, or a *directory* named `poll_status`, would shadow that GET
+  endpoint. the server warns at startup if it finds one. `POST` routes (`/generate`,
+  `/generate/loop`, `/unload`) can never be shadowed. `poll_status` is the one to care about:
+  clients poll it for generation progress, so shadowing it breaks generation in a way that does
+  not look like a routing problem.
 - **a bad `--web-dir` is fatal.** pointing it at something that is not a directory exits non-zero
   rather than starting up and quietly serving nothing.
 

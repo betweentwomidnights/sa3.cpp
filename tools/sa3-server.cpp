@@ -805,7 +805,11 @@ int main(int argc, char** argv) {
         // whose name collides with a GET endpoint would shadow the API. POST routes (/generate,
         // /generate/loop, /unload) cannot be shadowed. Warn rather than refuse: it is the
         // caller's directory, and a collision is legal, just almost certainly a mistake.
-        for (const char* reserved : {"health", "loras", "prompts"}) {
+        // Keep in step with the svr.Get() routes below. poll_status is a regex route over a
+        // path prefix, so a *directory* of that name shadows it just as a file would -- and it
+        // is the endpoint clients poll for generation progress, so losing it is not obvious
+        // from the symptom. fs::exists covers both file and directory.
+        for (const char* reserved : {"health", "loras", "prompts", "poll_status"}) {
             if (fs::exists(fs::path(g_web_dir) / reserved, ec))
                 fprintf(stderr, "[sa3-server] warning: %s/%s shadows the GET /%s endpoint\n",
                         g_web_dir.c_str(), reserved, reserved);
