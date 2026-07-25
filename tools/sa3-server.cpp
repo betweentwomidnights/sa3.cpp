@@ -53,6 +53,7 @@ std::string g_models_dir;
 std::string g_adapters_dir;
 std::string g_prompts_dir;
 std::string g_source_loras_dir;
+std::string g_web_dir;                    // --web-dir: serve this directory at /; empty = API only
 int g_cpu_threads = 0;
 
 // --- async job registry (mirrors gary4local /poll_status) ---
@@ -757,6 +758,7 @@ int main(int argc, char** argv) {
     if (const char* e = getenv("SA3_ADAPTERS_DIR")) g_adapters_dir = e;
     if (const char* e = getenv("SA3_PROMPTS_DIR"))  g_prompts_dir  = e;
     if (const char* e = getenv("SA3_SOURCE_LORAS_DIR")) g_source_loras_dir = e;
+    if (const char* e = getenv("SA3_WEB_DIR"))      g_web_dir      = e;
     if (g_models_dir.empty()) g_models_dir = "models";
     if (g_prompts_dir.empty()) g_prompts_dir = "prompts";
     if (g_source_loras_dir.empty()) g_source_loras_dir = "loras";
@@ -772,6 +774,7 @@ int main(int argc, char** argv) {
         else if (a == "--adapters-dir") g_adapters_dir = next("");
         else if (a == "--prompts-dir")  g_prompts_dir = next("prompts");
         else if (a == "--source-loras-dir") g_source_loras_dir = next("loras");
+        else if (a == "--web-dir")      g_web_dir = next("");
         else if (a == "--threads")      { g_cpu_threads = atoi(next("0")); threads_set = true; }
     }
     if (threads_set && g_cpu_threads <= 0) {
@@ -783,6 +786,38 @@ int main(int argc, char** argv) {
     const std::string sldir = g_source_loras_dir;
 
     httplib::Server svr;
+
+    // --web-dir: serve a directory of static files at /, so a front-end lives beside the server
+    // as plain files instead of being compiled in. Off by default; without it this is API-only
+    // and behaves exactly as before.
+    //
+    // httplib's own file handler does the serving: it rejects ".." and backslashes in the URL,
+    // then canonicalizes and re-checks the result against the base directory so a symlink cannot
+    // escape either. It also resolves a trailing "/" to index.html and sets ETag/Last-Modified.
+    if (!g_web_dir.empty()) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        if (!fs::is_directory(g_web_dir, ec)) {
+            fprintf(stderr, "[sa3-server] --web-dir '%s' is not a directory\n", g_web_dir.c_str());
+            return 1;   // fail loudly: silently serving nothing is worse than not starting
+        }
+        // httplib checks static files BEFORE route handlers, and only for GET/HEAD. So a file
+        // whose name collides with a GET endpoint would shadow the API. POST routes (/generate,
+        // /generate/loop, /unload) cannot be shadowed. Warn rather than refuse: it is the
+        // caller's directory, and a collision is legal, just almost certainly a mistake.
+        for (const char* reserved : {"health", "loras", "prompts"}) {
+            if (fs::exists(fs::path(g_web_dir) / reserved, ec))
+                fprintf(stderr, "[sa3-server] warning: %s/%s shadows the GET /%s endpoint\n",
+                        g_web_dir.c_str(), reserved, reserved);
+        }
+        if (!svr.set_mount_point("/", g_web_dir)) {
+            fprintf(stderr, "[sa3-server] failed to mount --web-dir '%s'\n", g_web_dir.c_str());
+            return 1;
+        }
+        if (!fs::exists(fs::path(g_web_dir) / "index.html", ec))
+            fprintf(stderr, "[sa3-server] note: no index.html in %s; / will 404 until one exists\n",
+                    g_web_dir.c_str());
+    }
 
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         const bool loaded = g_loaded.load();   // atomic: never blocks behind an in-flight generation
@@ -1008,8 +1043,9 @@ int main(int argc, char** argv) {
         res.set_content(body, "application/json");
     });
 
-    fprintf(stderr, "[sa3-server] http://%s:%d  model=%s/%s  models=%s  adapters=%s  source_loras=%s  prompts=%s  (async /poll_status; frugal default)\n",
-            host.c_str(), port, g_variant.c_str(), g_encoding.c_str(), g_models_dir.c_str(), adir.c_str(), sldir.c_str(), pdir.c_str());
+    fprintf(stderr, "[sa3-server] http://%s:%d  model=%s/%s  models=%s  adapters=%s  source_loras=%s  prompts=%s  web=%s  (async /poll_status; frugal default)\n",
+            host.c_str(), port, g_variant.c_str(), g_encoding.c_str(), g_models_dir.c_str(), adir.c_str(), sldir.c_str(), pdir.c_str(),
+            g_web_dir.empty() ? "(none)" : g_web_dir.c_str());
     if (!svr.listen(host.c_str(), port)) {
         fprintf(stderr, "[sa3-server] failed to bind %s:%d\n", host.c_str(), port);
         return 1;

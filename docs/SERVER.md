@@ -16,6 +16,7 @@ for progress and, on completion, the base64 audio. That makes it a drop-in for a
 #       --threads N (or SA3_THREADS, CPU backend only)
 #       --prompts-dir DIR (or SA3_PROMPTS_DIR)
 #       --source-loras-dir DIR (or SA3_SOURCE_LORAS_DIR)
+#       --web-dir DIR (or SA3_WEB_DIR) — serve a front-end at / ; omit for API only
 ```
 
 on Windows, after `.\build.cmd cuda`, `server.cmd` picks the built backend and keeps the server in the terminal (close it or Ctrl+C to stop). extra args pass through:
@@ -213,6 +214,37 @@ next request — keeps host-process memory low (good for an embedded/VST context
 strength correct for free. for a long-running service that wants lowest latency, send `keep_models:true`
 and call `POST /unload` from your orchestrator when you need the VRAM back (model-switch, idle, pressure) —
 the same pattern as the pytorch sa3 service.
+
+## serving a front-end (`--web-dir`)
+
+off by default. without it the server is API only and `GET /` is a 404, unchanged from before
+this existed.
+
+```sh
+sa3-server --web-dir ./web          # or SA3_WEB_DIR=./web
+```
+
+everything under that directory is served at `/`: `GET /` resolves to `index.html`, `GET /app.js`
+to `web/app.js`, and so on. the point is that a front-end can live as plain files next to the
+server, kept and versioned wherever its author wants, without being compiled into the binary and
+without patching `sa3-server.cpp` to add a route per asset.
+
+the serving is httplib's own file handler, not hand-rolled. it rejects `..`, backslashes and nulls
+in the request path, then canonicalizes the result and re-checks it against the base directory so a
+symlink or junction cannot escape either. it also sets `ETag` and `Last-Modified`, and redirects a
+directory to its trailing-slash form.
+
+two behaviours worth knowing:
+
+- **static files are matched before route handlers, and only for GET/HEAD.** so a file named
+  `health`, `loras` or `prompts` in the web dir would shadow that GET endpoint. the server warns
+  at startup if it finds one. `POST` routes (`/generate`, `/generate/loop`, `/unload`) can never be
+  shadowed.
+- **a bad `--web-dir` is fatal.** pointing it at something that is not a directory exits non-zero
+  rather than starting up and quietly serving nothing.
+
+if the directory has no `index.html` the server still starts, notes it, and `/` will 404 until one
+exists — useful when the assets are built into place after launch.
 
 ## notes
 
