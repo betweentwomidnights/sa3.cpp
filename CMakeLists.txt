@@ -163,6 +163,18 @@ add_executable(sa3-lora-convert tools/sa3-lora-convert.cpp vendor/yyjson/yyjson.
 target_link_libraries(sa3-lora-convert PRIVATE sa3)
 target_include_directories(sa3-lora-convert PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
 
+# sa3-quantize: compress F16/F32 weight matrices to Q4_K / Q6_K (K-quant "Q4_K_M" mix).
+add_executable(sa3-quantize tools/sa3-quantize.cpp)
+target_link_libraries(sa3-quantize PRIVATE sa3)
+
+# sa3-quant-check: per-tensor dequant validation (cosine vs the F16/F32 source).
+add_executable(sa3-quant-check tools/sa3-quant-check.cpp)
+target_link_libraries(sa3-quant-check PRIVATE sa3)
+
+# sa3-quant-eval: compare original vs quantized model outputs end-to-end.
+add_executable(sa3-quant-eval tools/sa3-quant-eval.cpp)
+target_link_libraries(sa3-quant-eval PRIVATE sa3)
+
 add_executable(sa3-train-config-test tests/train_config_test.cpp vendor/yyjson/yyjson.c)
 target_link_libraries(sa3-train-config-test PRIVATE sa3)
 target_include_directories(sa3-train-config-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)

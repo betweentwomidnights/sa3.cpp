@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
     const char* tok_p = nullptr; const char* t5_p = nullptr; const char* dit_p = nullptr; const char* same_p = nullptr;
     const char* cond_p = nullptr;            // per-variant conditioner sidecar gguf (optional; falls back to --t5 if bundled)
     const char* model_variant = nullptr;     // --model: resolve the 5 base ggufs by naming convention
-    const char* encoding = "f16";            // --encoding f16|f32 (which DiT/SAME precision --model picks)
+    const char* encoding = "f16";            // --encoding f16|f32|q4_k_m|q5_k_m|q5_k|q8_0 (which DiT/SAME precision --model picks)
     const char* env_md = getenv("SA3_MODELS_DIR");
     const char* models_dir = (env_md && *env_md) ? env_md : "models";  // --models-dir / SA3_MODELS_DIR
     const char* env_ad = getenv("SA3_ADAPTERS_DIR");
@@ -137,7 +137,14 @@ int main(int argc, char** argv) {
     std::vector<std::string> resolved; resolved.reserve(5);   // keep resolved paths alive for the char* slots
     if (model_variant) {
         const std::string mv = model_variant, md = models_dir;
-        const std::string ENC = (strcmp(encoding, "f32") == 0) ? "F32" : "F16";
+        // Share the suffix mapping with ModelPaths::resolve (server/libsa3) instead of repeating it:
+        // the old local `(f32 ? F32 : F16)` collapsed every other value to F16, so --encoding q4_km
+        // silently generated from the F16 weights.
+        const std::string ENC = sa3::encoding_suffix(encoding);
+        if (ENC.empty()) {
+            fprintf(stderr, "[sa3] unknown --encoding '%s' (expected f16|f32|q4_k_m|q5_k_m|q5_k|q8_0)\n", encoding);
+            exit(1);
+        }
         auto fill = [&](const char*& slot, const std::string& prefix, const std::string& suffix) {
             if (slot) return;                                  // explicit flag overrides the convention
             std::string p = sa3::resolve_one(md, prefix, suffix);
@@ -170,7 +177,7 @@ int main(int argc, char** argv) {
 
     const bool inpaint = (inpaint_start >= 0.0f || inpaint_end >= 0.0f);   // inpaint mode (needs --init source)
     if (!tok_p || !t5_p || !dit_p || !same_p) {
-        fprintf(stderr, "usage: sa3-generate (--model medium|small-music|small-sfx [--encoding f16|f32] [--models-dir DIR]\n"
+        fprintf(stderr, "usage: sa3-generate (--model medium|small-music|small-sfx [--encoding f16|f32|q4_k_m|q5_k_m|q5_k|q8_0] [--models-dir DIR]\n"
                         "                     | --tok <f> --t5 <f> --cond <f> --dit <f> --same <f>)\n"
                         "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
                         "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--duration-padding SEC]\n"

@@ -280,27 +280,73 @@ struct ModelPaths {
     std::string dit;     // stable-audio-3-<variant>-dit-*-<ENC>.gguf
     std::string same;    // stable-audio-3-<variant>-same-*-<ENC>.gguf
 
-    // variant in {medium, small-music, small-sfx}; encoding in {f16, f32}. Returns false + a message
-    // in `err` if a required file is missing (so the caller can surface a friendly hint).
+    // variant in {medium, small-music, small-sfx}; encoding in {f16, f32, q4_k_m, q5_k_m, q5_k, q8_0}. Returns false
+    // + a message in `err` if a required file is missing (so the caller can surface a friendly hint).
     static bool resolve(const std::string& models_dir, const std::string& variant,
                         const std::string& encoding, ModelPaths& out, std::string& err);
 };
 
+// Canonical file-suffix label for an --encoding value, or "" if unrecognised.
+// Suffixes follow the Encoding field in docs/DISTRIBUTION.md (gguf-spec naming, same
+// spelling llama.cpp uses): Q4_K_M / Q5_K_M, not Q4_KM. The compact spellings are
+// accepted as input aliases so older locally-quantized files and commands still work,
+// but only the canonical form is ever written or resolved.
+inline std::string encoding_suffix(const std::string& encoding) {
+    if (encoding == "f32"     || encoding == "F32")     return "F32";
+    if (encoding == "f16"     || encoding == "F16")     return "F16";
+    if (encoding == "q4_k_m"  || encoding == "Q4_K_M")  return "Q4_K_M";
+    if (encoding == "q5_k_m"  || encoding == "Q5_K_M")  return "Q5_K_M";
+    if (encoding == "q5_k"    || encoding == "Q5_K")    return "Q5_K";
+    if (encoding == "q8_0"    || encoding == "Q8_0")    return "Q8_0";
+    if (encoding == "q4_km"   || encoding == "Q4_KM")   return "Q4_K_M";   // alias
+    if (encoding == "q5_km"   || encoding == "Q5_KM")   return "Q5_K_M";   // alias
+    return "";
+}
+
+// Every canonical encoding label, for "what else is available" diagnostics and CLI help.
+inline const std::vector<std::string>& encoding_labels() {
+    static const std::vector<std::string> v = {"F16", "F32", "Q4_K_M", "Q5_K_M", "Q5_K", "Q8_0"};
+    return v;
+}
+
 inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
                                 const std::string& encoding, ModelPaths& out, std::string& err) {
-    const std::string ENC = (encoding == "f32" || encoding == "F32") ? "F32" : "F16";
+    // The requested encoding is resolved EXACTLY: this project's whole point is numeric parity,
+    // so silently substituting a different precision than the caller asked for is not acceptable.
+    // A missing file is an error naming what was looked for and what else is present.
+    const std::string ENC = encoding_suffix(encoding);
+    if (ENC.empty()) {
+        err = "unknown --encoding '" + encoding + "' (expected f16|f32|q4_k_m|q5_k_m|q5_k|q8_0)";
+        return false;
+    }
     auto one = [&](const std::string& prefix, const std::string& suffix, const char* what) {
         std::string p = resolve_one(md, prefix, suffix);
         if (p.empty())
             err += (err.empty() ? "" : "; ") + ("no " + std::string(what) + " (" + prefix + "*" + suffix + ")");
         return p;
     };
+    // Report which other encodings DO exist, so "no DiT (...-Q4_KM.gguf)" is actionable.
+    auto alternatives = [&](const std::string& prefix) {
+        std::string alt;
+        for (const std::string& e : encoding_labels()) {
+            if (e == ENC) continue;
+            if (!resolve_one(md, prefix, "-" + e + ".gguf").empty())
+                alt += (alt.empty() ? "" : ", ") + e;
+        }
+        return alt;
+    };
     out.tok  = one("t5gemma-b-b-ul2-v1.0-vocab",             ".gguf",            "tokenizer");
     out.t5   = one("t5gemma-b-b-ul2-encoder-",               ".gguf",            "encoder");
     out.cond = one("stable-audio-3-" + variant + "-conditioner-", ".gguf",       "conditioner");
-    out.dit  = one("stable-audio-3-" + variant + "-dit-",  "-" + ENC + ".gguf",  "DiT");
-    out.same = one("stable-audio-3-" + variant + "-same-", "-" + ENC + ".gguf",  "SAME");
-    if (!err.empty()) err += " in " + md + "/ (run: python tools/download_models.py --variant " + variant + ")";
+    const std::string dit_pre  = "stable-audio-3-" + variant + "-dit-";
+    const std::string same_pre = "stable-audio-3-" + variant + "-same-";
+    out.dit  = one(dit_pre,  "-" + ENC + ".gguf",  "DiT");
+    out.same = one(same_pre, "-" + ENC + ".gguf",  "SAME");
+    if (!err.empty()) {
+        std::string alt = out.dit.empty() ? alternatives(dit_pre) : alternatives(same_pre);
+        if (!alt.empty()) err += " [available for this variant: " + alt + " — pass --encoding for one of those]";
+        err += " in " + md + "/ (run: python tools/download_models.py --variant " + variant + ")";
+    }
     return err.empty();
 }
 
