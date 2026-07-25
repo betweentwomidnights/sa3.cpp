@@ -41,7 +41,7 @@ inline LoraAdapter load_lora(const char* path, float strength = 1.0f, ggml_backe
     return a;
 }
 
-// Read any tensor (F32 or F16) into an F32 host buffer.
+// Read any tensor (F32, F16, or a quantized type) into an F32 host buffer.
 inline void read_to_f32(ggml_tensor* t, std::vector<float>& dst) {
     const int64_t n = ggml_nelements(t);
     dst.resize(n);
@@ -49,6 +49,18 @@ inline void read_to_f32(ggml_tensor* t, std::vector<float>& dst) {
         std::vector<ggml_fp16_t> tmp(n);
         ggml_backend_tensor_get(t, tmp.data(), 0, n*sizeof(ggml_fp16_t));
         ggml_fp16_to_fp32_row(tmp.data(), dst.data(), n);
+    } else if (ggml_is_quantized(t->type)) {
+        // Pull the packed bytes down and unpack with the type's own reference dequantizer.
+        // Asking ggml_backend_tensor_get for n floats would over-read the tensor (a Q4_K row
+        // is ~0.56 bytes/element) and trip its bounds assert.
+        const size_t nbytes = ggml_nbytes(t);
+        std::vector<char> raw(nbytes);
+        ggml_backend_tensor_get(t, raw.data(), 0, nbytes);
+        const ggml_type_traits* tr = ggml_get_type_traits(t->type);
+        const int64_t ne0 = t->ne[0], rows = n / ne0;
+        const size_t row_bytes = ggml_row_size(t->type, ne0);
+        for (int64_t r = 0; r < rows; r++)
+            tr->to_float(raw.data() + (size_t)r*row_bytes, dst.data() + r*ne0, ne0);
     } else {
         ggml_backend_tensor_get(t, dst.data(), 0, n*sizeof(float));
     }
@@ -215,6 +227,102 @@ inline LoraStack apply_loras(GgufModel& base, std::vector<LoraAdapter>& adapters
     }
     return lora_graph_ok(adapters) ? apply_loras_graph(base, adapters, targets)
                                    : apply_loras_host(base, adapters, targets);
+}
+
+// ---------------------------------------------------------------------------------------
+// Functional (graph-time) adapters — the path that works over a QUANTIZED base.
+//
+// apply_loras above rewrites W in place, which needs to read W out and write W_eff back.
+// Neither has a route for k-quant types: the graph path dies in ggml_cast (no q6_K->f32 cpy)
+// and the host path cannot re-pack an f32 result into Q4_K storage. So a quantized base
+// fundamentally cannot carry a merged adapter.
+//
+// Instead hand the adapter tensors to dit_lin (src/dit.h), which folds them into the graph:
+//     y = W@x + scale·B@(A@x)                                    [+ dora row scale]
+// W is only ever an argument to mul_mat, and quantized mul_mat is supported on every
+// backend, so the base never has to be dequantized or rewritten. This is the same
+// formulation the training graph already uses; inference simply passed dl = nullptr.
+//
+// Limits (both fall back to the merge path):
+//   - one adapter at a time. DitLoraParam holds a single A/B per target, and DoRA does not
+//     commute, so composing several functionally is not a matter of summing them.
+//   - "lora" and "dora-rows" only, matching what dit_lin implements.
+struct FunctionalLora {
+    DitLora               map;
+    ggml_context*         ctx = nullptr;   // owns the base_norm_sq constants
+    ggml_backend_buffer_t buf = nullptr;
+    bool active = false;
+    void free() {
+        if (buf) ggml_backend_buffer_free(buf);
+        if (ctx) ggml_free(ctx);
+        ctx = nullptr; buf = nullptr; map.clear(); active = false;
+    }
+};
+
+inline bool functional_lora_ok(const std::vector<LoraAdapter>& adapters) {
+    if (adapters.size() != 1) return false;
+    const std::string& t = adapters[0].type;
+    return t == "lora" || t == "dora-rows";
+}
+
+// Build the dit_lin adapter map for `adapters[0]` over `base`. Adapter tensors must already
+// live on base.backend (load_lora(..., base.backend)); only the dora-rows base_norm_sq
+// constants are allocated here, computed on the host from W (quantized W included).
+inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAdapter>& adapters) {
+    FunctionalLora fl;
+    if (!functional_lora_ok(adapters)) return fl;
+    LoraAdapter& a = adapters[0];
+    const bool dora = (a.type == "dora-rows");
+
+    std::vector<std::string> targets;
+    for (auto& kv : base.tensors) {
+        const std::string& wname = kv.first;
+        if (wname.size() < 7 || wname.compare(wname.size()-7, 7, ".weight") != 0) continue;
+        if (a.gguf.has(wname.substr(0, wname.size()-7) + ".lora_A")) targets.push_back(wname);
+    }
+    if (targets.empty()) return fl;
+
+    // One f32 [out] constant per dora-rows target.
+    ggml_init_params ip = { (targets.size()+2)*ggml_tensor_overhead(), nullptr, true };
+    fl.ctx = ggml_init(ip);
+    std::vector<ggml_tensor*> norms;
+    std::vector<std::vector<float>> norm_host;
+    for (auto& wname : targets) {
+        ggml_tensor* W0 = base.tensors[wname];
+        const int64_t in = W0->ne[0], out = W0->ne[1];
+        std::string stem = wname.substr(0, wname.size()-7);
+        DitLoraParam p;
+        p.A     = a.gguf.get(stem + ".lora_A");
+        p.B     = a.gguf.get(stem + ".lora_B");
+        p.scale = (a.alpha / a.rank) * a.strength;
+        p.dora  = dora;
+        p.in    = in;
+        if (dora) {
+            p.magnitude = a.gguf.get(stem + ".magnitude");
+            // base_norm_sq[o] = Σ_in W[o,i]² + in·eps, matching train_row_norm_sq. Reading W
+            // here is the one place the base is touched outside a matmul, and read_to_f32
+            // dequantizes on the host, so it is fine for a quantized base.
+            std::vector<float> w;  read_to_f32(W0, w);
+            std::vector<float> nsq((size_t)out, 0.0f);
+            for (int64_t o = 0; o < out; o++) {
+                double s = 0.0;
+                const float* wo = &w[(size_t)o*in];
+                for (int64_t i = 0; i < in; i++) s += (double)wo[i]*wo[i];
+                nsq[(size_t)o] = (float)(s + (double)in * 1e-12);
+            }
+            ggml_tensor* t = ggml_new_tensor_1d(fl.ctx, GGML_TYPE_F32, out);
+            norms.push_back(t); norm_host.push_back(std::move(nsq));
+            p.base_norm_sq = t;
+        }
+        fl.map[wname] = p;
+    }
+    if (!norms.empty()) {
+        fl.buf = ggml_backend_alloc_ctx_tensors(fl.ctx, base.backend);
+        for (size_t i = 0; i < norms.size(); i++)
+            ggml_backend_tensor_set(norms[i], norm_host[i].data(), 0, norm_host[i].size()*sizeof(float));
+    }
+    fl.active = true;
+    return fl;
 }
 
 } // namespace sa3

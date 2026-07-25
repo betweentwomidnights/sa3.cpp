@@ -286,6 +286,17 @@ struct ModelPaths {
                         const std::string& encoding, ModelPaths& out, std::string& err);
 };
 
+// True if the DiT's projection weights are stored as a quantized type. Checked on a weight
+// the adapters actually target, since norms/biases stay F32 in every encoding.
+inline bool dit_base_is_quantized(const GgufModel& dit) {
+    for (auto& kv : dit.tensors) {
+        const std::string& n = kv.first;
+        if (n.size() >= 7 && n.compare(n.size()-7, 7, ".weight") == 0 && kv.second->ne[1] > 1)
+            if (ggml_is_quantized(kv.second->type)) return true;
+    }
+    return false;
+}
+
 // Canonical file-suffix label for an --encoding value, or "" if unrecognised.
 // Suffixes follow the Encoding field in docs/DISTRIBUTION.md (gguf-spec naming, same
 // spelling llama.cpp uses): Q4_K_M / Q5_K_M, not Q4_KM. The compact spellings are
@@ -481,7 +492,10 @@ private:
     Tokenizer tok_;
     GgufModel TE_, DIT_, AE_;
     std::unique_ptr<GgufModel> CD_;    // per-variant conditioner sidecar, or null => use TE_
-    std::vector<std::pair<std::string,float>> dit_loras_;  // adapters currently baked into the live DiT (in-place)
+    std::vector<std::pair<std::string,float>> dit_loras_;  // adapters currently applied to the live DiT
+    bool dit_merged_ = false;                  // true => dit_loras_ were baked into DIT_ in place
+    std::vector<LoraAdapter> dit_adapters_;    // kept resident for the functional path (graph reads A/B)
+    FunctionalLora dit_functional_;            // graph-time adapters; empty unless the functional path is used
     T5GemmaConfig tc_{};
     DitConfig     dc_{};
     SameConfig    sc_{};
@@ -966,19 +980,38 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // adapters skip the work; a change pays a reload).
     if (dit_loras_ != params.loras) {
         throw_if_cancelled(params.should_cancel);
-        if (!dit_loras_.empty()) {           // DiT carries a prior request's adapters -> reload a clean base
+        if (dit_merged_) {                   // prior request BAKED adapters in -> reload a clean base
             DIT.free();
             DIT_ = load_gguf(paths_.dit.c_str(), backend_);
-            dit_loras_.clear();
+            dit_merged_ = false;
         }
+        dit_functional_.free();              // functional adapters leave the base untouched
+        dit_adapters_.clear();
+        dit_loras_.clear();
         if (!params.loras.empty()) {
-            std::vector<sa3::LoraAdapter> adapters;
-            for (auto& ls : params.loras) adapters.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
-            sa3::apply_loras(DIT, adapters);
-            printf("lora: applied %zu adapter(s):\n", adapters.size());
-            for (size_t i = 0; i < adapters.size(); i++)
-                printf("  [%zu] %s  type=%s strength=%.2f\n", i, params.loras[i].first.c_str(),
-                       adapters[i].type.c_str(), adapters[i].strength);
+            for (auto& ls : params.loras) dit_adapters_.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
+            // A quantized base can only take the functional path: merging would have to read W
+            // out and write W_eff back, and neither has a route for k-quant types. On an f16/f32
+            // base the merge is still the default (it costs nothing per step); SA3_FUNCTIONAL_LORA
+            // forces the functional path there too, for A/B against the merged reference.
+            const bool quantized = dit_base_is_quantized(DIT);
+            const bool want_functional = quantized || getenv("SA3_FUNCTIONAL_LORA");
+            if (want_functional && sa3::functional_lora_ok(dit_adapters_)) {
+                dit_functional_ = sa3::build_functional_lora(DIT, dit_adapters_);
+            }
+            if (!dit_functional_.active) {
+                if (quantized)
+                    throw std::runtime_error(
+                        "lora: a quantized DiT (--encoding q4_k_m/q5_k_m/q8_0) supports one "
+                        "'lora' or 'dora-rows' adapter at a time; use --encoding f16 for this set");
+                sa3::apply_loras(DIT, dit_adapters_);
+                dit_merged_ = true;
+                dit_adapters_.clear();       // merged into W; nothing to keep resident
+            }
+            printf("lora: applied %zu adapter(s) [%s]:\n", params.loras.size(),
+                   dit_functional_.active ? "functional" : "merged");
+            for (size_t i = 0; i < params.loras.size(); i++)
+                printf("  [%zu] %s  strength=%.2f\n", i, params.loras[i].first.c_str(), params.loras[i].second);
         }
         dit_loras_ = params.loras;
         if (params.should_cancel && params.should_cancel())
@@ -1000,7 +1033,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     for (ggml_tensor* t : {x_in, tfeat, cross, glob, pos_d, ones}) ggml_set_input(t);
     ggml_tensor* local = nullptr;
     if (!localb.empty()) { local = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, dc.local_dim, T); ggml_set_input(local); }
-    ggml_tensor* vel = ggml_cont(dctx, sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local));
+    ggml_tensor* vel = ggml_cont(dctx, sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local,
+                                                    dit_functional_.active ? &dit_functional_.map : nullptr));
     ggml_set_output(vel);
     ggml_cgraph* gf_dit = ggml_new_graph_custom(dctx, 32768, false);
     ggml_build_forward_expand(gf_dit, vel);
@@ -1072,7 +1106,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     profile_log(prof, "dit_get_update", dit_download_update);
     profile_log(prof, "dit_total", wall_time_s() - t_dit_total);
     ggml_gallocr_free(alloc_dit); ggml_free(dctx);
-    if (!keep_models) { DIT.free(); dit_loras_.clear(); }   // DiT gone -> next gen reloads a clean base
+    if (!keep_models) { DIT.free(); dit_loras_.clear(); dit_merged_ = false;
+                       dit_functional_.free(); dit_adapters_.clear(); }   // DiT gone -> next gen reloads a clean base
     if (dit_cancelled)
         throw_cancelled_after_frugal_cleanup();
 
