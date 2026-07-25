@@ -1,4 +1,6 @@
-# Codex handoff: validate Q4_K_M / Q8_0 quantization on Metal
+# Handoff: validate Q4_K_M / Q8_0 quantization on Metal
+
+Temporary; delete once the gates below have passed and `docs/METAL.md` records the results.
 
 Gate for merging `feature/q4km-quantization`. Windows validation (CUDA, Vulkan, CPU) is
 done; Metal is the one backend nobody has run this on. Do not merge the PR until the
