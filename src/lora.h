@@ -16,8 +16,13 @@
 #include "gguf_model.h"
 
 #include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace sa3 {
@@ -259,6 +264,75 @@ struct FunctionalLora {
     }
 };
 
+// base_norm_sq depends only on the base weights, never on the adapter, so it is the same for
+// every LoRA ever loaded against a given model. Computing it means pulling every targeted
+// weight to the host and summing squares, which costs seconds; cache it in a sidecar next to
+// the gguf so only the first run pays. Keyed on the model's byte size, which changes for any
+// re-conversion or re-quantization.
+namespace normcache {
+
+inline std::string path_for(const std::string& model_path) { return model_path + ".norms"; }
+
+inline bool load(const std::string& model_path, std::map<std::string, std::vector<float>>& out) {
+    std::error_code ec;
+    const uintmax_t model_sz = std::filesystem::file_size(model_path, ec);
+    if (ec) return false;
+    std::ifstream f(path_for(model_path), std::ios::binary);
+    if (!f) return false;
+    char magic[8] = {0};
+    uint64_t src_sz = 0, n = 0;
+    f.read(magic, 8);
+    if (std::memcmp(magic, "SA3NORM1", 8) != 0) return false;
+    f.read((char*)&src_sz, 8);
+    if (!f || src_sz != (uint64_t)model_sz) return false;      // model changed -> recompute
+    f.read((char*)&n, 8);
+    if (!f || n > (1u << 20)) return false;
+    for (uint64_t i = 0; i < n; i++) {
+        uint32_t nl = 0; uint64_t cnt = 0;
+        f.read((char*)&nl, 4);
+        if (!f || nl == 0 || nl > 512) return false;
+        std::string name(nl, '\0');
+        f.read(&name[0], nl);
+        f.read((char*)&cnt, 8);
+        if (!f || cnt == 0 || cnt > (1u << 24)) return false;
+        std::vector<float> v(cnt);
+        f.read((char*)v.data(), (std::streamsize)(cnt*sizeof(float)));
+        if (!f) return false;
+        out[name] = std::move(v);
+    }
+    return true;
+}
+
+inline void save(const std::string& model_path, const std::map<std::string, std::vector<float>>& in) {
+    std::error_code ec;
+    const uintmax_t model_sz = std::filesystem::file_size(model_path, ec);
+    if (ec) return;
+    // Write to a temp then rename, so a killed run cannot leave a half-written cache that
+    // would later be read as valid.
+    const std::string tmp = path_for(model_path) + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        const uint64_t src_sz = (uint64_t)model_sz, n = in.size();
+        f.write("SA3NORM1", 8);
+        f.write((const char*)&src_sz, 8);
+        f.write((const char*)&n, 8);
+        for (auto& kv : in) {
+            const uint32_t nl = (uint32_t)kv.first.size();
+            const uint64_t cnt = kv.second.size();
+            f.write((const char*)&nl, 4);
+            f.write(kv.first.data(), nl);
+            f.write((const char*)&cnt, 8);
+            f.write((const char*)kv.second.data(), (std::streamsize)(cnt*sizeof(float)));
+        }
+        if (!f) { f.close(); std::filesystem::remove(tmp, ec); return; }
+    }
+    std::filesystem::rename(tmp, path_for(model_path), ec);
+    if (ec) std::filesystem::remove(tmp, ec);
+}
+
+} // namespace normcache
+
 inline bool functional_lora_ok(const std::vector<LoraAdapter>& adapters) {
     if (adapters.size() != 1) return false;
     const std::string& t = adapters[0].type;
@@ -268,11 +342,16 @@ inline bool functional_lora_ok(const std::vector<LoraAdapter>& adapters) {
 // Build the dit_lin adapter map for `adapters[0]` over `base`. Adapter tensors must already
 // live on base.backend (load_lora(..., base.backend)); only the dora-rows base_norm_sq
 // constants are allocated here, computed on the host from W (quantized W included).
-inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAdapter>& adapters) {
+inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAdapter>& adapters,
+                                            const std::string& base_path = "") {
     FunctionalLora fl;
     if (!functional_lora_ok(adapters)) return fl;
     LoraAdapter& a = adapters[0];
     const bool dora = (a.type == "dora-rows");
+
+    std::map<std::string, std::vector<float>> nsq_cache;
+    bool cache_hit = false, cache_dirty = false;
+    if (dora && !base_path.empty()) cache_hit = normcache::load(base_path, nsq_cache);
 
     std::vector<std::string> targets;
     for (auto& kv : base.tensors) {
@@ -302,14 +381,23 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
             p.magnitude = a.gguf.get(stem + ".magnitude");
             // base_norm_sq[o] = Σ_in W[o,i]² + in·eps, matching train_row_norm_sq. Reading W
             // here is the one place the base is touched outside a matmul, and read_to_f32
-            // dequantizes on the host, so it is fine for a quantized base.
-            std::vector<float> w;  read_to_f32(W0, w);
-            std::vector<float> nsq((size_t)out, 0.0f);
-            for (int64_t o = 0; o < out; o++) {
-                double s = 0.0;
-                const float* wo = &w[(size_t)o*in];
-                for (int64_t i = 0; i < in; i++) s += (double)wo[i]*wo[i];
-                nsq[(size_t)o] = (float)(s + (double)in * 1e-12);
+            // dequantizes on the host, so it is fine for a quantized base. It is also the
+            // expensive part, hence the sidecar cache.
+            std::vector<float> nsq;
+            auto it = nsq_cache.find(wname);
+            if (it != nsq_cache.end() && it->second.size() == (size_t)out) {
+                nsq = it->second;
+            } else {
+                std::vector<float> w;  read_to_f32(W0, w);
+                nsq.assign((size_t)out, 0.0f);
+                for (int64_t o = 0; o < out; o++) {
+                    double s = 0.0;
+                    const float* wo = &w[(size_t)o*in];
+                    for (int64_t i = 0; i < in; i++) s += (double)wo[i]*wo[i];
+                    nsq[(size_t)o] = (float)(s + (double)in * 1e-12);
+                }
+                nsq_cache[wname] = nsq;
+                cache_dirty = true;
             }
             ggml_tensor* nt = ggml_new_tensor_1d(fl.ctx, GGML_TYPE_F32, out);
             ggml_tensor* st = ggml_new_tensor_1d(fl.ctx, GGML_TYPE_F32, out);
@@ -322,6 +410,12 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
     fl.buf = ggml_backend_alloc_ctx_tensors(fl.ctx, base.backend);
     for (size_t i = 0; i < norms.size(); i++)
         ggml_backend_tensor_set(norms[i], norm_host[i].data(), 0, norm_host[i].size()*sizeof(float));
+    if (cache_dirty && !base_path.empty()) {
+        normcache::save(base_path, nsq_cache);
+        printf("lora: wrote base-norm cache %s\n", normcache::path_for(base_path).c_str());
+    } else if (cache_hit) {
+        printf("lora: base-norm cache hit (%zu tensors)\n", nsq_cache.size());
+    }
 
     // Fill row_scale once. Deliberately the same op sequence dit_lin uses for the per-step
     // path, so the shortcut cannot drift from the reference: nsq = base_norm_sq + 2s·t2 + s²·t3,

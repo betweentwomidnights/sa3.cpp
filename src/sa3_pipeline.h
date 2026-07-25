@@ -997,7 +997,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             const bool quantized = dit_base_is_quantized(DIT);
             const bool want_functional = quantized || getenv("SA3_FUNCTIONAL_LORA");
             if (want_functional && sa3::functional_lora_ok(dit_adapters_)) {
-                dit_functional_ = sa3::build_functional_lora(DIT, dit_adapters_);
+                dit_functional_ = sa3::build_functional_lora(DIT, dit_adapters_, paths_.dit);
             }
             if (!dit_functional_.active) {
                 if (quantized)
