@@ -25,19 +25,42 @@ static bool use_q6_k(const char * name) {
     return false;
 }
 
-static enum ggml_type target_type(const char * name) {
-    return use_q6_k(name) ? GGML_TYPE_Q6_K : GGML_TYPE_Q4_K;
+// A mix names the encoding written into the filename and the two types it uses: `body` for
+// ordinary 2D weights, `critical` for the V/down/embed tensors use_q6_k() picks out.
+struct QuantMix {
+    const char *   name;      // --mix value, and the -<NAME>.gguf suffix the resolver looks for
+    enum ggml_type body;
+    enum ggml_type critical;
+};
+
+static const QuantMix MIXES[] = {
+    { "q4_km", GGML_TYPE_Q4_K, GGML_TYPE_Q6_K },
+    { "q5_km", GGML_TYPE_Q5_K, GGML_TYPE_Q6_K },
+    // Unpromoted Q5_K. The *_km mixes always lift embed.weight to Q6_K, which means a Q5_K
+    // token-embedding table -- the one tensor that reaches ggml_get_rows -- is otherwise
+    // unreachable, leaving the backends' q5_K get_rows kernels untested by this tool.
+    { "q5_k",  GGML_TYPE_Q5_K, GGML_TYPE_Q5_K },
+    { "q8_0",  GGML_TYPE_Q8_0, GGML_TYPE_Q8_0 },
+};
+
+static const QuantMix * find_mix(const char * name) {
+    for (const QuantMix & m : MIXES) if (!strcmp(m.name, name)) return &m;
+    return nullptr;
 }
 
-static bool should_quantize(const char * name, int n_dims, const int64_t * ne) {
+static enum ggml_type target_type(const QuantMix & mix, const char * name) {
+    return use_q6_k(name) ? mix.critical : mix.body;
+}
+
+static bool should_quantize(const QuantMix & mix, const char * name, int n_dims, const int64_t * ne) {
     if (n_dims != 2) return false;
     if (strstr(name, "tokens"))     return false;
     if (strstr(name, "running_std")) return false;
-    // The row length must be a whole number of blocks of the TARGET type. Q4_K/Q6_K are
+    // The row length must be a whole number of blocks of the TARGET type. Q4_K/Q5_K/Q6_K are
     // k-quants with QK_K=256 super-blocks, not 32: a `% 32` test lets ne[0] of 32/64/128
     // through and ggml_quantize_chunk then writes past the allocated rows. A rank-32 LoRA
     // (ne[0]==32) is the case that actually shows up in practice.
-    if (ne[0] % ggml_blck_size(target_type(name)) != 0) return false;
+    if (ne[0] % ggml_blck_size(target_type(mix, name)) != 0) return false;
     return true;
 }
 
@@ -72,20 +95,33 @@ static void tensor_meta_init(struct ggml_tensor * t, enum ggml_type type, int n_
 int main(int argc, char ** argv) {
     const char * in_path  = nullptr;
     const char * out_path = nullptr;
+    const char * mix_name = "q4_km";
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--in") && i + 1 < argc) {
             in_path = argv[++i];
         } else if (!strcmp(argv[i], "--out") && i + 1 < argc) {
             out_path = argv[++i];
+        } else if (!strcmp(argv[i], "--mix") && i + 1 < argc) {
+            mix_name = argv[++i];
         }
     }
 
-    if (!in_path || !out_path) {
-        fprintf(stderr, "Usage: sa3-quantize --in <input.gguf> --out <output.gguf>\n");
-        fprintf(stderr, "Q4_K_M quantization: V/down/embed->Q6_K, rest->Q4_K. Skips sa3-conditioner/sa3-tokenizer.\n");
+    const QuantMix * mixp = find_mix(mix_name);
+
+    if (!in_path || !out_path || !mixp) {
+        if (in_path && out_path && !mixp) fprintf(stderr, "error: unknown --mix '%s'\n", mix_name);
+        fprintf(stderr, "Usage: sa3-quantize --in <input.gguf> --out <output.gguf> [--mix q4_km|q5_km|q5_k|q8_0]\n");
+        fprintf(stderr, "  q4_km  V/down/embed -> Q6_K, rest -> Q4_K   (default)\n");
+        fprintf(stderr, "  q5_km  V/down/embed -> Q6_K, rest -> Q5_K\n");
+        fprintf(stderr, "  q5_k   everything   -> Q5_K   (no Q6_K promotion; exercises q5_K get_rows)\n");
+        fprintf(stderr, "  q8_0   everything   -> Q8_0\n");
+        fprintf(stderr, "Skips sa3-conditioner/sa3-tokenizer (must stay F32).\n");
         return 1;
     }
+    const QuantMix & mix = *mixp;
+    fprintf(stderr, "mix %s: body=%s critical=%s\n", mix.name,
+            ggml_type_name(mix.body), ggml_type_name(mix.critical));
 
     // ── Open input ────
     struct gguf_init_params params = { /*no_alloc =*/ true, /*ctx =*/ nullptr };  // C++17: no designated initializers
@@ -135,8 +171,8 @@ int main(int argc, char ** argv) {
     fclose(f);
 
     // Pre-init quantization tables
-    ggml_quantize_init(GGML_TYPE_Q4_K);
-    ggml_quantize_init(GGML_TYPE_Q6_K);
+    ggml_quantize_init(mix.body);
+    if (mix.critical != mix.body) ggml_quantize_init(mix.critical);
 
     // ── Build output context (metadata only, no data yet) ────
     struct gguf_context * out_ctx = gguf_init_empty();
@@ -152,7 +188,7 @@ int main(int argc, char ** argv) {
         int64_t ne1;
     };
     std::vector<TensorPlan> plan(n_tensors);
-    int n_q4k = 0, n_q6k = 0, n_skip = 0;
+    int n_body = 0, n_crit = 0, n_skip = 0;
 
     for (int64_t i = 0; i < n_tensors; i++) {
         const char * name  = gguf_get_tensor_name(in_ctx, i);
@@ -164,7 +200,7 @@ int main(int argc, char ** argv) {
         plan[i].ne0   = ne[0];
         plan[i].ne1   = ndims >= 2 ? ne[1] : 1;
 
-        if (!should_quantize(name, ndims, ne)) {
+        if (!should_quantize(mix, name, ndims, ne)) {
             plan[i].dtype = stype;
             n_skip++;
 
@@ -172,9 +208,9 @@ int main(int argc, char ** argv) {
             tensor_meta_init(&t, stype, ndims, ne, name);
             gguf_add_tensor(out_ctx, &t);
         } else {
-            enum ggml_type qtype = target_type(name);
+            enum ggml_type qtype = target_type(mix, name);
             plan[i].dtype = qtype;
-            if (qtype == GGML_TYPE_Q4_K) n_q4k++; else n_q6k++;
+            if (qtype == mix.body) n_body++; else n_crit++;
 
             struct ggml_tensor t;
             tensor_meta_init(&t, qtype, ndims, ne, name);
@@ -251,7 +287,8 @@ int main(int argc, char ** argv) {
     gguf_free(in_ctx);
     gguf_free(out_ctx);
 
-    fprintf(stderr, "\nDone: wrote %s  (%d Q4_K, %d Q6_K, %d skipped, data %zu MiB)\n",
-            out_path, n_q4k, n_q6k, n_skip, total_data_size / 1048576);
+    fprintf(stderr, "\nDone: wrote %s  (%d %s, %d %s, %d skipped, data %zu MiB)\n",
+            out_path, n_body, ggml_type_name(mix.body), n_crit, ggml_type_name(mix.critical),
+            n_skip, total_data_size / 1048576);
     return 0;
 }

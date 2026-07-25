@@ -287,12 +287,21 @@ struct ModelPaths {
 };
 
 // Canonical file-suffix label for an --encoding value, or "" if unrecognised.
+// Keep in step with the --mix table in tools/sa3-quantize.cpp, which writes these suffixes.
 inline std::string encoding_suffix(const std::string& encoding) {
     if (encoding == "f32"   || encoding == "F32")   return "F32";
     if (encoding == "f16"   || encoding == "F16")   return "F16";
     if (encoding == "q4_km" || encoding == "Q4_KM") return "Q4_KM";
+    if (encoding == "q5_km" || encoding == "Q5_KM") return "Q5_KM";
+    if (encoding == "q5_k"  || encoding == "Q5_K")  return "Q5_K";
     if (encoding == "q8_0"  || encoding == "Q8_0")  return "Q8_0";
     return "";
+}
+
+// Every encoding label, for "what else is available" diagnostics and CLI help.
+inline const std::vector<std::string>& encoding_labels() {
+    static const std::vector<std::string> v = {"F16", "F32", "Q4_KM", "Q5_KM", "Q5_K", "Q8_0"};
+    return v;
 }
 
 inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
@@ -302,7 +311,7 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
     // A missing file is an error naming what was looked for and what else is present.
     const std::string ENC = encoding_suffix(encoding);
     if (ENC.empty()) {
-        err = "unknown --encoding '" + encoding + "' (expected f16|f32|q4_km|q8_0)";
+        err = "unknown --encoding '" + encoding + "' (expected f16|f32|q4_km|q5_km|q5_k|q8_0)";
         return false;
     }
     auto one = [&](const std::string& prefix, const std::string& suffix, const char* what) {
@@ -314,10 +323,10 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
     // Report which other encodings DO exist, so "no DiT (...-Q4_KM.gguf)" is actionable.
     auto alternatives = [&](const std::string& prefix) {
         std::string alt;
-        for (const char* e : {"F16", "F32", "Q4_KM", "Q8_0"}) {
+        for (const std::string& e : encoding_labels()) {
             if (e == ENC) continue;
-            if (!resolve_one(md, prefix, "-" + std::string(e) + ".gguf").empty())
-                alt += (alt.empty() ? "" : ", ") + std::string(e);
+            if (!resolve_one(md, prefix, "-" + e + ".gguf").empty())
+                alt += (alt.empty() ? "" : ", ") + e;
         }
         return alt;
     };
