@@ -282,10 +282,11 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
     }
     if (targets.empty()) return fl;
 
-    // One f32 [out] constant per dora-rows target.
-    ggml_init_params ip = { (targets.size()+2)*ggml_tensor_overhead(), nullptr, true };
+    // Two persistent f32 [out] constants per dora-rows target: base_norm_sq (host-computed)
+    // and row_scale (filled by the one-shot graph below).
+    ggml_init_params ip = { (2*targets.size()+4)*ggml_tensor_overhead(), nullptr, true };
     fl.ctx = ggml_init(ip);
-    std::vector<ggml_tensor*> norms;
+    std::vector<ggml_tensor*> norms, scales;
     std::vector<std::vector<float>> norm_host;
     for (auto& wname : targets) {
         ggml_tensor* W0 = base.tensors[wname];
@@ -310,16 +311,53 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
                 for (int64_t i = 0; i < in; i++) s += (double)wo[i]*wo[i];
                 nsq[(size_t)o] = (float)(s + (double)in * 1e-12);
             }
-            ggml_tensor* t = ggml_new_tensor_1d(fl.ctx, GGML_TYPE_F32, out);
-            norms.push_back(t); norm_host.push_back(std::move(nsq));
-            p.base_norm_sq = t;
+            ggml_tensor* nt = ggml_new_tensor_1d(fl.ctx, GGML_TYPE_F32, out);
+            ggml_tensor* st = ggml_new_tensor_1d(fl.ctx, GGML_TYPE_F32, out);
+            norms.push_back(nt); scales.push_back(st); norm_host.push_back(std::move(nsq));
+            p.base_norm_sq = nt;
+            p.row_scale    = st;
         }
         fl.map[wname] = p;
     }
-    if (!norms.empty()) {
-        fl.buf = ggml_backend_alloc_ctx_tensors(fl.ctx, base.backend);
-        for (size_t i = 0; i < norms.size(); i++)
-            ggml_backend_tensor_set(norms[i], norm_host[i].data(), 0, norm_host[i].size()*sizeof(float));
+    fl.buf = ggml_backend_alloc_ctx_tensors(fl.ctx, base.backend);
+    for (size_t i = 0; i < norms.size(); i++)
+        ggml_backend_tensor_set(norms[i], norm_host[i].data(), 0, norm_host[i].size()*sizeof(float));
+
+    // Fill row_scale once. Deliberately the same op sequence dit_lin uses for the per-step
+    // path, so the shortcut cannot drift from the reference: nsq = base_norm_sq + 2s·t2 + s²·t3,
+    // row_scale = magnitude / sqrt(nsq). Every input here is frozen at inference, which is why
+    // this is a constant rather than per-step work.
+    if (!scales.empty()) {
+        const size_t nn = targets.size()*24 + 64;
+        ggml_init_params tp = { nn*ggml_tensor_overhead() + ggml_graph_overhead_custom(nn, false) + (1<<20),
+                                nullptr, true };
+        ggml_context* tctx = ggml_init(tp);
+        ggml_cgraph* gf = ggml_new_graph_custom(tctx, nn, false);
+        size_t si = 0;
+        for (auto& wname : targets) {
+            DitLoraParam& p = fl.map[wname];
+            ggml_tensor* wl  = base.tensors[wname];
+            const int64_t out = wl->ne[1];
+            const float s = p.scale;
+            ggml_tensor* WtA  = ggml_mul_mat(tctx, wl, p.A);                            // [out,rank]
+            ggml_tensor* Bt   = ggml_cont(tctx, ggml_transpose(tctx, p.B));             // [out,rank]
+            ggml_tensor* t2   = ggml_sum_rows(tctx,
+                ggml_cont(tctx, ggml_transpose(tctx, ggml_mul(tctx, WtA, Bt))));        // [1,out]
+            ggml_tensor* AtA  = ggml_mul_mat(tctx, p.A, p.A);                           // [rank,rank]
+            ggml_tensor* AtAB = ggml_mul_mat(tctx, AtA, p.B);                           // [rank,out]
+            ggml_tensor* t3   = ggml_sum_rows(tctx, ggml_mul(tctx, p.B, AtAB));         // [1,out]
+            ggml_tensor* nsq  = ggml_add(tctx,
+                ggml_add(tctx, p.base_norm_sq,
+                               ggml_scale(tctx, ggml_reshape_1d(tctx, t2, out), 2.0f*s)),
+                ggml_scale(tctx, ggml_reshape_1d(tctx, t3, out), s*s));                 // [out]
+            ggml_tensor* sv = ggml_div(tctx, p.magnitude, ggml_sqrt(tctx, nsq));        // [out]
+            ggml_build_forward_expand(gf, ggml_cpy(tctx, sv, scales[si++]));
+        }
+        ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(base.backend));
+        ggml_gallocr_alloc_graph(alloc, gf);
+        ggml_backend_graph_compute(base.backend, gf);
+        ggml_gallocr_free(alloc);
+        ggml_free(tctx);
     }
     fl.active = true;
     return fl;

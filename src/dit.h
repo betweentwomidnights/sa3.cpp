@@ -56,6 +56,10 @@ struct DitLoraParam {
     ggml_tensor* B = nullptr;            // [rank, out]  trainable
     ggml_tensor* magnitude = nullptr;    // dora-rows [out] trainable, else null
     ggml_tensor* base_norm_sq = nullptr; // dora-rows [out] constant (Σ_in W² + in·eps), else null
+    // Inference-only shortcut: magnitude/||W + s·A@B||_row precomputed as [out]. Training must
+    // leave this null because A and B move every step; at inference W, A and B are all frozen,
+    // so the whole per-step norm reduction below collapses to one broadcast multiply.
+    ggml_tensor* row_scale = nullptr;
     float scale = 1.0f;                  // alpha / rank
     bool  dora = false;                  // apply dora-rows column normalization
     int64_t in = 0;                      // input dim (reference / eps bookkeeping)
@@ -84,7 +88,9 @@ inline ggml_tensor* dit_lin(ggml_context* ctx, const GgufModel& W, const std::st
         ggml_tensor* ax  = ggml_mul_mat(ctx, p->A, x);          // [rank, seq]
         ggml_tensor* bax = ggml_mul_mat(ctx, p->B, ax);         // [out, seq]
         y = ggml_add(ctx, y, ggml_scale(ctx, bax, p->scale));
-        if (p->dora) {
+        if (p->dora && p->row_scale) {
+            y = ggml_mul(ctx, y, p->row_scale);   // precomputed; see DitLoraParam::row_scale
+        } else if (p->dora) {
             // dora-rows: multiply each output row by magnitude[out] / ||(W+s·A@B)_col[out]||.
             // The per-out scalar factors out of the matmul, so it scales the LoRA output above.
             // norm_sq[out] = base_norm_sq + 2s·term2 + s²·term3, with (over rank r):
