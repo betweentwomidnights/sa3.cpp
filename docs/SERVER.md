@@ -257,7 +257,9 @@ The filename in a multipart part is attacker-controlled, so it is checked rather
 
 Uploading is a write endpoint. It inherits the server's default `127.0.0.1` bind, and that is the
 only thing standing between it and the network — if you pass `--host 0.0.0.0`, anyone who can reach
-the port can put files in the pool. Note also that a localhost bind is not a trust boundary in a
+the port can put files in the pool. The server warns loudly at startup when it is bound to anything
+that is not loopback, rather than refusing: serving a LAN is a legitimate thing to want, it should
+just be a decision instead of a surprise. Note also that a localhost bind is not a trust boundary in a
 browser: any page the user has open can `POST` `multipart/form-data` cross-origin to `127.0.0.1`.
 The checks above are what keep that from being interesting.
 

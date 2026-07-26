@@ -164,6 +164,18 @@ std::string lower_ascii(std::string s) {
     return s;
 }
 
+// Does this bind address reach only this machine? Anything else -- 0.0.0.0, ::, a LAN address --
+// puts the write endpoint on the network. 127.0.0.0/8 is all loopback, not just 127.0.0.1.
+bool is_loopback_host(const std::string& h) {
+    if (h == "localhost" || h == "::1" || h == "[::1]") return true;
+    if (starts_with(h, "127.")) {
+        // reject 127.foo; require the remaining octets to be numeric
+        for (char c : h.substr(4)) if (!std::isdigit((unsigned char)c) && c != '.') return false;
+        return true;
+    }
+    return false;
+}
+
 // ---- init-audio pool -------------------------------------------------------------------
 // /generate takes `init_path`, a path on the server's filesystem. That is right for a DAW
 // plug-in or an extension, which can write a wav and name it. A browser cannot: it has no
@@ -855,6 +867,16 @@ int main(int argc, char** argv) {
     if (threads_set && g_cpu_threads <= 0) {
         fprintf(stderr, "--threads must be positive\n");
         return 1;
+    }
+    // /init-audio/upload writes to disk, and the loopback default is the only thing keeping it
+    // off the network. Binding anywhere else hands that endpoint to everyone who can reach the
+    // port. Warn rather than refuse -- serving a LAN is a legitimate thing to want, but it should
+    // be a decision, not something noticed later.
+    if (!is_loopback_host(host)) {
+        fprintf(stderr, "[sa3-server] warning: bound to %s, not loopback. POST /init-audio/upload\n"
+                        "[sa3-server]          can write .wav files into %s from anywhere that can\n"
+                        "[sa3-server]          reach this port. Use --host 127.0.0.1 if that is not intended.\n",
+                host.c_str(), g_audio_in_dir.c_str());
     }
     const std::string adir = g_adapters_dir.empty() ? g_models_dir : g_adapters_dir;
     const std::string pdir = g_prompts_dir;
