@@ -54,6 +54,7 @@ std::string g_adapters_dir;
 std::string g_prompts_dir;
 std::string g_source_loras_dir;
 std::string g_web_dir;                    // --web-dir: serve this directory at /; empty = API only
+std::string g_audio_in_dir;               // --audio-in-dir: init-audio pool a browser can list/upload to
 int g_cpu_threads = 0;
 
 // --- async job registry (mirrors gary4local /poll_status) ---
@@ -161,6 +162,77 @@ bool ends_with(const std::string& s, const std::string& suffix) {
 std::string lower_ascii(std::string s) {
     for (char& c : s) c = (char)std::tolower((unsigned char)c);
     return s;
+}
+
+// ---- init-audio pool -------------------------------------------------------------------
+// /generate takes `init_path`, a path on the server's filesystem. That is right for a DAW
+// plug-in or an extension, which can write a wav and name it. A browser cannot: it has no
+// filesystem to write to and no way to learn what paths exist. These two endpoints are that
+// bridge and nothing more -- list the pool, and put a file in it.
+
+// Largest upload accepted. SA3_MAX_DURATION caps generation at 300 s, and 300 s of stereo
+// 44.1 kHz f32 is ~106 MiB, so this is generous for any real init audio while still bounding
+// what one request can make the server allocate on disk.
+constexpr size_t k_max_upload_bytes = 256ull * 1024 * 1024;
+
+// Reduce an upload's declared filename to something that can only ever land directly inside
+// the pool, or return "" to reject it.
+//
+// This is the part of the endpoint that has to be right. A multipart filename is attacker
+// controlled, and `fs::path(dir) / name` does NOT keep the file under `dir`: if `name` is
+// absolute, operator/ discards `dir` entirely, so "C:/Windows/Temp/x.exe" writes there. Taking
+// the basename first removes both that and any "..", after which the name is checked against
+// an allowlist rather than scrubbed, so anything surprising is refused instead of rewritten.
+std::string safe_upload_name(const std::string& raw) {
+    if (raw.empty() || raw.size() > 200) return "";
+    // Refuse, do not normalise. Taking the basename of "../../x.wav" would accept it as "x.wav"
+    // and hand back 200, hiding the fact that a client just tried to escape the pool. Anything
+    // that is not already a bare filename is a bug or an attack, and either deserves an error.
+    if (raw != std::filesystem::path(raw).filename().string()) return "";
+    if (raw == "." || raw == "..") return "";
+    if (raw.front() == '.') return "";                        // no dotfiles
+    if (!ends_with(lower_ascii(raw), ".wav")) return "";      // read_wav_planar reads wav
+    for (unsigned char c : raw) {
+        const bool ok = std::isalnum(c) || c == '.' || c == '-' || c == '_' || c == ' ' || c == '(' || c == ')';
+        if (!ok) return "";
+    }
+    // Windows reserved device names are still reserved with an extension, and opening one
+    // writes to the device rather than creating a file.
+    const std::string stem = lower_ascii(std::filesystem::path(raw).stem().string());
+    for (const char* dev : {"con","prn","aux","nul","com1","com2","com3","com4","com5","com6",
+                            "com7","com8","com9","lpt1","lpt2","lpt3","lpt4","lpt5","lpt6",
+                            "lpt7","lpt8","lpt9"}) {
+        if (stem == dev) return "";
+    }
+    return raw;
+}
+
+struct InitAudioEntry { std::string name, path; uintmax_t bytes; };
+
+std::vector<InitAudioEntry> scan_init_audio(const std::string& dir) {
+    namespace fs = std::filesystem;
+    std::vector<InitAudioEntry> out;
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return out;
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (!e.is_regular_file(ec)) continue;
+        const std::string fname = e.path().filename().string();
+        if (!ends_with(lower_ascii(fname), ".wav")) continue;
+        out.push_back({fname, fs::absolute(e.path(), ec).string(), e.file_size(ec)});
+    }
+    std::sort(out.begin(), out.end(), [](const InitAudioEntry& a, const InitAudioEntry& b) { return a.name < b.name; });
+    return out;
+}
+
+std::string init_audio_json(const std::vector<InitAudioEntry>& v) {
+    std::string s = "[";
+    for (size_t i = 0; i < v.size(); i++) {
+        if (i) s += ",";
+        s += "{\"name\":\"" + json_escape(v[i].name) + "\",\"path\":\"" + json_escape(v[i].path)
+           + "\",\"bytes\":" + std::to_string((unsigned long long)v[i].bytes) + "}";
+    }
+    return s + "]";
 }
 
 std::vector<std::string> split_dash(const std::string& s) {
@@ -759,9 +831,11 @@ int main(int argc, char** argv) {
     if (const char* e = getenv("SA3_PROMPTS_DIR"))  g_prompts_dir  = e;
     if (const char* e = getenv("SA3_SOURCE_LORAS_DIR")) g_source_loras_dir = e;
     if (const char* e = getenv("SA3_WEB_DIR"))      g_web_dir      = e;
+    if (const char* e = getenv("SA3_AUDIO_IN_DIR")) g_audio_in_dir = e;
     if (g_models_dir.empty()) g_models_dir = "models";
     if (g_prompts_dir.empty()) g_prompts_dir = "prompts";
     if (g_source_loras_dir.empty()) g_source_loras_dir = "loras";
+    if (g_audio_in_dir.empty()) g_audio_in_dir = "audio-in";
     bool threads_set = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -775,6 +849,7 @@ int main(int argc, char** argv) {
         else if (a == "--prompts-dir")  g_prompts_dir = next("prompts");
         else if (a == "--source-loras-dir") g_source_loras_dir = next("loras");
         else if (a == "--web-dir")      g_web_dir = next("");
+        else if (a == "--audio-in-dir") g_audio_in_dir = next("audio-in");
         else if (a == "--threads")      { g_cpu_threads = atoi(next("0")); threads_set = true; }
     }
     if (threads_set && g_cpu_threads <= 0) {
@@ -784,6 +859,7 @@ int main(int argc, char** argv) {
     const std::string adir = g_adapters_dir.empty() ? g_models_dir : g_adapters_dir;
     const std::string pdir = g_prompts_dir;
     const std::string sldir = g_source_loras_dir;
+    const std::string aidir = g_audio_in_dir;
 
     httplib::Server svr;
 
@@ -809,7 +885,7 @@ int main(int argc, char** argv) {
         // path prefix, so a *directory* of that name shadows it just as a file would -- and it
         // is the endpoint clients poll for generation progress, so losing it is not obvious
         // from the symptom. fs::exists covers both file and directory.
-        for (const char* reserved : {"health", "loras", "prompts", "poll_status"}) {
+        for (const char* reserved : {"health", "loras", "prompts", "poll_status", "init-audio"}) {
             if (fs::exists(fs::path(g_web_dir) / reserved, ec))
                 fprintf(stderr, "[sa3-server] warning: %s/%s shadows the GET /%s endpoint\n",
                         g_web_dir.c_str(), reserved, reserved);
@@ -828,6 +904,98 @@ int main(int argc, char** argv) {
         std::string body = "{\"status\":\"ok\",\"model\":\"" + g_variant + "\",\"encoding\":\"" +
                            g_encoding + "\",\"loaded\":" + (loaded ? "true" : "false") +
                            ",\"loudness_defaults\":" + loudness_params_json(sa3::loudness_defaults_from_env()) + "}";
+        res.set_content(body, "application/json");
+    });
+
+    svr.Get("/init-audio", [&aidir](const httplib::Request&, httplib::Response& res) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const std::vector<InitAudioEntry> files = scan_init_audio(aidir);
+        std::string body = "{\"success\":true,\"files\":" + init_audio_json(files)
+                         + ",\"audio_in_dir\":\"" + json_escape(fs::absolute(aidir, ec).string())
+                         + "\",\"max_upload_bytes\":" + std::to_string((unsigned long long)k_max_upload_bytes) + "}";
+        res.set_content(body, "application/json");
+    });
+
+    // Streamed to disk under a temp name, then renamed. Never buffered whole in memory, so an
+    // oversized body is refused mid-stream rather than after the server has already allocated
+    // it, and a client that disconnects halfway leaves no half-file for /init-audio to list.
+    svr.Post("/init-audio/upload", [&aidir](const httplib::Request& req, httplib::Response& res,
+                                            const httplib::ContentReader& content_reader) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        // Cheap pre-check: refuse before reading a byte when the client declares an oversized body.
+        if (req.has_header("Content-Length")) {
+            const auto declared = std::strtoull(req.get_header_value("Content-Length").c_str(), nullptr, 10);
+            if (declared > k_max_upload_bytes + (1u << 20)) {   // + multipart framing slack
+                res.status = 413;
+                res.set_content("{\"success\":false,\"error\":\"upload exceeds max_upload_bytes\"}", "application/json");
+                return;
+            }
+        }
+        if (!fs::is_directory(aidir, ec)) {
+            fs::create_directories(aidir, ec);
+            if (ec) {
+                res.status = 500;
+                res.set_content("{\"success\":false,\"error\":\"cannot create audio-in dir\"}", "application/json");
+                return;
+            }
+        }
+
+        std::string name, reject;
+        fs::path tmp, dest;
+        std::ofstream ofs;
+        size_t written = 0;
+        bool too_large = false, write_failed = false;
+
+        content_reader(
+            [&](const httplib::FormData& file) -> bool {
+                if (file.name != "file") return false;          // ignore other parts
+                name = safe_upload_name(file.filename);
+                if (name.empty()) {
+                    reject = "filename must be a plain .wav name (got \"" + file.filename + "\")";
+                    return false;
+                }
+                dest = fs::path(aidir) / name;
+                tmp  = fs::path(aidir) / (name + ".part");
+                ofs.open(tmp, std::ios::binary | std::ios::trunc);
+                if (!ofs) { reject = "cannot write to audio-in dir"; return false; }
+                return true;
+            },
+            [&](const char* chunk, size_t chunk_len) -> bool {
+                if (!ofs.is_open()) return true;                // part we skipped
+                if (written + chunk_len > k_max_upload_bytes) { too_large = true; return false; }
+                ofs.write(chunk, (std::streamsize)chunk_len);
+                if (!ofs) { write_failed = true; return false; }
+                written += chunk_len;
+                return true;
+            });
+
+        if (ofs.is_open()) ofs.close();
+        auto discard = [&]{ if (!tmp.empty()) fs::remove(tmp, ec); };
+
+        if (!reject.empty())   { discard(); res.status = 400; res.set_content("{\"success\":false,\"error\":\"" + json_escape(reject) + "\"}", "application/json"); return; }
+        if (too_large)         { discard(); res.status = 413; res.set_content("{\"success\":false,\"error\":\"upload exceeds max_upload_bytes\"}", "application/json"); return; }
+        if (write_failed)      { discard(); res.status = 500; res.set_content("{\"success\":false,\"error\":\"write failed\"}", "application/json"); return; }
+        if (name.empty() || written == 0) { discard(); res.status = 400; res.set_content("{\"success\":false,\"error\":\"no file uploaded\"}", "application/json"); return; }
+
+        fs::rename(tmp, dest, ec);
+        if (ec) { discard(); res.status = 500; res.set_content("{\"success\":false,\"error\":\"cannot finalize upload\"}", "application/json"); return; }
+
+        // Belt and braces: the name is already reduced to a basename, but confirm the file
+        // really landed inside the pool before telling the caller where it is.
+        const fs::path resolved = fs::weakly_canonical(dest, ec);
+        const fs::path base     = fs::weakly_canonical(fs::path(aidir), ec);
+        if (ec || resolved.parent_path() != base) {
+            fs::remove(dest, ec);
+            res.status = 400;
+            res.set_content("{\"success\":false,\"error\":\"refused: resolved outside audio-in dir\"}", "application/json");
+            return;
+        }
+
+        std::string body = "{\"success\":true,\"name\":\"" + json_escape(name) + "\",\"path\":\""
+                         + json_escape(resolved.string()) + "\",\"bytes\":" + std::to_string((unsigned long long)written) + "}";
         res.set_content(body, "application/json");
     });
 
@@ -1047,8 +1215,8 @@ int main(int argc, char** argv) {
         res.set_content(body, "application/json");
     });
 
-    fprintf(stderr, "[sa3-server] http://%s:%d  model=%s/%s  models=%s  adapters=%s  source_loras=%s  prompts=%s  web=%s  (async /poll_status; frugal default)\n",
-            host.c_str(), port, g_variant.c_str(), g_encoding.c_str(), g_models_dir.c_str(), adir.c_str(), sldir.c_str(), pdir.c_str(),
+    fprintf(stderr, "[sa3-server] http://%s:%d  model=%s/%s  models=%s  adapters=%s  source_loras=%s  prompts=%s  audio_in=%s  web=%s  (async /poll_status; frugal default)\n",
+            host.c_str(), port, g_variant.c_str(), g_encoding.c_str(), g_models_dir.c_str(), adir.c_str(), sldir.c_str(), pdir.c_str(), aidir.c_str(),
             g_web_dir.empty() ? "(none)" : g_web_dir.c_str());
     if (!svr.listen(host.c_str(), port)) {
         fprintf(stderr, "[sa3-server] failed to bind %s:%d\n", host.c_str(), port);
