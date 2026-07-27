@@ -11,6 +11,39 @@ optimization remains possible. These training additions do not alter the existin
 Measured training throughput and reproducible backend comparisons are collected in
 [TRAINING_BENCHMARKS.md](TRAINING_BENCHMARKS.md).
 
+## Quickstart
+
+Everything below has a working default. In practice these are the four knobs worth touching:
+
+```sh
+sa3-train --dataset /path/to/dataset --steps 2000 \
+          --rank 16 --duration 23 --lora-scope core
+```
+
+| flag | default | what it does |
+|---|---|---|
+| `--steps N` | `10000` | optimizer updates. 2000 is a reasonable first run on a small dataset. |
+| `--rank N` | `16` | adapter capacity. `--alpha` follows it automatically, so raising rank does **not** silently weaken the adapter. |
+| `--duration SEC` | — | seconds of audio per training crop. Without it you get `--frames 512`, which is **47.6 s**. |
+| `--lora-scope full\|core` | `full` | `core` adapts only the 24 blocks' own projections (168 weights instead of 228): ~10% faster steps and ~11% smaller adapters, and in a matched 2000-step run the loss curve was within 0.0013 of `full` throughout. |
+
+Two things that are easy to miss:
+
+- **`--duration` is in seconds; `--frames` is in latent frames.** One latent frame is 4096 samples at
+  44.1 kHz, so 512 frames = 47.6 s, 256 = 23.8 s. `--duration` is the friendlier knob and wins when
+  both are given. Shorter crops train faster and use less memory; the reference regime is ~47 s.
+- **MP3 datasets need `ffmpeg` on `PATH`.** Decoding shells out to it (see [Dataset](#dataset)).
+  WAV inputs do not.
+
+Training prints what it is actually doing at startup, which is worth a glance before walking away:
+
+```
+[train] lora scope: core -> 168 targets (168 per-block, 0 elsewhere)  rank 16 alpha 16 scale 1
+```
+
+`scale` is `alpha/rank` and should normally be `1`. Adapter strength is multiplied by it in both
+training and inference, so a `scale` well below 1 means the adapter is being attenuated.
+
 ## Build
 
 ```sh
@@ -63,6 +96,12 @@ datasets/my-training-set/
 ```
 
 Training honors `train/filelist.txt`. Test and evaluation splits are loaded only for validation/evaluation and are rejected if any train item overlaps by basename, canonical path, or `audio_sha256`.
+
+**MP3 decoding requires `ffmpeg` on `PATH`.** `sa3-train` shells out to it (`ffmpeg -f f32le …`) to
+read compressed audio; there is no built-in MP3 decoder. Inference has no such dependency — it reads
+WAV directly — so a machine that generates fine can still fail to train. Check with `ffmpeg -version`
+before a long run; a missing binary surfaces as a decode failure per file rather than a clear
+"ffmpeg not found".
 
 ## Train
 
@@ -132,6 +171,50 @@ pass `--svd-bases bases.gguf` to load precomputed bases instead — generate the
 
 Each sample is conditioned by its caption text. A dataset-level `prompt_config.json` can optionally
 compose that caption with general metadata tags or path-derived text.
+
+## Target Scopes
+
+Which DiT weights get an adapter. Every 2D `dit.*.weight` is eligible; a scope narrows that.
+
+| scope | targets | what it covers |
+|---|---|---|
+| `full` (default) | 228 | the 9 per-block projections plus the 12 outside the blocks (`proj_in`/`proj_out`, `pre_conv`/`post_conv`, `time_embed`, `cond_embed`, `global_embed`, `gce`) |
+| `core` | 168 | the 7 per-block projections only — `self.qkv`, `self.out`, `cross.q`, `cross.kv`, `cross.out`, `ff.proj`, `ff.out` — across 24 blocks |
+
+`core` is the scope the MLX trainer uses, where it is spelled `include transformer.layers` /
+`exclude to_local_embed`. Those are upstream names; ours are `dit.<N>.…` and `local.{0,2}`, so the
+filters do not transfer literally — see [TENSOR-MAP.md](TENSOR-MAP.md) for the full mapping.
+
+Measured on medium, 23 s crops, rank 16, 2000 steps, CUDA:
+
+| | full (228) | core (168) |
+|---|---|---|
+| final loss | 0.8830 | 0.8843 |
+| s/step | 0.718 | 0.642 |
+| adapter | 82.3 MB | 72.7 MB |
+
+Same quality — the loss curves stayed within 0.0014 of each other in every 250-step window — for
+~10% faster steps and ~11% smaller adapters.
+
+Worth knowing why those savings are ~11% and not the 26% the target count suggests: **the dropped
+weights are the small ones.** `core` drops 26% of the targets but only 11.6% of the adapter
+parameters (19.06 M kept vs 2.51 M dropped), because the large projections are all kept and
+`local.{0,2}` plus the head/tail weights are comparatively tiny. The step-time saving tracks the
+parameter ratio rather than the target ratio, since the frozen base still runs in full either way.
+`core` does skip one graph entirely — the head backward pass has nothing to differentiate — but that
+turns out to be nearly free.
+
+For anything the named scopes do not carve out, `--lora-include` and `--lora-exclude` take
+comma-separated substrings matched against tensor names, applied after the scope:
+
+```sh
+--lora-scope core --lora-exclude ff.        # 120 targets: core minus both feed-forward projections
+--lora-scope full --lora-include cross.     #  72 targets: cross-attention only
+```
+
+A scope change invalidates a checkpoint — the resume fingerprint covers every target name — so
+`--resume` refuses rather than continuing into a different parametrization. Pick a scope before a
+long run, not partway through.
 
 ## Outputs
 
