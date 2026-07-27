@@ -21,8 +21,8 @@ int main() {
         const sa3::TrainConfig c;
         fails += expect(c.model_variant == "medium", "default model medium");
         fails += expect(c.adapter_type == "dora-rows", "default adapter dora-rows");
-        fails += expect(c.rank == 16 && c.alpha > 15.99f && c.alpha < 16.01f,
-                        "default rank/alpha 16");
+        fails += expect(c.rank == 16 && c.alpha == 0.0f,
+                        "default rank 16, alpha unset (0 => follow rank)");
         fails += expect(c.frames == 512 && c.seed == 42, "default frames 512 and seed 42");
         fails += expect(c.adam_beta2 > 0.949f && c.adam_beta2 < 0.951f,
                         "default Adam beta2 0.95");
@@ -223,6 +223,25 @@ int main() {
         c.lr_warmup = 1.0f;   // out of [0,1)
         std::string err;
         fails += expect(!sa3::validate_train_config(c, err), "bad lr_warmup rejected");
+    }
+    {
+        // alpha follows rank unless set. The adapter contributes at alpha/rank, so a fixed alpha
+        // silently attenuates every larger rank: rank 128 against a hardcoded alpha 16 trains and
+        // infers at 1/8 strength. Upstream MLX defaults alpha to rank for the same reason.
+        sa3::TrainConfig c;
+        c.rank = 128;
+        sa3::train_finalize_defaults(c);
+        fails += expect(c.alpha == 128.0f, "alpha follows rank when unset");
+
+        sa3::TrainConfig d;
+        d.rank = 128;
+        d.alpha = 16.0f;                 // explicit, however odd
+        sa3::train_finalize_defaults(d);
+        fails += expect(d.alpha == 16.0f, "explicit alpha is preserved");
+
+        sa3::TrainConfig e;               // untouched defaults still land on scale 1.0
+        sa3::train_finalize_defaults(e);
+        fails += expect(e.rank == 16 && e.alpha == 16.0f, "default rank/alpha both 16");
     }
     if (fails) return 1;
     std::printf("train_config_test: ok\n");

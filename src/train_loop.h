@@ -395,9 +395,12 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
     // H: head backward against dL/dx_0 + the summed context/gcond gradients
     ggml_backend_tensor_set(ck.Gctx_in, gctx_sum.data(), 0, gctx_sum.size() * sizeof(float));
     ggml_backend_tensor_set(ck.Ggcond_in, ggcond_sum.data(), 0, ggcond_sum.size() * sizeof(float));
-    ggml_graph_reset(ck.hgraph);
-    ggml_backend_graph_compute(backend, ck.hgraph);
-    if (!train_accum_read_subset(ck.hgraph, ck, ck.head_param_idx, accum, err)) return false;
+    // Skipped when no adapter lives on a head weight (e.g. --lora-scope core); see train_ckpt.h.
+    if (ck.hgraph) {
+        ggml_graph_reset(ck.hgraph);
+        ggml_backend_graph_compute(backend, ck.hgraph);
+        if (!train_accum_read_subset(ck.hgraph, ck, ck.head_param_idx, accum, err)) return false;
+    }
     if (profile) {
         const auto now = std::chrono::steady_clock::now();
         profile_head_ms = std::chrono::duration<double, std::milli>(now - profile_mark).count();

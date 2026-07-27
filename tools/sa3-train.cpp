@@ -116,6 +116,22 @@ int main(int argc, char** argv) {
                     return 2;
                 }
             }
+        } else {
+            // A fresh run into a directory that already holds checkpoints is refused by
+            // write_train_checkpoint_pair, which keeps step checkpoints immutable -- but that only
+            // runs at checkpoint time, so the failure landed after --checkpoint-every steps of
+            // training (or, if checkpoint_every exceeds max_steps, not until the very end). Check it
+            // here instead, before anything is loaded or encoded.
+            const int latest = sa3::train_latest_checkpoint_step(cfg.output_dir);
+            if (latest >= 0) {
+                std::fprintf(stderr,
+                    "sa3-train: %s already contains training checkpoints (latest step %d).\n"
+                    "  step checkpoints are immutable, so this run would fail on its first write.\n"
+                    "  resume it:   --resume %s\\trainer-state-step-%d.gguf\n"
+                    "  or start elsewhere: --out <new dir>\n",
+                    cfg.output_dir.c_str(), latest, cfg.output_dir.c_str(), latest);
+                return 2;
+            }
         }
         sa3::ModelPaths paths;
         if (!sa3::resolve_train_model_paths(cfg, paths, err)) {
@@ -171,6 +187,16 @@ int main(int argc, char** argv) {
             snap << "latents_dir=" << (cfg.latents_dir.empty() ? "(none)" : cfg.latents_dir) << "\n";
             snap << "target_latent_rms=" << cfg.target_latent_rms << "\n";
             snap << "rank=" << cfg.rank << "\n";
+            snap << "lora_scope=" << cfg.lora_scope << "\n";
+            {   // resolved target count is logged to stderr; the snapshot records the request
+                auto csv = [](const std::vector<std::string>& v) {
+                    std::string o;
+                    for (size_t i = 0; i < v.size(); i++) { if (i) o += ","; o += v[i]; }
+                    return o;
+                };
+                snap << "lora_include=" << csv(cfg.lora_include) << "\n";
+                snap << "lora_exclude=" << csv(cfg.lora_exclude) << "\n";
+            }
             snap << "alpha=" << cfg.alpha << "\n";
             snap << "learning_rate=" << cfg.learning_rate << "\n";
             snap << "weight_decay=" << cfg.weight_decay << "\n";
@@ -234,7 +260,11 @@ int main(int argc, char** argv) {
         sa3::T5GemmaConfig tc = sa3::T5GemmaConfig::from(te);
         sa3::DitConfig dc = sa3::DitConfig::from(dit);
         sa3::SameConfig sc = sa3::SameConfig::from(ae);
-        std::vector<sa3::TrainLoraTarget> targets = sa3::enumerate_train_lora_targets(dit);
+        sa3::TrainLoraScope lora_scope;
+        lora_scope.name    = cfg.lora_scope;
+        lora_scope.include = cfg.lora_include;
+        lora_scope.exclude = cfg.lora_exclude;
+        std::vector<sa3::TrainLoraTarget> targets = sa3::enumerate_train_lora_targets(dit, lora_scope);
         if (!cfg.inpainting) {
             // The dit.*.local.* weights are only exercised by the inpainting local-cond path. Without
             // it they'd be dead LoRA targets (never in the forward, so no gradient and no buffer from
@@ -244,6 +274,26 @@ int main(int argc, char** argv) {
                 targets.end());
         }
         if (targets.empty()) throw std::runtime_error("no DiT LoRA targets found");
+
+        // Say out loud what is being adapted. The scope and the filters change the parameter
+        // count silently otherwise, and the count is the thing you want to eyeball against the
+        // scope you asked for (core=168, full=228 on medium).
+        {
+            size_t block_targets = 0;
+            for (const sa3::TrainLoraTarget& t : targets)
+                if (sa3::train_lora_is_block_weight(t.weight_name)) block_targets++;
+            std::fprintf(stderr, "[train] lora scope: %s -> %zu targets (%zu per-block, %zu elsewhere)"
+                                 "  rank %d alpha %.4g scale %.4g",
+                         cfg.lora_scope.c_str(), targets.size(), block_targets, targets.size() - block_targets,
+                         cfg.rank, (double)cfg.alpha, (double)cfg.alpha / (double)cfg.rank);
+            if (!cfg.lora_include.empty() || !cfg.lora_exclude.empty()) {
+                std::fprintf(stderr, "  [filters:");
+                for (const std::string& p : cfg.lora_include) std::fprintf(stderr, " +%s", p.c_str());
+                for (const std::string& p : cfg.lora_exclude) std::fprintf(stderr, " -%s", p.c_str());
+                std::fprintf(stderr, "]");
+            }
+            std::fprintf(stderr, "\n");
+        }
 
         sa3::GgufModel svd_bases;
         const bool have_bases = !cfg.svd_bases_path.empty();
@@ -431,6 +481,15 @@ int main(int argc, char** argv) {
         size_t cursor_next_sample = first_oi;
         bool stop = cfg.max_steps > 0 && loop.step >= cfg.max_steps;
         if (cfg.max_epochs > 0 && epoch >= cfg.max_epochs) stop = true;
+        // Per-step wall time. Started here so model load and pre-encode are excluded -- those are
+        // one-off and identical across configurations, and folding them in would mask the thing
+        // worth measuring (what a target scope or adapter family costs per step).
+        double t_prev_step = sa3::wall_time_s();
+        const double t_train_begin = t_prev_step;
+        double step_seconds_total = 0.0;
+        int step_seconds_count = 0;
+        double step_recent_total = 0.0;   // rolling window for the console line
+        int step_recent_count = 0;
         while (!stop) {
             size_t oi_begin = 0;
             if (restored_epoch_order) {
@@ -664,9 +723,17 @@ int main(int argc, char** argv) {
                 if (have_inpaint)
                     inpaint_tag = std::string(" mask=") + kMaskNames[(int)inpaint.type] +
                                   "(" + std::to_string(inpaint.n_gen) + "gen/" + std::to_string(inpaint.n_ctx) + "ctx)";
-                std::printf("epoch %d step %d id=%s t=%.4f%s%s lr=%.3e loss=%.6f gnorm=%.4f prompt=\"%s%s\"\n",
+                const double t_now_step = sa3::wall_time_s();
+                const double step_s = t_now_step - t_prev_step;
+                t_prev_step = t_now_step;
+                step_seconds_total += step_s;  step_seconds_count++;
+                step_recent_total  += step_s;  step_recent_count++;
+                const double step_recent_avg = step_recent_total / (double)step_recent_count;
+                if (step_recent_count >= 50) { step_recent_total = 0.0; step_recent_count = 0; }
+                std::printf("epoch %d step %d id=%s t=%.4f%s%s lr=%.3e loss=%.6f gnorm=%.4f %.2fs/step prompt=\"%s%s\"\n",
                             epoch, loop.step, pair.id.c_str(), sample.t, cfg_dropped ? " cfg_drop" : "",
-                            inpaint_tag.c_str(), applied_lr, loss, grad_norm, prompt_preview.c_str(), caption.size() > 48 ? "..." : "");
+                            inpaint_tag.c_str(), applied_lr, loss, grad_norm, step_recent_avg,
+                            prompt_preview.c_str(), caption.size() > 48 ? "..." : "");
                 metrics << "{\"epoch\":" << epoch << ",\"update\":" << loop.step
                         << ",\"split\":\"train\",\"id\":\"" << pair.id
                         << "\",\"t\":" << sample.t << ",\"cfg_drop\":" << (cfg_dropped ? 1 : 0);
@@ -674,7 +741,7 @@ int main(int argc, char** argv) {
                     metrics << ",\"mask\":\"" << kMaskNames[(int)inpaint.type] << "\""
                             << ",\"n_gen\":" << inpaint.n_gen << ",\"n_ctx\":" << inpaint.n_ctx;
                 metrics << ",\"lr\":" << applied_lr << ",\"loss\":" << loss
-                        << ",\"grad_norm\":" << grad_norm << "}\n";
+                        << ",\"grad_norm\":" << grad_norm << ",\"step_s\":" << step_s << "}\n";
                 metrics.flush();
                 if (updated && cfg.checkpoint_every > 0 && (loop.step % cfg.checkpoint_every) == 0)
                     do_checkpoint(epoch, oi + 1);
@@ -692,6 +759,12 @@ int main(int argc, char** argv) {
         }
 
         if (loop.step <= 0) throw std::runtime_error("training completed without an optimizer update");
+        if (step_seconds_count > 0) {
+            const double mean_step = step_seconds_total / (double)step_seconds_count;
+            const double wall = sa3::wall_time_s() - t_train_begin;
+            std::printf("[train] %d steps in %.1fs, mean %.3fs/step (%.2f steps/s)\n",
+                        step_seconds_count, wall, mean_step, mean_step > 0.0 ? 1.0 / mean_step : 0.0);
+        }
         if (last_checkpoint_step != loop.step) {
             const std::string current_adapter = (std::filesystem::path(cfg.output_dir) /
                 ("adapter-step-" + std::to_string(loop.step) + ".gguf")).string();

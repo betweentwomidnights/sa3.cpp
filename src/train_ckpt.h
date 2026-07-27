@@ -327,7 +327,13 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
     }
 
     // --- H: head VJP fwd+bwd ---
-    {
+    // Only exists to produce gradients for adapters on the head weights (proj_in, pre_conv,
+    // time_embed, cond_embed, global_embed, gce). Nothing downstream consumes its outputs -- the
+    // head is the start of the chain -- so with no head adapters there is nothing to compute.
+    // It must be SKIPPED rather than built empty: none of its inputs are parameters, so
+    // ggml_build_backward_expand would assert "no trainable parameters found". That is what a
+    // --lora-scope of core does, since core keeps only the 24 blocks' own projections.
+    if (!out.head_param_idx.empty()) {
         out.hctx = graph_ctx(4096, true);
         if (!out.hctx) return fail("ggml_init failed for head graph");
         out.hgraph = ggml_new_graph_custom(out.hctx, 4096, true);
@@ -346,12 +352,17 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
             return fail("failed to allocate head training graph");
     }
 
+    char hdesc[64] = "H skipped (no head adapters)";
+    if (out.hgraph) {
+        snprintf(hdesc, sizeof hdesc, "H %d nodes %.1f MiB", ggml_graph_n_nodes(out.hgraph),
+                 ggml_gallocr_get_buffer_size(out.halloc, 0) / (1024.0 * 1024.0));
+    }
     std::fprintf(stderr, "[train] checkpointed graphs: F %d nodes %.1f MiB, T %d nodes %.1f MiB, "
-                 "%d block graphs %d nodes each, H %d nodes %.1f MiB, persistent %.1f MiB\n",
+                 "%d block graphs %d nodes each, %s, persistent %.1f MiB\n",
                  ggml_graph_n_nodes(out.fgraph), ggml_gallocr_get_buffer_size(out.falloc, 0) / (1024.0 * 1024.0),
                  ggml_graph_n_nodes(out.tgraph), ggml_gallocr_get_buffer_size(out.talloc, 0) / (1024.0 * 1024.0),
                  dc.depth, ggml_graph_n_nodes(out.blocks[0].graph),
-                 ggml_graph_n_nodes(out.hgraph), ggml_gallocr_get_buffer_size(out.halloc, 0) / (1024.0 * 1024.0),
+                 hdesc,
                  ggml_backend_buffer_get_size(out.pbuf) / (1024.0 * 1024.0));
     return true;
 }

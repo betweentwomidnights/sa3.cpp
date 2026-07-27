@@ -5,6 +5,7 @@
 #include "train_svd.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <random>
@@ -50,7 +51,53 @@ struct TrainLoraGraphParam {
     ggml_tensor* magnitude_c = nullptr; // bora cols [in]
 };
 
-inline std::vector<TrainLoraTarget> enumerate_train_lora_targets(const GgufModel& dit) {
+// Which weights get an adapter. Every 2D `dit.*.weight` is eligible; a scope narrows that.
+//
+//   full  228  everything eligible: the 9 per-block projections plus the 12 outside the blocks
+//              (proj_in/out, pre/post_conv, time_embed, cond_embed, global_embed, gce).
+//   core  168  the 7 per-block projections only -- self.qkv, self.out, cross.q, cross.kv,
+//              cross.out, ff.proj, ff.out -- dropping local.{0,2} and everything non-block.
+//
+// `core` is the scope MLX trains, where it is spelled `include transformer.layers` /
+// `exclude to_local_embed`; those are upstream names, ours are `dit.<N>.…` and `local.{0,2}`.
+// It removes 60 of 228 parametrizations (~26%) and in practice trains to the same quality. The
+// frozen base still runs in full either way -- this only shrinks adapter math, gradients and
+// optimizer state. See docs/TENSOR-MAP.md for the full upstream<->ours name mapping.
+//
+// include/exclude are plain substring matches over the tensor name, applied after the scope, as
+// an escape hatch for targeting something the named scopes do not carve out.
+struct TrainLoraScope {
+    std::string name = "full";
+    std::vector<std::string> include;   // if non-empty, a name must contain one of these
+    std::vector<std::string> exclude;   // a name containing any of these is dropped
+};
+
+inline bool train_lora_scope_known(const std::string& s) { return s == "full" || s == "core"; }
+
+// True if `name` is one of the 24 transformer blocks' own projections, i.e. `dit.<digits>.…`.
+inline bool train_lora_is_block_weight(const std::string& name) {
+    size_t i = 4;                                    // past "dit."
+    if (name.size() <= i || !std::isdigit((unsigned char)name[i])) return false;
+    while (i < name.size() && std::isdigit((unsigned char)name[i])) i++;
+    return i < name.size() && name[i] == '.';
+}
+
+inline bool train_lora_target_selected(const std::string& name, const TrainLoraScope& scope) {
+    if (scope.name == "core") {
+        if (!train_lora_is_block_weight(name)) return false;      // drops the 12 non-block weights
+        if (name.find(".local.") != std::string::npos) return false;  // drops local.{0,2} (48)
+    }
+    if (!scope.include.empty()) {
+        bool hit = false;
+        for (const std::string& p : scope.include) if (name.find(p) != std::string::npos) { hit = true; break; }
+        if (!hit) return false;
+    }
+    for (const std::string& p : scope.exclude) if (name.find(p) != std::string::npos) return false;
+    return true;
+}
+
+inline std::vector<TrainLoraTarget> enumerate_train_lora_targets(const GgufModel& dit,
+                                                                 const TrainLoraScope& scope = {}) {
     std::vector<TrainLoraTarget> out;
     for (const auto& kv : dit.tensors) {
         const std::string& name = kv.first;
@@ -58,6 +105,7 @@ inline std::vector<TrainLoraTarget> enumerate_train_lora_targets(const GgufModel
         if (name.rfind("dit.", 0) != 0) continue;
         if (name.size() < 7 || name.compare(name.size() - 7, 7, ".weight") != 0) continue;
         if (ggml_n_dims(t) != 2) continue;
+        if (!train_lora_target_selected(name, scope)) continue;
         TrainLoraTarget target;
         target.weight_name = name;
         target.stem = name.substr(0, name.size() - 7);

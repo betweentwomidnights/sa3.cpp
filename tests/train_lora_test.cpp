@@ -29,6 +29,37 @@ int main() {
     m.tensors[c->name] = c;
     std::vector<sa3::TrainLoraTarget> targets = sa3::enumerate_train_lora_targets(m);
     fails += expect(targets.size() == 1, "one DiT 2D weight target");
+
+    // ---- target scopes -------------------------------------------------------------------
+    // A stand-in DiT with the shapes that matter: two per-block projections, a local-cond
+    // weight (what `core` drops), and a non-block weight (what `core` also drops).
+    {
+        sa3::GgufModel s;
+        const char* names[] = { "dit.0.self.qkv.weight", "dit.0.cross.kv.weight",
+                                "dit.0.local.0.weight",  "dit.proj_in.weight" };
+        for (const char* n : names) {
+            ggml_tensor* t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 4);
+            ggml_set_name(t, n);
+            s.tensors[n] = t;
+        }
+        sa3::TrainLoraScope full;                                  // default
+        sa3::TrainLoraScope core; core.name = "core";
+        fails += expect(sa3::enumerate_train_lora_targets(s, full).size() == 4, "full scope keeps all");
+        fails += expect(sa3::enumerate_train_lora_targets(s, core).size() == 2, "core drops local + non-block");
+
+        // include/exclude are substring matches applied after the scope
+        sa3::TrainLoraScope only_cross; only_cross.include = {"cross."};
+        fails += expect(sa3::enumerate_train_lora_targets(s, only_cross).size() == 1, "include filters");
+        sa3::TrainLoraScope no_self; no_self.exclude = {"self."};
+        fails += expect(sa3::enumerate_train_lora_targets(s, no_self).size() == 3, "exclude filters");
+        sa3::TrainLoraScope core_no_ff; core_no_ff.name = "core"; core_no_ff.exclude = {"cross."};
+        fails += expect(sa3::enumerate_train_lora_targets(s, core_no_ff).size() == 1, "scope then exclude");
+
+        // dit.<digits>. is what makes a weight "per-block"; dit.proj_in is not.
+        fails += expect(sa3::train_lora_is_block_weight("dit.11.ff.out.weight"), "block weight detected");
+        fails += expect(!sa3::train_lora_is_block_weight("dit.proj_in.weight"), "non-block detected");
+        fails += expect(!sa3::train_lora_is_block_weight("dit.time_embed.0.weight"), "embed is not a block");
+    }
     fails += expect(targets[0].stem == "dit.0.self.qkv", "target stem");
     fails += expect(targets[0].in == 4 && targets[0].out == 8, "target shape");
     sa3::TrainLoraState st;
