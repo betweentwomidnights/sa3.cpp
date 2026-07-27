@@ -26,6 +26,11 @@ struct TrainConfig {
     std::string dit_path;
     std::string same_path;
     std::string dataset_dir;
+    // LoRA target scope: "full" (228 weights) or "core" (168, the per-block projections
+    // only). lora_include/lora_exclude are substring escape hatches applied after the scope.
+    std::string lora_scope = "full";
+    std::vector<std::string> lora_include;
+    std::vector<std::string> lora_exclude;
     std::string train_split = "train";
     std::string test_split = "test";
     std::string evaluation_split = "evaluation";
@@ -136,6 +141,22 @@ inline bool train_normalize_dist_shift(std::string& v) {
     return true;
 }
 
+// Split a comma-separated list into trimmed, non-empty pieces (e.g. "cross.,ff." -> {"cross.","ff."}).
+inline std::vector<std::string> train_split_csv(const std::string& text) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t sep = text.find(',', start);
+        std::string piece = text.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+        const size_t a = piece.find_first_not_of(" \t");
+        const size_t b = piece.find_last_not_of(" \t");
+        if (a != std::string::npos) out.push_back(piece.substr(a, b - a + 1));
+        if (sep == std::string::npos) break;
+        start = sep + 1;
+    }
+    return out;
+}
+
 // Parse a comma-separated list of probabilities (e.g. "0.2,0.6,0.2") into doubles.
 inline bool train_parse_probs(const std::string& text, std::vector<double>& out, std::string& err) {
     out.clear();
@@ -227,6 +248,9 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
     else if (key == "dit" || key == "dit_path") c.dit_path = value;
     else if (key == "same" || key == "same_path") c.same_path = value;
     else if (key == "dataset" || key == "dataset-dir" || key == "dataset_dir") c.dataset_dir = value;
+    else if (key == "lora-scope" || key == "lora_scope") c.lora_scope = value;
+    else if (key == "lora-include" || key == "lora_include") c.lora_include = train_split_csv(value);
+    else if (key == "lora-exclude" || key == "lora_exclude") c.lora_exclude = train_split_csv(value);
     else if (key == "train-split" || key == "train_split") c.train_split = value;
     else if (key == "test-split" || key == "test_split") c.test_split = value;
     else if (key == "evaluation-split" || key == "evaluation_split") c.evaluation_split = value;
@@ -448,6 +472,9 @@ inline bool validate_train_config(const TrainConfig& c, std::string& err) {
     if (c.batch_size <= 0) { err = "batch_size must be positive"; return false; }
     if (c.cpu_threads < 0) { err = "threads must be positive (or 0 for automatic)"; return false; }
     if (c.checkpoint_every < 0) { err = "checkpoint_every must be non-negative (0 = off)"; return false; }
+    if (!(c.lora_scope == "full" || c.lora_scope == "core")) {
+        err = "unknown --lora-scope '" + c.lora_scope + "' (expected full|core)"; return false;
+    }
     if (c.frames <= 0 && c.duration_sec <= 0.0f) { err = "frames or duration_sec must be positive"; return false; }
     if (c.optimizer != "adamw") { err = "unsupported optimizer: " + c.optimizer; return false; }
     if (c.timestep_sampler != "uniform" && c.timestep_sampler != "trunc_logit_normal") {
@@ -487,6 +514,8 @@ inline std::string train_config_usage(const char* argv0) {
        << "              --steps N (alias: --max-steps; default 10000)\n"
        << "              --resume adapter-step-N.gguf|trainer-state-step-N.gguf (N -> --steps total)\n"
        << "adapter: --adapter-type lora|dora-rows|dora-cols|bora|*-xs --rank N --alpha F\n"
+       << "          --lora-scope full|core (full=228 weights, core=168 per-block projections)\n"
+       << "          --lora-include a,b --lora-exclude a,b (substring filters, applied after scope)\n"
        << "optimization: --learning-rate F --batch-size N --threads N --frames N --duration SEC --seed N\n"
        << "          --lr-scheduler constant|inverse_lr [--lr-inv-gamma F --lr-power F --lr-warmup F --lr-final F]\n"
        << "schedule: --timestep-sampler uniform|trunc_logit_normal --dist-shift none|full|flux|logsnr\n"

@@ -234,7 +234,11 @@ int main(int argc, char** argv) {
         sa3::T5GemmaConfig tc = sa3::T5GemmaConfig::from(te);
         sa3::DitConfig dc = sa3::DitConfig::from(dit);
         sa3::SameConfig sc = sa3::SameConfig::from(ae);
-        std::vector<sa3::TrainLoraTarget> targets = sa3::enumerate_train_lora_targets(dit);
+        sa3::TrainLoraScope lora_scope;
+        lora_scope.name    = cfg.lora_scope;
+        lora_scope.include = cfg.lora_include;
+        lora_scope.exclude = cfg.lora_exclude;
+        std::vector<sa3::TrainLoraTarget> targets = sa3::enumerate_train_lora_targets(dit, lora_scope);
         if (!cfg.inpainting) {
             // The dit.*.local.* weights are only exercised by the inpainting local-cond path. Without
             // it they'd be dead LoRA targets (never in the forward, so no gradient and no buffer from
