@@ -116,6 +116,22 @@ int main(int argc, char** argv) {
                     return 2;
                 }
             }
+        } else {
+            // A fresh run into a directory that already holds checkpoints is refused by
+            // write_train_checkpoint_pair, which keeps step checkpoints immutable -- but that only
+            // runs at checkpoint time, so the failure landed after --checkpoint-every steps of
+            // training (or, if checkpoint_every exceeds max_steps, not until the very end). Check it
+            // here instead, before anything is loaded or encoded.
+            const int latest = sa3::train_latest_checkpoint_step(cfg.output_dir);
+            if (latest >= 0) {
+                std::fprintf(stderr,
+                    "sa3-train: %s already contains training checkpoints (latest step %d).\n"
+                    "  step checkpoints are immutable, so this run would fail on its first write.\n"
+                    "  resume it:   --resume %s\\trainer-state-step-%d.gguf\n"
+                    "  or start elsewhere: --out <new dir>\n",
+                    cfg.output_dir.c_str(), latest, cfg.output_dir.c_str(), latest);
+                return 2;
+            }
         }
         sa3::ModelPaths paths;
         if (!sa3::resolve_train_model_paths(cfg, paths, err)) {
