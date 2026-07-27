@@ -481,6 +481,15 @@ int main(int argc, char** argv) {
         size_t cursor_next_sample = first_oi;
         bool stop = cfg.max_steps > 0 && loop.step >= cfg.max_steps;
         if (cfg.max_epochs > 0 && epoch >= cfg.max_epochs) stop = true;
+        // Per-step wall time. Started here so model load and pre-encode are excluded -- those are
+        // one-off and identical across configurations, and folding them in would mask the thing
+        // worth measuring (what a target scope or adapter family costs per step).
+        double t_prev_step = sa3::wall_time_s();
+        const double t_train_begin = t_prev_step;
+        double step_seconds_total = 0.0;
+        int step_seconds_count = 0;
+        double step_recent_total = 0.0;   // rolling window for the console line
+        int step_recent_count = 0;
         while (!stop) {
             size_t oi_begin = 0;
             if (restored_epoch_order) {
@@ -714,9 +723,17 @@ int main(int argc, char** argv) {
                 if (have_inpaint)
                     inpaint_tag = std::string(" mask=") + kMaskNames[(int)inpaint.type] +
                                   "(" + std::to_string(inpaint.n_gen) + "gen/" + std::to_string(inpaint.n_ctx) + "ctx)";
-                std::printf("epoch %d step %d id=%s t=%.4f%s%s lr=%.3e loss=%.6f gnorm=%.4f prompt=\"%s%s\"\n",
+                const double t_now_step = sa3::wall_time_s();
+                const double step_s = t_now_step - t_prev_step;
+                t_prev_step = t_now_step;
+                step_seconds_total += step_s;  step_seconds_count++;
+                step_recent_total  += step_s;  step_recent_count++;
+                const double step_recent_avg = step_recent_total / (double)step_recent_count;
+                if (step_recent_count >= 50) { step_recent_total = 0.0; step_recent_count = 0; }
+                std::printf("epoch %d step %d id=%s t=%.4f%s%s lr=%.3e loss=%.6f gnorm=%.4f %.2fs/step prompt=\"%s%s\"\n",
                             epoch, loop.step, pair.id.c_str(), sample.t, cfg_dropped ? " cfg_drop" : "",
-                            inpaint_tag.c_str(), applied_lr, loss, grad_norm, prompt_preview.c_str(), caption.size() > 48 ? "..." : "");
+                            inpaint_tag.c_str(), applied_lr, loss, grad_norm, step_recent_avg,
+                            prompt_preview.c_str(), caption.size() > 48 ? "..." : "");
                 metrics << "{\"epoch\":" << epoch << ",\"update\":" << loop.step
                         << ",\"split\":\"train\",\"id\":\"" << pair.id
                         << "\",\"t\":" << sample.t << ",\"cfg_drop\":" << (cfg_dropped ? 1 : 0);
@@ -724,7 +741,7 @@ int main(int argc, char** argv) {
                     metrics << ",\"mask\":\"" << kMaskNames[(int)inpaint.type] << "\""
                             << ",\"n_gen\":" << inpaint.n_gen << ",\"n_ctx\":" << inpaint.n_ctx;
                 metrics << ",\"lr\":" << applied_lr << ",\"loss\":" << loss
-                        << ",\"grad_norm\":" << grad_norm << "}\n";
+                        << ",\"grad_norm\":" << grad_norm << ",\"step_s\":" << step_s << "}\n";
                 metrics.flush();
                 if (updated && cfg.checkpoint_every > 0 && (loop.step % cfg.checkpoint_every) == 0)
                     do_checkpoint(epoch, oi + 1);
@@ -742,6 +759,12 @@ int main(int argc, char** argv) {
         }
 
         if (loop.step <= 0) throw std::runtime_error("training completed without an optimizer update");
+        if (step_seconds_count > 0) {
+            const double mean_step = step_seconds_total / (double)step_seconds_count;
+            const double wall = sa3::wall_time_s() - t_train_begin;
+            std::printf("[train] %d steps in %.1fs, mean %.3fs/step (%.2f steps/s)\n",
+                        step_seconds_count, wall, mean_step, mean_step > 0.0 ? 1.0 / mean_step : 0.0);
+        }
         if (last_checkpoint_step != loop.step) {
             const std::string current_adapter = (std::filesystem::path(cfg.output_dir) /
                 ("adapter-step-" + std::to_string(loop.step) + ".gguf")).string();
