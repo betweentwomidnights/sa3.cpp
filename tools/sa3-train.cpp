@@ -171,6 +171,16 @@ int main(int argc, char** argv) {
             snap << "latents_dir=" << (cfg.latents_dir.empty() ? "(none)" : cfg.latents_dir) << "\n";
             snap << "target_latent_rms=" << cfg.target_latent_rms << "\n";
             snap << "rank=" << cfg.rank << "\n";
+            snap << "lora_scope=" << cfg.lora_scope << "\n";
+            {   // resolved target count is logged to stderr; the snapshot records the request
+                auto csv = [](const std::vector<std::string>& v) {
+                    std::string o;
+                    for (size_t i = 0; i < v.size(); i++) { if (i) o += ","; o += v[i]; }
+                    return o;
+                };
+                snap << "lora_include=" << csv(cfg.lora_include) << "\n";
+                snap << "lora_exclude=" << csv(cfg.lora_exclude) << "\n";
+            }
             snap << "alpha=" << cfg.alpha << "\n";
             snap << "learning_rate=" << cfg.learning_rate << "\n";
             snap << "weight_decay=" << cfg.weight_decay << "\n";
@@ -248,6 +258,24 @@ int main(int argc, char** argv) {
                 targets.end());
         }
         if (targets.empty()) throw std::runtime_error("no DiT LoRA targets found");
+
+        // Say out loud what is being adapted. The scope and the filters change the parameter
+        // count silently otherwise, and the count is the thing you want to eyeball against the
+        // scope you asked for (core=168, full=228 on medium).
+        {
+            size_t block_targets = 0;
+            for (const sa3::TrainLoraTarget& t : targets)
+                if (sa3::train_lora_is_block_weight(t.weight_name)) block_targets++;
+            std::fprintf(stderr, "[train] lora scope: %s -> %zu targets (%zu per-block, %zu elsewhere)",
+                         cfg.lora_scope.c_str(), targets.size(), block_targets, targets.size() - block_targets);
+            if (!cfg.lora_include.empty() || !cfg.lora_exclude.empty()) {
+                std::fprintf(stderr, "  [filters:");
+                for (const std::string& p : cfg.lora_include) std::fprintf(stderr, " +%s", p.c_str());
+                for (const std::string& p : cfg.lora_exclude) std::fprintf(stderr, " -%s", p.c_str());
+                std::fprintf(stderr, "]");
+            }
+            std::fprintf(stderr, "\n");
+        }
 
         sa3::GgufModel svd_bases;
         const bool have_bases = !cfg.svd_bases_path.empty();
