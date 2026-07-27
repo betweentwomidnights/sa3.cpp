@@ -38,7 +38,7 @@ struct TrainConfig {
     // need --dataset and, optionally, --steps; every value remains individually overridable.
     std::string adapter_type = "dora-rows";
     int rank = 16;
-    float alpha = 16.0f;
+    float alpha = 0.0f;   // 0 => follow rank (resolved in train_finalize_defaults); scale = alpha/rank
     float learning_rate = 1.0e-4f;
     float weight_decay = 0.01f;
     float adam_beta1 = 0.9f;
@@ -404,6 +404,13 @@ inline bool train_parse_args(int argc, char** argv, TrainConfig& c, std::string&
 // gary4local/underfit prompt composition without adding another flag to the normal command.
 inline void train_finalize_defaults(TrainConfig& c) {
     namespace fs = std::filesystem;
+
+    // alpha follows rank unless asked otherwise. The adapter contributes at alpha/rank, so a
+    // fixed alpha silently attenuates every rank above it: --rank 128 against a hardcoded 16
+    // trains AND infers at 1/8 strength, which reads as "the LoRA did nothing" long after the
+    // run is over. Upstream MLX defaults alpha to rank (models/defs/lora.py, lora_train_mlx.py
+    // "Default: = rank"), and gary4local passes rank or 2*rank explicitly for the same reason.
+    if (c.alpha <= 0.0f) c.alpha = (float)c.rank;
     if (c.prompt_config_path.empty() && !c.dataset_dir.empty()) {
         const fs::path prompt = fs::path(c.dataset_dir) / "prompt_config.json";
         std::error_code ec;
@@ -513,7 +520,7 @@ inline std::string train_config_usage(const char* argv0) {
        << "core options: --model medium|small-music|small-sfx --models-dir DIR --dataset DIR --out DIR\n"
        << "              --steps N (alias: --max-steps; default 10000)\n"
        << "              --resume adapter-step-N.gguf|trainer-state-step-N.gguf (N -> --steps total)\n"
-       << "adapter: --adapter-type lora|dora-rows|dora-cols|bora|*-xs --rank N --alpha F\n"
+       << "adapter: --adapter-type lora|dora-rows|dora-cols|bora|*-xs --rank N --alpha F (default: = rank)\n"
        << "          --lora-scope full|core (full=228 weights, core=168 per-block projections)\n"
        << "          --lora-include a,b --lora-exclude a,b (substring filters, applied after scope)\n"
        << "optimization: --learning-rate F --batch-size N --threads N --frames N --duration SEC --seed N\n"

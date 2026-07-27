@@ -266,8 +266,10 @@ int main(int argc, char** argv) {
             size_t block_targets = 0;
             for (const sa3::TrainLoraTarget& t : targets)
                 if (sa3::train_lora_is_block_weight(t.weight_name)) block_targets++;
-            std::fprintf(stderr, "[train] lora scope: %s -> %zu targets (%zu per-block, %zu elsewhere)",
-                         cfg.lora_scope.c_str(), targets.size(), block_targets, targets.size() - block_targets);
+            std::fprintf(stderr, "[train] lora scope: %s -> %zu targets (%zu per-block, %zu elsewhere)"
+                                 "  rank %d alpha %.4g scale %.4g",
+                         cfg.lora_scope.c_str(), targets.size(), block_targets, targets.size() - block_targets,
+                         cfg.rank, (double)cfg.alpha, (double)cfg.alpha / (double)cfg.rank);
             if (!cfg.lora_include.empty() || !cfg.lora_exclude.empty()) {
                 std::fprintf(stderr, "  [filters:");
                 for (const std::string& p : cfg.lora_include) std::fprintf(stderr, " +%s", p.c_str());
