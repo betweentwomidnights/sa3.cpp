@@ -17,6 +17,7 @@ for progress and, on completion, the base64 audio. That makes it a drop-in for a
 #       --prompts-dir DIR (or SA3_PROMPTS_DIR)
 #       --source-loras-dir DIR (or SA3_SOURCE_LORAS_DIR)
 #       --web-dir DIR (or SA3_WEB_DIR) — serve a front-end at / ; omit for API only
+#       --audio-in-dir DIR (or SA3_AUDIO_IN_DIR) — init-audio pool for browser clients
 ```
 
 on Windows, after `.\build.cmd cuda`, `server.cmd` picks the built backend and keeps the server in the terminal (close it or Ctrl+C to stop). extra args pass through:
@@ -38,6 +39,8 @@ it binds to `127.0.0.1` by default (local only). The model loads lazily on the f
 | `POST` | `/generate/loop` | same request plus `bpm`/prompt BPM and `bars` for exact-length loop generation |
 | `GET`  | `/poll_status/<session_id>` | `{success, generation_in_progress, progress, step, total_steps, status, queue_status, ...}`; on `status:"completed"` also `audio_data` (base64 wav) + `meta:{seed}` |
 | `POST` | `/unload`   | frees the model (full VRAM release) → `{status:"unloaded"}` |
+| `GET`  | `/init-audio` | `{success, files:[{name,path,bytes}], audio_in_dir, max_upload_bytes}` — the init-audio pool |
+| `POST` | `/init-audio/upload` | multipart `file=` → `{success, name, path, bytes}`; the returned `path` is what you pass as `init_path` |
 
 `status` runs `queued → generating → encoding → completed` (or `failed`); `progress` is `0..100`
 (sampling `0→90`, decode `→100`). poll until `status == "completed"`, then base64-decode `audio_data`.
@@ -214,6 +217,51 @@ next request — keeps host-process memory low (good for an embedded/VST context
 strength correct for free. for a long-running service that wants lowest latency, send `keep_models:true`
 and call `POST /unload` from your orchestrator when you need the VRAM back (model-switch, idle, pressure) —
 the same pattern as the pytorch sa3 service.
+
+## the init-audio pool (`--audio-in-dir`)
+
+`/generate` takes `init_path`, a path on the server's filesystem. That is the right shape for a
+DAW plug-in or a DAW extension: it can write a wav anywhere and name it. A browser cannot. It has
+no filesystem to write to and no way to learn which paths exist, so without these two endpoints a
+browser front-end can do text2music but not audio2audio, continuation or inpaint.
+
+```sh
+sa3-server --audio-in-dir ./audio-in     # or SA3_AUDIO_IN_DIR; defaults to ./audio-in
+```
+
+`GET /init-audio` lists the `.wav` files in the pool with their absolute paths. `POST
+/init-audio/upload` takes a multipart `file=` part and puts one there. The `path` it returns is
+exactly what you hand back as `init_path`, so the round trip is: upload, take the path, generate.
+
+Nothing else uses these. A client that can already write files should keep passing `init_path`
+directly and ignore them.
+
+### what the upload accepts
+
+The filename in a multipart part is attacker-controlled, so it is checked rather than cleaned:
+
+- **bare filenames only.** anything that is not already a plain name is rejected, not normalised.
+  `../../x.wav` is a `400`, not a quiet rename to `x.wav` — a client sending that is broken or
+  hostile and should hear about it. This matters more than it looks: `fs::path(dir) / name` does
+  **not** keep the result under `dir` if `name` is absolute, so `C:/Windows/Temp/x.exe` would
+  otherwise be written there verbatim.
+- **`.wav` only**, since that is what `init_path` can read.
+- **no dotfiles**, no Windows reserved device names (`con`, `nul`, `lpt1`, … — still reserved
+  with an extension), and an allowlist of characters rather than a denylist.
+- **256 MiB cap.** 300 s of stereo 44.1 kHz f32 is ~106 MiB and `SA3_MAX_DURATION` caps generation
+  at 300 s, so this is generous. An oversized body is refused with `413`, and refused *mid-stream*:
+  the upload is written straight to disk under a `.part` name and renamed on success, so it is
+  never buffered whole in memory and a client that disconnects halfway leaves nothing behind.
+- **an existing name is replaced.** re-uploading `drums.wav` overwrites it, which is what a UI
+  re-dragging the same file expects.
+
+Uploading is a write endpoint. It inherits the server's default `127.0.0.1` bind, and that is the
+only thing standing between it and the network — if you pass `--host 0.0.0.0`, anyone who can reach
+the port can put files in the pool. The server warns loudly at startup when it is bound to anything
+that is not loopback, rather than refusing: serving a LAN is a legitimate thing to want, it should
+just be a decision instead of a surprise. Note also that a localhost bind is not a trust boundary in a
+browser: any page the user has open can `POST` `multipart/form-data` cross-origin to `127.0.0.1`.
+The checks above are what keep that from being interesting.
 
 ## serving a front-end (`--web-dir`)
 
