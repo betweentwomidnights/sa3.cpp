@@ -169,6 +169,29 @@ pass `--svd-bases bases.gguf` to load precomputed bases instead — generate the
 `python tools/compute_svd_bases.py --dit models/... --rank 8 --out bases.gguf` for exact
 `torch.linalg.svd` parity with the reference implementation.
 
+Accepted is not the same as working. Six of the eight train today; the two column-normalizing
+families do not:
+
+| adapter type | trains | s/step |
+|---|---|---|
+| `lora` | yes | 0.5 |
+| `dora-rows` (default) | yes | 3.2 |
+| `lora-xs` | yes | 16.3 |
+| `dora-rows-xs` | yes | 30.9 |
+| `bora` | yes | 59.4 |
+| `bora-xs` | yes | 69.6 |
+| `dora-cols` | **no** | — |
+| `dora-cols-xs` | **no** | — |
+
+`dora-cols` and `dora-cols-xs` abort during the backward pass with
+`GGML_ASSERT(ggml_is_padded_1d(a))` in `ggml_build_backward_expand`, which correlates with the
+column normalization those two share.
+
+Timings are CUDA / RTX 5070 Laptop, medium, 128 frames, and are meant as ratios rather than
+absolutes. The spread matters when planning a run: `dora-rows` at 3.2 s/step is a couple of hours
+for 2000 steps, while `bora-xs` at 69.6 s/step is closer to a day and a half for the same
+schedule. `dora-rows` is the default and by far the best-trodden path.
+
 Each sample is conditioned by its caption text. A dataset-level `prompt_config.json` can optionally
 compose that caption with general metadata tags or path-derived text.
 

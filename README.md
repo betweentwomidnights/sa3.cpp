@@ -129,9 +129,14 @@ what's next:
   toggle / philox-style approach (cf. [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp)) so a seed
   carries across backends for A/B testing
 
-> note: **dora-rows and bora are both validated end-to-end against trained checkpoints at cossim 1.0**
-> (kev/keygen for dora-rows; a trained koan bora adapter for bora). dora-cols and the -xs variants are
-> formula-validated only (no trained checkpoint to a/b yet), but share the same apply path.
+> note: **generation** handles all eight families. dora-rows and bora are validated against trained
+> checkpoints at cossim 1.0 (kev/keygen for dora-rows; a trained koan bora adapter for bora);
+> dora-cols and the -xs variants are formula-validated only (no trained checkpoint to a/b yet) but
+> share the same apply path.
+>
+> **training an adapter here** covers six of the eight. dora-cols and dora-cols-xs currently abort in
+> the backward pass, and the bora families train correctly but ~110x slower per step than lora, so a
+> full run takes over a day. see [docs/TRAINING.md](docs/TRAINING.md).
 
 credits:
 
