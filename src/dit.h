@@ -13,6 +13,7 @@
 #include <cmath>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace sa3 {
 
@@ -45,13 +46,24 @@ struct DitConfig {
     }
 };
 
-// Functional LoRA/DoRA application, used only by the training graph (see functional-lora-speed-plan).
-// A DitLora maps a weight-tensor name -> its trainable adapter tensors. When `dl` is null (all
-// inference callers) or has no entry for `name`, dit_lin is byte-identical to nn::linear:
-// mul_mat(W,x) then optional bias. When an entry exists, the adapter is applied FUNCTIONALLY as
-// small rank-sized matmuls, so autodiff never forms a full [in,out] weight gradient (the out_prod
-// that made the materialized-effective-weight path ~27x slower than PyTorch).
+// Functional LoRA/DoRA application, used by the training graph (see functional-lora-speed-plan)
+// and by inference over a quantized base (see build_functional_lora in lora.h). A DitLora maps a
+// weight-tensor name -> its adapter tensors. When `dl` is null or has no entry for `name`, dit_lin
+// is byte-identical to nn::linear: mul_mat(W,x) then optional bias. When an entry exists, the
+// adapter is applied FUNCTIONALLY as small rank-sized matmuls, which serves both callers: autodiff
+// never forms a full [in,out] weight gradient (the out_prod that made the materialized-
+// effective-weight path ~27x slower than PyTorch), and W is only ever a mul_mat argument, so it
+// never has to be dequantized or rewritten.
+
+// One low-rank residual in a composed chain: scale · B @ (A @ x). See DitLoraParam::terms.
+struct DitLoraTerm {
+    ggml_tensor* A = nullptr;            // [in, rank]
+    ggml_tensor* B = nullptr;            // [rank, out]
+    float scale = 1.0f;                  // (alpha/rank) · strength
+};
+
 struct DitLoraParam {
+    // ---- training: one adapter, norms recomputed every step because A and B move ----
     ggml_tensor* A = nullptr;            // [in, rank]   trainable
     ggml_tensor* B = nullptr;            // [rank, out]  trainable
     ggml_tensor* magnitude = nullptr;    // dora-rows [out] trainable, else null
@@ -59,6 +71,20 @@ struct DitLoraParam {
     float scale = 1.0f;                  // alpha / rank
     bool  dora = false;                  // apply dora-rows column normalization
     int64_t in = 0;                      // input dim (reference / eps bookkeeping)
+
+    // ---- inference: a composed chain of N adapters, all row scales precomputed ----
+    // Sequentially merging adapters 1..N (each reading the previous effective weight, which is
+    // what apply_loras does) is EXACTLY equivalent to
+    //     y = base_scale ⊙ (W@x) + Σ_k scale_k · B'_k @ (A_k @ x)
+    // where the dora row scales are folded in as constants: with d_j the row scale of dora
+    // adapter j, the base carries the product of every d_j, and residual k carries the product
+    // of the d_j for adapters at position >= k (so a later dora rescales earlier residuals,
+    // which is exactly why the chain does not commute). Each B'_k is B_k with its constant
+    // row scale already baked in, so the per-step graph costs one broadcast multiply total
+    // rather than one per adapter. All of it is constant because W, A, B and magnitude are
+    // frozen at inference — build_functional_lora computes it once. Empty for training.
+    std::vector<DitLoraTerm> terms;
+    ggml_tensor* base_scale = nullptr;   // [out] constant, or null for 1.0 (no dora in the chain)
 };
 using DitLora = std::map<std::string, DitLoraParam>;
 
@@ -79,7 +105,17 @@ inline ggml_tensor* dit_lin(ggml_context* ctx, const GgufModel& W, const std::st
     // past VRAM into driver sysmem paging (the 25x slowdown).
     ggml_tensor* wl = w;
     ggml_tensor* y = ggml_mul_mat(ctx, wl, x);                 // [out, seq]
-    if (p) {
+    if (p && !p->terms.empty()) {
+        // Inference: a precomputed chain of N adapters. See DitLoraParam::terms — every dora
+        // row scale is already folded into base_scale and into each B'_k, so composing adapters
+        // costs nothing here beyond the residuals themselves.
+        if (p->base_scale) y = ggml_mul(ctx, y, p->base_scale);  // broadcast over seq
+        for (const DitLoraTerm& t : p->terms) {
+            ggml_tensor* ax  = ggml_mul_mat(ctx, t.A, x);        // [rank, seq]
+            ggml_tensor* bax = ggml_mul_mat(ctx, t.B, ax);       // [out, seq]
+            y = ggml_add(ctx, y, ggml_scale(ctx, bax, t.scale));
+        }
+    } else if (p) {
         // LoRA applied functionally: y += scale · B @ (A @ x)  (== mul_mat(W + s·A@B, x)).
         ggml_tensor* ax  = ggml_mul_mat(ctx, p->A, x);          // [rank, seq]
         ggml_tensor* bax = ggml_mul_mat(ctx, p->B, ax);         // [out, seq]

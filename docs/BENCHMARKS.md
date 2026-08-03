@@ -98,6 +98,120 @@ generation is basically a base generation plus ~0.1s per adapter. the in-place p
 a separate copy of the dora'd dit (~2.9gb) would push vram back over 8gb and thrash. on the
 host loops this same apply was ~14s.
 
+### functional apply — the path a quantized base needs (experimental)
+
+the in-place merge cannot run on a quantized base at all. it has to read `W` out and write
+`W_eff` back, and neither direction has a route for k-quant types: the graph path aborts in
+`ggml_cast` (`unsupported type combination (q6_K to f32)`) and the host path cannot re-pack an
+f32 result into Q4_K storage. so `--lora X --encoding q4_k_m` used to be a hard abort.
+
+the alternative is to not merge at all — hand the adapter tensors to `dit_lin` and let it fold
+them into the graph as `y = W@x + s·B@(A@x)` plus the dora row scale. `W` is then only ever an
+argument to `mul_mat`, and quantized `mul_mat` works everywhere. this is the same formulation
+the training graph already used; inference simply passed `dl = nullptr`. see `src/lora.h` for
+the derivation and the limits.
+
+medium, 20s output, 8 steps, kev (dora-rows, rank 16), warm, base-norm cache primed:
+
+| backend | path | dit_compute | total | peak vram |
+|---|---|---|---|---|
+| cuda | f16 + merged | 699 ms | 5653 ms | 2994 MiB |
+| cuda | q4_k_m + functional | 728 ms | **3545 ms** | **1278 MiB** |
+| vulkan | f16 + merged | 523 ms | 6674 ms | 3049 MiB |
+| vulkan | q4_k_m + functional | 712 ms | **4310 ms** | **1248 MiB** |
+| metal m4 | f16 + merged | 4925 ms | 13520 ms | 3071 MiB |
+| metal m4 | q4_k_m + functional | 6340 ms | **11720 ms** | **1973 MiB** |
+
+37% faster end to end on cuda, 35% on vulkan, 13% on metal, and ~58%/~59%/36% less memory. note
+the win is not per-step: `dit_compute` is *worse* functionally (+4% cuda, +36% vulkan, +22%
+metal), because the residual matmuls are real per-step work that the merged path does once up
+front. the end-to-end gain comes from loading a 1532 MiB model instead of a 4399 MiB one. vulkan
+pays more per step than cuda for the same graph, so on a backend where load time did not
+dominate this could invert.
+
+**on metal at 8 steps it already inverts, even on f16**: merging costs ~2.4 s up front there, and
+at 8 steps that outweighs the accumulated residual cost.
+
+| steps (metal m4, f16) | merged | functional |
+|---:|---:|---:|
+| 8 | 13.52 s | **12.18 s** |
+| 32 | 29.30 s | 29.97 s |
+
+crossover is ~20–25 steps and 8 is the common case, but the default is deliberately left alone:
+one machine and one adapter type is not enough to move it, and `dora-rows` merging also pays for
+the dora row work that a plain `lora` merge would not. if the crossover holds on cuda/vulkan too
+then the heuristic wants to be step-count aware rather than dtype-aware, which is its own change.
+
+two things make it viable rather than merely possible:
+
+- **precomputed row scale.** `dit_lin` recomputes the dora-rows norms every step via
+  `mul_mat(W, A)` over the full base weight, which it must do while training because A and B
+  move. at inference `W`, `A` and `B` are all frozen, so `magnitude/||W + s·A@B||_row` is a
+  constant. computing it once cut `dit_compute` from 885 ms to 722 ms (+47% → +20%).
+- **cached base norms.** `base_norm_sq` needs every targeted weight pulled to the host and
+  squared, ~1.5B elements for the medium dit: +3.4 s on q4_k_m and +4.6 s on f16 (worse there,
+  larger weights to transfer — not a quantization problem). it depends only on the base
+  weights, so it is cached in `<model>.gguf.norms`, keyed on the model's byte size. first run
+  6647 ms, every run after 3512 ms. the sidecar is 3.3 MB for 228 tensors and is
+  backend-independent — a cache written by cuda is reused by vulkan.
+
+### multiple adapters compose exactly
+
+blending several adapters is central to how these models get used, so the functional path
+composes a whole chain rather than handling one adapter. merging sequentially (each adapter
+reading the previous one's `W_eff`, which is what `apply_loras` does) expands with no
+approximation into
+
+```
+y = c_0 ⊙ (W@x) + Σ_k s_k · c_k ⊙ (B_k @ (A_k @ x))
+c_0 = Π_{dora j} d_j        c_k = Π_{dora j, j >= k} d_j
+```
+
+with `d_j` the dora row scale of adapter `j`. every `c` is constant at inference, so they are
+precomputed once and folded into the term tensors — the per-step graph costs one broadcast
+multiply plus the residuals, regardless of how many adapters are stacked. a later dora rescaling
+earlier residuals is exactly why the chain does not commute, and the recursion preserves that.
+`tests/lora_compose_test.cpp` pins this against the real merge path over 16 chains.
+
+precompute reuses what one adapter already needed: `base_norm_sq` (unchanged, and still
+adapter-independent, so the sidecar stays valid), one `mul_mat(W, A_k)` per adapter, and one
+rank×rank gram per adapter *pair*. a purely additive chain needs no norms at all and skips the
+host read entirely.
+
+### accuracy
+
+judge this per forward pass, not per generation. **at one diffusion step, functional vs merged on
+the same f16 base is 0.999878 (one adapter) and 0.999876 (two adapters)** — composition adds no
+error. over 8 steps the same comparison lands anywhere from 0.977 to 0.9995 because a ~1e-4
+per-pass difference compounds into a different-but-valid trajectory; those numbers move with the
+prompt and seed and should not be read as a quality ordering. metal measured 0.999711 over 8
+steps, cuda 0.991400 and vulkan 0.950966, against 0.9968 for identical weights across cuda/cpu
+and 0.9714 for medium f16 across cuda/vulkan — vulkan is simply looser between any two paths.
+
+two composed adapters (kev + keygen, both dora-rows rank 16, 228 targets, cuda, 20s/8 steps):
+
+| path | dit_compute | total | peak vram |
+|---|---|---|---|
+| f16 + merged | 816 ms | 6724 ms | 3213 MiB |
+| q4_k_m + functional | 1033 ms | **4230 ms** | **1423 MiB** |
+
+37% faster end to end and 56% less vram, with a bigger per-step cost (+27%) than one adapter
+because there are now two residuals per target.
+
+### defaults and limits
+
+f16/f32 bases still merge by default — it costs nothing per step. the functional path engages
+when the base is quantized, or when `SA3_FUNCTIONAL_LORA` is set to anything but `0`, to a/b the
+two on f16.
+
+the supported families are the row-normalizing ones — `lora`, `dora-rows`, and their `-xs`
+variants (`U @ M_xs @ Vᵗ` is still rank-r, so it regroups into the same terms) — in any number
+and any mix. `dora-cols` and `bora` still fall back to merging, so they need f16/f32. their
+scale factors onto the *input* rather than the output, which needs a column norm of the base
+weighted by the row scales accumulated so far — chain-dependent, so unlike `base_norm_sq` it
+cannot be cached per base — plus cross terms contracting against `Wᵗ`, which quantized `mul_mat`
+does not support.
+
 ## flash attention (opt-in)
 
 `ggml_flash_attn_ext` is a fused attention op every gpu backend implements, so the same flag

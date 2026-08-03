@@ -28,12 +28,13 @@ bench/
 loras/*
 !loras/README.md
 
-# Model weights / checkpoints
+# Model weights / checkpoints (*.norms = derived base-norm cache, regenerated on demand)
 models/*
 !models/README.md
 checkpoints/
 train-runs/
 *.gguf
+*.norms
 *.safetensors
 metrics.jsonl
 config.snapshot.txt

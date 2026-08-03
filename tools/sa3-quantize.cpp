@@ -48,6 +48,12 @@ static const QuantMix MIXES[] = {
     // unreachable, leaving the backends' q5_K get_rows kernels untested by this tool.
     { "q5_k",   GGML_TYPE_Q5_K, GGML_TYPE_Q5_K },
     { "q8_0",   GGML_TYPE_Q8_0, GGML_TYPE_Q8_0 },
+    // Re-encode targets rather than quantization. --mix f16 on an already-quantized gguf
+    // dequantizes it back to F16, keeping the quantization error: an F16-sized model that is
+    // numerically the quantized one. Lets code paths that cannot read quantized tensors
+    // (LoRA weight-space merging) be measured against quantized weights.
+    { "f16",    GGML_TYPE_F16,  GGML_TYPE_F16  },
+    { "f32",    GGML_TYPE_F32,  GGML_TYPE_F32  },
 };
 
 // Compact spellings accepted for convenience; they resolve to the canonical mix above.
@@ -125,11 +131,13 @@ int main(int argc, char ** argv) {
 
     if (!in_path || !out_path || !mixp) {
         if (in_path && out_path && !mixp) fprintf(stderr, "error: unknown --mix '%s'\n", mix_name);
-        fprintf(stderr, "Usage: sa3-quantize --in <input.gguf> --out <output.gguf> [--mix q4_k_m|q5_k_m|q5_k|q8_0]\n");
+        fprintf(stderr, "Usage: sa3-quantize --in <input.gguf> --out <output.gguf> [--mix q4_k_m|q5_k_m|q5_k|q8_0|f16|f32]\n");
         fprintf(stderr, "  q4_k_m  V/down/embed -> Q6_K, rest -> Q4_K   (default)\n");
         fprintf(stderr, "  q5_k_m  V/down/embed -> Q6_K, rest -> Q5_K\n");
         fprintf(stderr, "  q5_k    everything   -> Q5_K   (no Q6_K promotion; exercises q5_K get_rows)\n");
         fprintf(stderr, "  q8_0    everything   -> Q8_0\n");
+        fprintf(stderr, "  f16     everything   -> F16   (re-encode; dequantizes a quantized input)\n");
+        fprintf(stderr, "  f32     everything   -> F32   (re-encode)\n");
         fprintf(stderr, "Skips sa3-conditioner/sa3-tokenizer (must stay F32).\n");
         return 1;
     }
@@ -185,8 +193,8 @@ int main(int argc, char ** argv) {
     fclose(f);
 
     // Pre-init quantization tables
-    ggml_quantize_init(mix.body);
-    if (mix.critical != mix.body) ggml_quantize_init(mix.critical);
+    if (ggml_is_quantized(mix.body)) ggml_quantize_init(mix.body);
+    if (ggml_is_quantized(mix.critical) && mix.critical != mix.body) ggml_quantize_init(mix.critical);
 
     // ── Build output context (metadata only, no data yet) ────
     struct gguf_context * out_ctx = gguf_init_empty();
@@ -273,13 +281,32 @@ int main(int argc, char ** argv) {
             for (int64_t j = 0; j < n_elems; j++) {
                 f32_buf[j] = ggml_fp16_to_fp32(f16[j]);
             }
+        } else if (ggml_is_quantized(stype)) {
+            // Quantized input: dequantize row by row via the type's own reference
+            // unpacker, so re-encoding an already-quantized gguf works (--mix f16
+            // round-trips a k-quant model back to F16 with its quantization error baked in).
+            const ggml_type_traits * tr = ggml_get_type_traits(stype);
+            if (!tr || !tr->to_float) {
+                fprintf(stderr, "ERROR: no dequantizer for %s\n", ggml_type_name(stype));
+                return 1;
+            }
+            const size_t row_bytes = ggml_row_size(stype, ne0);
+            for (int64_t r = 0; r < ne1; r++) {
+                tr->to_float(src_ptr + (size_t)r * row_bytes, f32_buf.data() + r * ne0, ne0);
+            }
         } else {
             fprintf(stderr, "ERROR: unsupported type %s\n", ggml_type_name(stype));
             return 1;
         }
 
         char * dst = data_buf.data() + out_off;
-        ggml_quantize_chunk(dtype, f32_buf.data(), dst, 0, ne1, ne0, nullptr);
+        if (dtype == GGML_TYPE_F32) {
+            memcpy(dst, f32_buf.data(), (size_t)n_elems * sizeof(float));
+        } else if (dtype == GGML_TYPE_F16) {
+            ggml_fp32_to_fp16_row(f32_buf.data(), (ggml_fp16_t *)dst, n_elems);
+        } else {
+            ggml_quantize_chunk(dtype, f32_buf.data(), dst, 0, ne1, ne0, nullptr);
+        }
 
         fprintf(stderr, "%s  [%lld x %lld]\n",
                 ggml_type_name(dtype), (long long)ne0, (long long)ne1);
