@@ -278,10 +278,25 @@ inline bool train_accum_read_subset(ggml_cgraph* graph, const TrainDitCkpt& ck,
             if (!found) { err = "missing gradient for " + tp.stem + " lora_B"; return false; }
             train_accum_add(accum.B[i], grad);
         }
+        if (tp.M_xs) {
+            if (!train_read_grad(graph, tp.M_xs, grad, found, err)) return false;
+            if (!found) { err = "missing gradient for " + tp.stem + " M_xs"; return false; }
+            train_accum_add(accum.mxs[i], grad);
+        }
         if (tp.magnitude) {
             if (!train_read_grad(graph, tp.magnitude, grad, found, err)) return false;
             if (!found) { err = "missing gradient for " + tp.stem + " magnitude"; return false; }
             train_accum_add(accum.mag[i], grad);
+        }
+        if (tp.magnitude_r) {
+            if (!train_read_grad(graph, tp.magnitude_r, grad, found, err)) return false;
+            if (!found) { err = "missing gradient for " + tp.stem + " magnitude_r"; return false; }
+            train_accum_add(accum.mag_r[i], grad);
+        }
+        if (tp.magnitude_c) {
+            if (!train_read_grad(graph, tp.magnitude_c, grad, found, err)) return false;
+            if (!found) { err = "missing gradient for " + tp.stem + " magnitude_c"; return false; }
+            train_accum_add(accum.mag_c[i], grad);
         }
     }
     return true;
@@ -318,8 +333,15 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
         const TrainDitParamTensors& tp = ck.params[i];
         if (tp.lora_A) ggml_backend_tensor_set(tp.lora_A, hp.lora_A.data(), 0, hp.lora_A.size() * sizeof(float));
         if (tp.lora_B) ggml_backend_tensor_set(tp.lora_B, hp.lora_B.data(), 0, hp.lora_B.size() * sizeof(float));
+        if (tp.U) ggml_backend_tensor_set(tp.U, hp.U.data(), 0, hp.U.size() * sizeof(float));
+        if (tp.V) ggml_backend_tensor_set(tp.V, hp.V.data(), 0, hp.V.size() * sizeof(float));
+        if (tp.M_xs) ggml_backend_tensor_set(tp.M_xs, hp.M_xs.data(), 0, hp.M_xs.size() * sizeof(float));
         if (tp.magnitude && !hp.magnitude.empty())
             ggml_backend_tensor_set(tp.magnitude, hp.magnitude.data(), 0, hp.magnitude.size() * sizeof(float));
+        if (tp.magnitude_r && !hp.magnitude_r.empty())
+            ggml_backend_tensor_set(tp.magnitude_r, hp.magnitude_r.data(), 0, hp.magnitude_r.size() * sizeof(float));
+        if (tp.magnitude_c && !hp.magnitude_c.empty())
+            ggml_backend_tensor_set(tp.magnitude_c, hp.magnitude_c.data(), 0, hp.magnitude_c.size() * sizeof(float));
     }
     // step inputs
     std::vector<float> tf;
