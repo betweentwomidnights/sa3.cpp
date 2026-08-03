@@ -8,7 +8,9 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 from model_artifacts import build_download_plan, dit_filename, dit_identity
 from stage_training_base_repos import notice_text
@@ -55,7 +57,7 @@ class ModelArtifactsTest(unittest.TestCase):
     def assert_downloader_plan(self, command):
         result = subprocess.run(
             command,
-            cwd=Path(__file__).resolve().parents[1],
+            cwd=REPO_ROOT,
             check=True,
             text=True,
             capture_output=True,
@@ -69,6 +71,9 @@ class ModelArtifactsTest(unittest.TestCase):
         )
         self.assertIn("t5gemma-b-b-ul2-v1.0-vocab.gguf", output)
 
+    # models.sh stays a RELATIVE path: shutil.which("bash") may resolve to the WSL shim in
+    # WindowsApps, whose filesystem namespace has no C:\ — an absolute Windows path fails there
+    # with exit 127, while a relative one resolves against the cwd WSL translates for us.
     def test_shell_downloader_training_base_plan(self):
         bash = shutil.which("bash")
         if not bash:
@@ -78,10 +83,16 @@ class ModelArtifactsTest(unittest.TestCase):
             "--training-base", "--dry-run", "--out", "test-models",
         ])
 
+    # models.cmd, by contrast, is named ABSOLUTELY: `cmd.exe /c models.cmd` resolves the script
+    # through the executable search, and a process environment carrying
+    # NoDefaultCurrentDirectoryInExePath=1 drops the current directory from that search (agent and
+    # tool shells set it; ordinary shells and CI do not). The test would then fail with
+    # "'models.cmd' is not recognized" despite cwd being correct — a false alarm about the
+    # downloader, so pin the path rather than depend on the lookup.
     @unittest.skipUnless(os.name == "nt", "Windows command script")
     def test_cmd_downloader_training_base_plan(self):
         self.assert_downloader_plan([
-            "cmd.exe", "/d", "/c", "models.cmd", "--variant", "small-sfx",
+            "cmd.exe", "/d", "/c", str(REPO_ROOT / "models.cmd"), "--variant", "small-sfx",
             "--encoding", "f32", "--training-base", "--dry-run", "--out", "test-models",
         ])
 
