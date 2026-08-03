@@ -995,15 +995,17 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             // base the merge is still the default (it costs nothing per step); SA3_FUNCTIONAL_LORA
             // forces the functional path there too, for A/B against the merged reference.
             const bool quantized = dit_base_is_quantized(DIT);
-            const bool want_functional = quantized || getenv("SA3_FUNCTIONAL_LORA");
+            const char* fenv = getenv("SA3_FUNCTIONAL_LORA");
+            const bool want_functional = quantized || (fenv && strcmp(fenv, "0") != 0);
             if (want_functional && sa3::functional_lora_ok(dit_adapters_)) {
                 dit_functional_ = sa3::build_functional_lora(DIT, dit_adapters_, paths_.dit);
             }
             if (!dit_functional_.active) {
                 if (quantized)
                     throw std::runtime_error(
-                        "lora: a quantized DiT (--encoding q4_k_m/q5_k_m/q8_0) supports one "
-                        "'lora' or 'dora-rows' adapter at a time; use --encoding f16 for this set");
+                        "lora: a quantized DiT (--encoding q4_k_m/q5_k_m/q8_0) supports the "
+                        "'lora' and 'dora-rows' families (including -xs), any number of them; "
+                        "'dora-cols'/'bora' must be merged, so use --encoding f16 for this set");
                 sa3::apply_loras(DIT, dit_adapters_);
                 dit_merged_ = true;
                 dit_adapters_.clear();       // merged into W; nothing to keep resident

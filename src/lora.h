@@ -16,6 +16,7 @@
 #include "ggml.h"
 #include "gguf_model.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -249,10 +250,22 @@ inline LoraStack apply_loras(GgufModel& base, std::vector<LoraAdapter>& adapters
 // backend, so the base never has to be dequantized or rewritten. This is the same
 // formulation the training graph already uses; inference simply passed dl = nullptr.
 //
+// Adapters COMPOSE, in the same order and with the same semantics as the merge path. Merging
+// sequentially gives W_N where V_j = W_{j-1} + s_j·B_j@A_j and W_j = diag(d_j)·V_j for dora-rows,
+// which expands exactly (no approximation) into
+//     y = c_0 ⊙ (W@x) + Σ_k s_k · c_k ⊙ (B_k @ (A_k @ x)),
+//     c_0 = Π_{dora j} d_j,   c_k = Π_{dora j, j >= k} d_j.
+// Every d_j is constant at inference, so the c's are precomputed here and folded into the term
+// tensors; see DitLoraParam::terms. A later dora rescaling earlier residuals is precisely why
+// the chain does not commute, and the recursion below preserves that.
+//
 // Limits (both fall back to the merge path):
-//   - one adapter at a time. DitLoraParam holds a single A/B per target, and DoRA does not
-//     commute, so composing several functionally is not a matter of summing them.
-//   - "lora" and "dora-rows" only, matching what dit_lin implements.
+//   - the row-normalizing families only: "lora", "dora-rows" and their "-xs" variants.
+//     "dora-cols"/"bora" normalize over `in`, so their scale factors onto the INPUT rather than
+//     the output. Composing those functionally would need a column norm of the base weighted by
+//     the row scales accumulated so far — chain-dependent, so unlike base_norm_sq it cannot be
+//     cached per base — and cross terms of the form Σ_out W[o,i]·B[o,r], a contraction against
+//     Wᵀ that quantized mul_mat does not support. They stay merged, hence f16/f32 only.
 struct FunctionalLora {
     DitLora               map;
     ggml_context*         ctx = nullptr;   // owns the base_norm_sq constants
@@ -334,83 +347,109 @@ inline void save(const std::string& model_path, const std::map<std::string, std:
 
 } // namespace normcache
 
-inline bool functional_lora_ok(const std::vector<LoraAdapter>& adapters) {
-    if (adapters.size() != 1) return false;
-    const std::string& t = adapters[0].type;
-    return t == "lora" || t == "dora-rows";
+// "-xs" families store the low-rank update as U @ M_xs @ Vᵗ instead of B @ A. That is still
+// rank-r, so regrouping gives A_eff = (M_xs @ V)ᵗ and B_eff = U — the same term structure, one
+// small [in,rank] product computed once below.
+inline bool functional_lora_is_xs(const std::string& t) {
+    return t.size() >= 3 && t.compare(t.size() - 3, 3, "-xs") == 0;
 }
 
-// Build the dit_lin adapter map for `adapters[0]` over `base`. Adapter tensors must already
-// live on base.backend (load_lora(..., base.backend)); only the dora-rows base_norm_sq
-// constants are allocated here, computed on the host from W (quantized W included).
+inline bool functional_lora_family_ok(const std::string& t) {
+    return t == "lora" || t == "dora-rows" || t == "lora-xs" || t == "dora-rows-xs";
+}
+
+inline bool functional_lora_ok(const std::vector<LoraAdapter>& adapters) {
+    if (adapters.empty()) return false;
+    for (auto& a : adapters) if (!functional_lora_family_ok(a.type)) return false;
+    return true;
+}
+
+// Build the dit_lin adapter map for the whole `adapters` chain over `base`. Adapter tensors must
+// already live on base.backend (load_lora(..., base.backend)). Everything allocated here is a
+// constant: the per-target base row scale, the row-scaled B' for each residual, and the -xs A_eff.
+// The base weight W is read on the host only for base_norm_sq (cached in the sidecar); every other
+// use of W is a mul_mat, which is what lets a quantized base carry adapters at all.
 inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAdapter>& adapters,
                                             const std::string& base_path = "") {
     FunctionalLora fl;
     if (!functional_lora_ok(adapters)) return fl;
-    LoraAdapter& a = adapters[0];
-    const bool dora = (a.type == "dora-rows");
 
-    std::map<std::string, std::vector<float>> nsq_cache;
-    bool cache_hit = false, cache_dirty = false;
-    if (dora && !base_path.empty()) cache_hit = normcache::load(base_path, nsq_cache);
+    // One adapter's contribution to one target, in chain order.
+    struct Entry {
+        size_t ai = 0;                 // index into `adapters` -- the chain order
+        bool   dora = false, xs = false;
+        bool   scaled = false;         // a dora at this position or later rescales this residual
+        float  scale = 1.0f;           // (alpha/rank) · strength
+        ggml_tensor* Aeff = nullptr;   // persistent [in,rank], -xs only
+        ggml_tensor* Bp   = nullptr;   // persistent [rank,out] B with its row scale baked in
+    };
+    struct Plan {
+        std::string wname, stem;
+        int64_t in = 0, out = 0;
+        bool any_dora = false;
+        std::vector<Entry> chain;
+        std::vector<float> nsq0;             // host base_norm_sq, only when any_dora
+        ggml_tensor* nsq0_t = nullptr;       // scratch upload of the above
+        ggml_tensor* base_scale = nullptr;   // persistent [out], only when any_dora
+    };
 
-    std::vector<std::string> targets;
+    // ---- plan every target: which adapters hit it, in order ----
+    std::vector<Plan> plans;
     for (auto& kv : base.tensors) {
         const std::string& wname = kv.first;
         if (wname.size() < 7 || wname.compare(wname.size()-7, 7, ".weight") != 0) continue;
-        if (a.gguf.has(wname.substr(0, wname.size()-7) + ".lora_A")) targets.push_back(wname);
-    }
-    if (targets.empty()) return fl;
-
-    // Two persistent f32 [out] constants per dora-rows target: base_norm_sq (host-computed)
-    // and row_scale (filled by the one-shot graph below).
-    ggml_init_params ip = { (2*targets.size()+4)*ggml_tensor_overhead(), nullptr, true };
-    fl.ctx = ggml_init(ip);
-    std::vector<ggml_tensor*> norms, scales;
-    std::vector<std::vector<float>> norm_host;
-    for (auto& wname : targets) {
-        ggml_tensor* W0 = base.tensors[wname];
-        const int64_t in = W0->ne[0], out = W0->ne[1];
-        std::string stem = wname.substr(0, wname.size()-7);
-        DitLoraParam p;
-        p.A     = a.gguf.get(stem + ".lora_A");
-        p.B     = a.gguf.get(stem + ".lora_B");
-        p.scale = (a.alpha / a.rank) * a.strength;
-        p.dora  = dora;
-        p.in    = in;
-        if (dora) {
-            p.magnitude = a.gguf.get(stem + ".magnitude");
-            // base_norm_sq[o] = Σ_in W[o,i]² + in·eps, matching train_row_norm_sq. Reading W
-            // here is the one place the base is touched outside a matmul, and read_to_f32
-            // dequantizes on the host, so it is fine for a quantized base. It is also the
-            // expensive part, hence the sidecar cache.
-            std::vector<float> nsq;
-            auto it = nsq_cache.find(wname);
-            if (it != nsq_cache.end() && it->second.size() == (size_t)out) {
-                nsq = it->second;
-            } else {
-                std::vector<float> w;  read_to_f32(W0, w);
-                nsq.assign((size_t)out, 0.0f);
-                for (int64_t o = 0; o < out; o++) {
-                    double s = 0.0;
-                    const float* wo = &w[(size_t)o*in];
-                    for (int64_t i = 0; i < in; i++) s += (double)wo[i]*wo[i];
-                    nsq[(size_t)o] = (float)(s + (double)in * 1e-12);
-                }
-                nsq_cache[wname] = nsq;
-                cache_dirty = true;
-            }
-            ggml_tensor* nt = ggml_new_tensor_1d(fl.ctx, GGML_TYPE_F32, out);
-            ggml_tensor* st = ggml_new_tensor_1d(fl.ctx, GGML_TYPE_F32, out);
-            norms.push_back(nt); scales.push_back(st); norm_host.push_back(std::move(nsq));
-            p.base_norm_sq = nt;
-            p.row_scale    = st;
+        const std::string stem = wname.substr(0, wname.size()-7);
+        Plan pl;
+        for (size_t ai = 0; ai < adapters.size(); ai++) {
+            LoraAdapter& a = adapters[ai];
+            Entry e;
+            e.ai   = ai;
+            e.xs   = functional_lora_is_xs(a.type);
+            e.dora = a.type == "dora-rows" || a.type == "dora-rows-xs";
+            if (!a.gguf.has(stem + (e.xs ? ".M_xs" : ".lora_A"))) continue;  // not targeted
+            if (a.strength == 0.0f) continue;                                // identity, as in the merge path
+            e.scale = (a.alpha / a.rank) * a.strength;
+            pl.chain.push_back(e);
+            pl.any_dora = pl.any_dora || e.dora;
         }
-        fl.map[wname] = p;
+        if (pl.chain.empty()) continue;
+        // residual k carries the row scales of every dora at position >= k (suffix scan)
+        for (size_t k = pl.chain.size(); k-- > 0; )
+            pl.chain[k].scaled = pl.chain[k].dora ||
+                                 (k + 1 < pl.chain.size() && pl.chain[k+1].scaled);
+        pl.wname = wname; pl.stem = stem;
+        pl.in = kv.second->ne[0]; pl.out = kv.second->ne[1];
+        plans.push_back(std::move(pl));
     }
-    fl.buf = ggml_backend_alloc_ctx_tensors(fl.ctx, base.backend);
-    for (size_t i = 0; i < norms.size(); i++)
-        ggml_backend_tensor_set(norms[i], norm_host[i].data(), 0, norm_host[i].size()*sizeof(float));
+    if (plans.empty()) return fl;
+
+    // ---- base_norm_sq, only if some adapter in some chain is dora ----
+    // Depends only on the base weights, never on the adapter, so it is shared by every LoRA ever
+    // loaded against this model and cached in the sidecar. A purely additive chain needs no norms
+    // at all and skips this entirely.
+    bool need_norms = false;
+    for (auto& pl : plans) need_norms = need_norms || pl.any_dora;
+    std::map<std::string, std::vector<float>> nsq_cache;
+    bool cache_hit = false, cache_dirty = false;
+    if (need_norms && !base_path.empty()) cache_hit = normcache::load(base_path, nsq_cache);
+    for (auto& pl : plans) {
+        if (!pl.any_dora) continue;
+        auto it = nsq_cache.find(pl.wname);
+        if (it != nsq_cache.end() && it->second.size() == (size_t)pl.out) { pl.nsq0 = it->second; continue; }
+        // nsq0[o] = Σ_in W[o,i]² + in·eps, matching train_row_norm_sq. read_to_f32 dequantizes on
+        // the host, so this works on a quantized base; it is also the expensive part (every
+        // targeted weight pulled down), hence the cache.
+        std::vector<float> w;  read_to_f32(base.tensors[pl.wname], w);
+        pl.nsq0.assign((size_t)pl.out, 0.0f);
+        for (int64_t o = 0; o < pl.out; o++) {
+            double s = 0.0;
+            const float* wo = &w[(size_t)o*pl.in];
+            for (int64_t i = 0; i < pl.in; i++) s += (double)wo[i]*wo[i];
+            pl.nsq0[(size_t)o] = (float)(s + (double)pl.in * 1e-12);
+        }
+        nsq_cache[pl.wname] = pl.nsq0;
+        cache_dirty = true;
+    }
     if (cache_dirty && !base_path.empty()) {
         normcache::save(base_path, nsq_cache);
         printf("lora: wrote base-norm cache %s\n", normcache::path_for(base_path).c_str());
@@ -418,41 +457,165 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
         printf("lora: base-norm cache hit (%zu tensors)\n", nsq_cache.size());
     }
 
-    // Fill row_scale once. Deliberately the same op sequence dit_lin uses for the per-step
-    // path, so the shortcut cannot drift from the reference: nsq = base_norm_sq + 2s·t2 + s²·t3,
-    // row_scale = magnitude / sqrt(nsq). Every input here is frozen at inference, which is why
-    // this is a constant rather than per-step work.
-    if (!scales.empty()) {
-        const size_t nn = targets.size()*24 + 64;
+    // ---- persistent constants: base_scale, B', -xs A_eff ----
+    size_t ntensors = 0;
+    for (auto& pl : plans) {
+        if (pl.any_dora) ntensors++;
+        for (auto& e : pl.chain) ntensors += (size_t)e.scaled + (size_t)e.xs;
+    }
+    ggml_init_params ip = { (ntensors + 8)*ggml_tensor_overhead(), nullptr, true };
+    fl.ctx = ggml_init(ip);
+    for (auto& pl : plans) {
+        if (pl.any_dora) pl.base_scale = ggml_new_tensor_1d(fl.ctx, GGML_TYPE_F32, pl.out);
+        for (auto& e : pl.chain) {
+            const int64_t rank = (int64_t)adapters[e.ai].rank;
+            if (e.scaled) e.Bp   = ggml_new_tensor_2d(fl.ctx, GGML_TYPE_F32, rank, pl.out);
+            if (e.xs)     e.Aeff = ggml_new_tensor_2d(fl.ctx, GGML_TYPE_F32, pl.in, rank);
+        }
+    }
+    fl.buf = ggml_backend_alloc_ctx_tensors(fl.ctx, base.backend);
+
+    // ---- scratch: upload nsq0 (dropped as soon as the row scales are computed) ----
+    ggml_context* sctx = nullptr; ggml_backend_buffer_t sbuf = nullptr;
+    if (need_norms) {
+        ggml_init_params sp = { (plans.size() + 8)*ggml_tensor_overhead(), nullptr, true };
+        sctx = ggml_init(sp);
+        for (auto& pl : plans)
+            if (pl.any_dora) pl.nsq0_t = ggml_new_tensor_1d(sctx, GGML_TYPE_F32, pl.out);
+        sbuf = ggml_backend_alloc_ctx_tensors(sctx, base.backend);
+        for (auto& pl : plans)
+            if (pl.any_dora)
+                ggml_backend_tensor_set(pl.nsq0_t, pl.nsq0.data(), 0, pl.nsq0.size()*sizeof(float));
+    }
+
+    // ---- one-shot precompute, chunked so the graph's scratch stays bounded ----
+    // Deliberately the same op sequence dit_lin's training path uses for the norm reduction, so
+    // the constant folding cannot drift from the reference.
+    size_t maxchain = 1;
+    for (auto& pl : plans) maxchain = std::max(maxchain, pl.chain.size());
+    const size_t per_target = 96 + 64*maxchain + 48*maxchain*maxchain*(1 + maxchain);
+    const size_t chunk = std::max<size_t>(1, 8192 / per_target);
+
+    // coefficient application: v · coef (when coef is a real [out] vector) · f
+    auto coef_mul = [](ggml_context* c, ggml_tensor* v, ggml_tensor* coef, float f) {
+        if (coef) v = ggml_mul(c, v, coef);
+        return f == 1.0f ? v : ggml_scale(c, v, f);
+    };
+
+    for (size_t p0 = 0; p0 < plans.size(); p0 += chunk) {
+        const size_t p1 = std::min(plans.size(), p0 + chunk);
+        const size_t nn = per_target*(p1 - p0) + 64;
         ggml_init_params tp = { nn*ggml_tensor_overhead() + ggml_graph_overhead_custom(nn, false) + (1<<20),
                                 nullptr, true };
-        ggml_context* tctx = ggml_init(tp);
-        ggml_cgraph* gf = ggml_new_graph_custom(tctx, nn, false);
-        size_t si = 0;
-        for (auto& wname : targets) {
-            DitLoraParam& p = fl.map[wname];
-            ggml_tensor* wl  = base.tensors[wname];
-            const int64_t out = wl->ne[1];
-            const float s = p.scale;
-            ggml_tensor* WtA  = ggml_mul_mat(tctx, wl, p.A);                            // [out,rank]
-            ggml_tensor* Bt   = ggml_cont(tctx, ggml_transpose(tctx, p.B));             // [out,rank]
-            ggml_tensor* t2   = ggml_sum_rows(tctx,
-                ggml_cont(tctx, ggml_transpose(tctx, ggml_mul(tctx, WtA, Bt))));        // [1,out]
-            ggml_tensor* AtA  = ggml_mul_mat(tctx, p.A, p.A);                           // [rank,rank]
-            ggml_tensor* AtAB = ggml_mul_mat(tctx, AtA, p.B);                           // [rank,out]
-            ggml_tensor* t3   = ggml_sum_rows(tctx, ggml_mul(tctx, p.B, AtAB));         // [1,out]
-            ggml_tensor* nsq  = ggml_add(tctx,
-                ggml_add(tctx, p.base_norm_sq,
-                               ggml_scale(tctx, ggml_reshape_1d(tctx, t2, out), 2.0f*s)),
-                ggml_scale(tctx, ggml_reshape_1d(tctx, t3, out), s*s));                 // [out]
-            ggml_tensor* sv = ggml_div(tctx, p.magnitude, ggml_sqrt(tctx, nsq));        // [out]
-            ggml_build_forward_expand(gf, ggml_cpy(tctx, sv, scales[si++]));
+        ggml_context* c = ggml_init(tp);
+        ggml_cgraph* gf = ggml_new_graph_custom(c, nn, false);
+
+        for (size_t pi = p0; pi < p1; pi++) {
+            Plan& pl = plans[pi];
+            ggml_tensor* wl = base.tensors[pl.wname];
+            const int64_t out = pl.out;
+            const size_t M = pl.chain.size();
+
+            // A/B per residual. For -xs, regroup U @ M_xs @ Vᵗ into the same B @ A shape; the
+            // computed value (not the persistent copy) is what feeds this graph, so the norm
+            // reduction below depends on it properly.
+            std::vector<ggml_tensor*> A(M), B(M);
+            for (size_t k = 0; k < M; k++) {
+                Entry& e = pl.chain[k];
+                GgufModel& g = adapters[e.ai].gguf;
+                if (e.xs) {
+                    ggml_tensor* MV = ggml_mul_mat(c, g.get(pl.stem+".M_xs"), g.get(pl.stem+".V")); // [rank,in]
+                    A[k] = ggml_cont(c, ggml_transpose(c, MV));                                     // [in,rank]
+                    B[k] = g.get(pl.stem+".U");                                                     // [rank,out]
+                    ggml_build_forward_expand(gf, ggml_cpy(c, A[k], e.Aeff));
+                } else {
+                    A[k] = g.get(pl.stem+".lora_A");
+                    B[k] = g.get(pl.stem+".lora_B");
+                }
+            }
+
+            // Row-space quantities needed by the norms, all low-rank:
+            //   T2[k][o] = W[o,:]·(B_k A_k)[o,:]          via mul_mat(W, A_k) -- W stays quantized
+            //   G[k][l][o] = (B_k A_k)[o,:]·(B_l A_l)[o,:] via the rank x rank gram A_lᵗ A_k
+            std::vector<ggml_tensor*> T2(M, nullptr);
+            std::vector<std::vector<ggml_tensor*>> G(M, std::vector<ggml_tensor*>(M, nullptr));
+            if (pl.any_dora) {
+                for (size_t k = 0; k < M; k++) {
+                    ggml_tensor* WtA = ggml_mul_mat(c, wl, A[k]);                     // [out,rank]
+                    ggml_tensor* Bt  = ggml_cont(c, ggml_transpose(c, B[k]));         // [out,rank]
+                    T2[k] = ggml_reshape_1d(c, ggml_sum_rows(c,
+                        ggml_cont(c, ggml_transpose(c, ggml_mul(c, WtA, Bt)))), out);  // [out]
+                }
+                for (size_t k = 0; k < M; k++) for (size_t l = k; l < M; l++) {
+                    ggml_tensor* gram = ggml_mul_mat(c, A[l], A[k]);                  // [rank_l,rank_k]
+                    ggml_tensor* GB   = ggml_mul_mat(c, gram, B[l]);                   // [rank_k,out]
+                    G[k][l] = ggml_reshape_1d(c, ggml_sum_rows(c, ggml_mul(c, B[k], GB)), out);
+                    G[l][k] = G[k][l];
+                }
+            }
+
+            // Walk the chain. b is the base coefficient, g[k] the coefficient on residual k;
+            // null means 1.0, which keeps the single-adapter case emitting the same handful of
+            // ops the dedicated row_scale path used to.
+            ggml_tensor* b = nullptr;
+            std::vector<ggml_tensor*> g(M, nullptr);
+            for (size_t j = 0; j < M; j++) {
+                if (!pl.chain[j].dora) continue;
+                // ||V_j row o||² = b²·nsq0 + 2b·Σ_k h_k·T2_k + Σ_{k,l} h_k·h_l·G_kl, h_k = s_k·g_k,
+                // over the adapters present so far. (The in·eps regulariser baked into nsq0 gets
+                // carried along by b² rather than re-added; ~1e-12 relative, far below f16.)
+                ggml_tensor* nsq = b ? ggml_mul(c, pl.nsq0_t, ggml_mul(c, b, b)) : pl.nsq0_t;
+                for (size_t k = 0; k <= j; k++) {
+                    ggml_tensor* t = coef_mul(c, T2[k], g[k], 2.0f*pl.chain[k].scale);
+                    if (b) t = ggml_mul(c, t, b);
+                    nsq = ggml_add(c, nsq, t);
+                }
+                for (size_t k = 0; k <= j; k++) for (size_t l = k; l <= j; l++) {
+                    const float sc = pl.chain[k].scale*pl.chain[l].scale*(k == l ? 1.0f : 2.0f);
+                    ggml_tensor* t = coef_mul(c, G[k][l], g[k], sc);
+                    if (g[l]) t = ggml_mul(c, t, g[l]);
+                    nsq = ggml_add(c, nsq, t);
+                }
+                ggml_tensor* mag = adapters[pl.chain[j].ai].gguf.get(pl.stem + ".magnitude");
+                ggml_tensor* d   = ggml_div(c, mag, ggml_sqrt(c, nsq));               // [out]
+                b = b ? ggml_mul(c, b, d) : d;
+                for (size_t k = 0; k <= j; k++) g[k] = g[k] ? ggml_mul(c, g[k], d) : d;
+            }
+
+            if (pl.base_scale) ggml_build_forward_expand(gf, ggml_cpy(c, b, pl.base_scale));
+            for (size_t k = 0; k < M; k++) {
+                Entry& e = pl.chain[k];
+                if (!e.Bp) continue;                     // coefficient 1 -> dit_lin reads B directly
+                ggml_tensor* Bf = B[k]->type == GGML_TYPE_F32 ? B[k] : ggml_cast(c, B[k], GGML_TYPE_F32);
+                ggml_build_forward_expand(gf, ggml_cpy(c,
+                    ggml_mul(c, Bf, ggml_reshape_2d(c, g[k], 1, out)), e.Bp));  // broadcast over rank
+            }
         }
+
         ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(base.backend));
         ggml_gallocr_alloc_graph(alloc, gf);
         ggml_backend_graph_compute(base.backend, gf);
         ggml_gallocr_free(alloc);
-        ggml_free(tctx);
+        ggml_free(c);
+    }
+
+    if (sbuf) ggml_backend_buffer_free(sbuf);
+    if (sctx) ggml_free(sctx);
+
+    // ---- publish the per-target term lists dit_lin will walk ----
+    for (auto& pl : plans) {
+        DitLoraParam p;
+        p.base_scale = pl.base_scale;
+        p.in = pl.in;
+        for (auto& e : pl.chain) {
+            GgufModel& g = adapters[e.ai].gguf;
+            DitLoraTerm t;
+            t.A     = e.xs ? e.Aeff : g.get(pl.stem + ".lora_A");
+            t.B     = e.Bp ? e.Bp   : g.get(pl.stem + (e.xs ? ".U" : ".lora_B"));
+            t.scale = e.scale;
+            p.terms.push_back(t);
+        }
+        fl.map[pl.wname] = p;
     }
     fl.active = true;
     return fl;
