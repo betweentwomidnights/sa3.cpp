@@ -274,6 +274,14 @@ inline bool init_train_lora_state(const GgufModel& dit, const std::vector<TrainL
 
 inline ggml_tensor* train_lora_apply_col_norm(ggml_context* ctx, ggml_tensor* v,
                                               ggml_tensor* magnitude, int64_t in, int64_t out) {
+    // The leading cont is for the BACKWARD pass, not the forward one, where it is a plain copy.
+    // ggml differentiates transpose as a bare ggml_transpose(grad) (a non-contiguous view) while
+    // ggml_scale asserts ggml_is_padded_1d, so a transposed gradient reaching a scale node aborts
+    // the graph build. dora-cols hits exactly that: v = w + scale(delta), and add's backward hands
+    // its gradient straight to the scale. Interposing a cont makes ggml's CONT backward
+    // re-materialize the gradient contiguously before it gets there. bora survives without this
+    // only because its rms_norm/mul layer already allocates a fresh contiguous gradient.
+    v = ggml_cont(ctx, v);
     ggml_tensor* vt = ggml_cont(ctx, ggml_transpose(ctx, v)); // [out, in]
     ggml_tensor* mag = ggml_reshape_2d(ctx, magnitude, 1, in); // [1, in]
     ggml_tensor* vn = ggml_scale(ctx, ggml_rms_norm(ctx, vt, 1e-12f), 1.0f / sqrtf((float)out));
