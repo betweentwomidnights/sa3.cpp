@@ -12,6 +12,7 @@
 // plain lora:            W_eff = W0 + (alpha/rank)*strength*(B@A).  (additive, commutative)
 #pragma once
 
+#include "dit.h"          // DitLora / DitLoraParam, for the functional (unmerged) path below
 #include "ggml.h"
 #include "gguf_model.h"
 
