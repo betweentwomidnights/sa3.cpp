@@ -169,21 +169,26 @@ pass `--svd-bases bases.gguf` to load precomputed bases instead — generate the
 `python tools/compute_svd_bases.py --dit models/... --rank 8 --out bases.gguf` for exact
 `torch.linalg.svd` parity with the reference implementation.
 
-All eight train, and all eight are within a small factor of each other per step:
+All eight train, and all eight are within about 3x of each other per step:
 
-| adapter type | s/step (128 frames) |
-|---|---|
-| `lora` | 0.48 |
-| `lora-xs` | 0.71 |
-| `dora-rows-xs` | 1.24 |
-| `dora-cols-xs` | 1.42 |
-| `dora-cols` | 1.61 |
-| `bora-xs` | 1.97 |
-| `bora` | 2.17 |
-| `dora-rows` (default) | 3.30 |
+| adapter type | s/step | first step |
+|---|---|---|
+| `lora` | 0.80 | 1.02 |
+| `lora-xs` | 1.05 | 1.33 |
+| `dora-rows` (default) | 1.25 | 6.17 |
+| `dora-rows-xs` | 1.57 | 2.00 |
+| `dora-cols-xs` | 1.84 | 2.31 |
+| `dora-cols` | 1.95 | 2.35 |
+| `bora-xs` | 2.33 | 2.67 |
+| `bora` | 2.47 | 2.88 |
 
-CUDA / RTX 5070 Laptop, medium, rank 16 — ratios rather than absolutes. At the reference 512
-frames a 2000-step run is roughly one to two hours for any family.
+CUDA / RTX 5070 Laptop, medium, rank 16, the reference 512 frames, averaged over steps 10-40. A
+2000-step run is 30-90 minutes depending on family; the two measured end to end came in at 34 min
+(`dora-rows`) and 64 min (`dora-cols`).
+
+Measure over enough steps to reach steady state. The first step carries graph build and, for
+`dora-rows`, the one-off `base_norm_sq` reduction over every targeted weight — 6.17 s against a
+1.25 s steady step, so a 2- or 3-step average is mostly setup and ranks the families wrongly.
 
 Two things used to make this table much worse, both fixed:
 
@@ -192,14 +197,13 @@ Two things used to make this table much worse, both fixed:
   and `ggml_scale` rejects one, so the column-norm helper's transposed gradient reached the
   scale on the low-rank delta. It now interposes a `cont`, whose backward re-materializes the
   gradient contiguously.
-- Six of the eight ran an unbatched monolithic backward asking for 24.6 GiB of allocator on an
-  8 GiB card, so the driver paged it to system RAM: `dora-cols` measured 92.76 s/step at 512
-  frames against 2.05 now. Gradient checkpointing had been gated to the two families
-  `dit_lin` can apply functionally; the rest now build their effective weight inside whichever
-  segment graph consumes it, so they are checkpointed too. See `--checkpoint-backward`.
+- Six of the eight ran a monolithic backward asking for 24.6 GiB of allocator on an 8 GiB card,
+  so the driver paged it to system RAM: `dora-cols` measured 92.76 s/step at 512 frames against
+  1.95 now, with the allocator down to 1126 MiB. Gradient checkpointing had been gated to the two
+  families `dit_lin` can apply functionally; the rest now build their effective weight inside
+  whichever segment graph consumes it, so they are checkpointed too. See `--checkpoint-backward`.
 
-`dora-rows` remains the default and the best-trodden path, and is now the slowest of the eight —
-the functional application costs more per step than materialized-plus-checkpointed at this size.
+`dora-rows` remains the default and the best-trodden path.
 
 Each sample is conditioned by its caption text. A dataset-level `prompt_config.json` can optionally
 compose that caption with general metadata tags or path-derived text.
