@@ -208,6 +208,35 @@ Two things used to make this table much worse, both fixed:
 Each sample is conditioned by its caption text. A dataset-level `prompt_config.json` can optionally
 compose that caption with general metadata tags or path-derived text.
 
+### Path-derived captions are off by default
+
+`use_paths` defaults to **false**, which is a deliberate departure from underfit, where filenames
+are part of the dice pool. Turn it on only if your filenames actually read as descriptions of the
+music:
+
+```json
+{ "prompt_config": { "use_tags": true, "use_paths": true, "balance": { "tags": 40, "paths": 30 } } }
+```
+
+With that on, roughly a third of steps train on the file path verbatim — and `path_hide_ext`,
+`path_hide_dirs` and `path_hide_topmost` all default to false, so a track lands in the model as
+
+```
+03 - Gettysburg [Q-gtqz_il-w].wav
+```
+
+A track number, a YouTube ID and a file extension are not a description of a piece of music, and
+training on them teaches the adapter to emit your material in response to noise. That dilutes the
+conditioning the rest of the run is trying to build, and it shows up at inference as an adapter
+that responds best to no prompt at all rather than to a prompt from its training distribution.
+
+If your filenames are genuinely descriptive, `use_paths` is worth having, and `hide_ext` /
+`hide_dirs` / `hide_topmost_dir` trim the parts that are not. Otherwise leave it off and let the
+tags plus the CFG dropout (`--cfg-dropout-prob`, default 0.1) do the generalizing.
+
+Check what a run is actually training on before committing hours to it — the per-step log prints
+the composed caption, and a quick tally of `prompt="..."` across the log will show the mix.
+
 ## Target Scopes
 
 Which DiT weights get an adapter. Every 2D `dit.*.weight` is eligible; a scope narrows that.
