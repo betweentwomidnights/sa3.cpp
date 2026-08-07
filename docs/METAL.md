@@ -5,6 +5,19 @@ native small/medium LoRA/DoRA training completes on ggml Metal. The training pat
 memory-efficient; the optimized `OUT_PROD` path brings matched 512-frame training to within 19% of
 MLX while retaining the checkpointed graph's much lower memory use.
 
+> **Every Metal number in this document comes from one machine: a MacBook Air (`Mac16,13`), base
+> M4, 10-core GPU, 32 GB unified memory, fanless.** That is the *weakest* M4 Apple ships, and it is
+> the only Apple hardware available for testing here. Treat these timings as the floor of the M4
+> family rather than a representative Apple figure — an M4 Pro/Max has 2-4x the GPU cores, far more
+> memory bandwidth, and active cooling.
+>
+> Cooling matters as much as core count for training. Sustained runs on this Air throttle roughly
+> 50% from cold, plateauing around step 5-7 (`bora` at 512 frames: 26.97 s cold → 40.3 s
+> sustained). Long training runs on a cooled Mac should hold closer to their cold-start rate, so
+> the gap on real workloads is likely wider than the per-step numbers here suggest. Memory
+> footprints, correctness results, and cross-family *ratios* carry across the family; absolute
+> seconds do not.
+
 ## 0. prerequisites
 
 - Xcode command-line tools (`xcode-select --install`) — provides clang + the Metal toolchain.
@@ -98,7 +111,8 @@ the roadmap (Metal = the last backend).
 
 ## 6. m4 results (2026-06-29)
 
-Test machine: Apple M4, 32 GB unified memory, macOS 15, ggml commit `eced84c8`.
+Test machine: MacBook Air (`Mac16,13`), base M4, 10-core GPU, 32 GB unified memory, fanless,
+macOS 15, ggml commit `eced84c8`. See the note at the top — this is the slowest M4 there is.
 Command shape: stable-audio-3-medium, DiT/SAME f16 GGUF, conditioner/T5 f32 GGUF, 8 steps,
 prompt `upbeat funk groove with slap bass`, seed `0`.
 
@@ -165,7 +179,8 @@ and trails the official optimized MLX SAME-L decoder.
 
 ## 7. native training results (2026-07-16)
 
-Test machine: Apple M4, 32 GB unified memory, macOS 15.7.3. Candidate base: ggml v0.16.0 plus the
+Test machine: MacBook Air (`Mac16,13`), base M4, 10-core GPU, 32 GB unified memory, fanless,
+macOS 15.7.3 — the slowest M4, and it throttles on sustained runs. Candidate base: ggml v0.16.0 plus the
 downstream Metal training branch. The implementation adds native Metal `REPEAT_BACK`, `OUT_PROD`,
 `SILU_BACK`, `RMS_NORM_BACK`, and `SOFT_MAX_BACK`, supports the strided F32 binary views produced by
 autodiff, and fixes the non-inplace `ACC` copy dispatch for rows wider than one Metal threadgroup.
@@ -335,7 +350,8 @@ Next high-leverage work is graph/model-shape optimization rather than toggling M
 
 ## 9. quantization results (2026-07-25)
 
-Test machine: Apple M4, 32 GB unified memory, macOS 15 (Darwin 24.6.0). Branch
+Test machine: MacBook Air (`Mac16,13`), base M4, 10-core GPU, 32 GB unified memory, fanless,
+macOS 15 (Darwin 24.6.0). Branch
 `feature/q4km-quantization`, ggml submodule `e9c70fd6`. Model: stable-audio-3-medium, 30 s output
 (324 frames), 8 steps, prompt `cinematic orchestral build with strings and timpani`, seed `99`.
 

@@ -54,3 +54,6 @@ _sfxweights/
 env.sh
 env.cmd
 env.ps1
+
+# Ableton analysis sidecars, written next to any wav a DAW has opened
+*.asd
