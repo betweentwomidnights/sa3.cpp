@@ -37,6 +37,7 @@
 #include "ggml-backend.h"
 
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -66,6 +67,7 @@ struct TrainCkptBlock {
     ggml_tensor* grad_ctx = nullptr;    // this block's dL/dcontext contribution [dim, Ctx]
     ggml_tensor* grad_gcond = nullptr;  // this block's dL/dgcond contribution [6*dim]
     std::vector<size_t> param_idx;      // indices into lora.params / TrainDitCkpt::params
+    ggml_gallocr_t alloc = nullptr;     // borrowed from TrainDitCkpt::ballocs; see the note there
 };
 
 struct TrainDitCkpt {
@@ -102,7 +104,15 @@ struct TrainDitCkpt {
     ggml_tensor* velocity = nullptr;
     ggml_tensor* loss = nullptr;
     std::vector<size_t> tail_param_idx;
-    ggml_gallocr_t balloc = nullptr;    // shared by all block graphs (re-alloc'd per use)
+    // One allocator per DISTINCT block-graph shape, not one for all 24 blocks. With a uniform
+    // scope every block graph is identical, so a single allocator plans once and this is exactly
+    // the old behaviour. A scope that adapts only some blocks (--lora-include dit.0.) makes the
+    // graphs structurally different, and a shared gallocr then re-plans on every block boundary:
+    // ggml_gallocr_alloc_graph -> needs_realloc -> ggml_gallocr_reserve, which FREES and
+    // reallocates the buffer 24 times a step. That corrupted the step nondeterministically
+    // (~30% of runs died in ggml_cuda_set_device with "invalid device ordinal", or took an
+    // access violation). Grouping by shape means no allocator ever re-plans.
+    std::vector<ggml_gallocr_t> ballocs;
     std::vector<TrainCkptBlock> blocks;
     ggml_context* hctx = nullptr;       // H: head VJP, fwd+bwd
     ggml_gallocr_t halloc = nullptr;
@@ -119,7 +129,7 @@ struct TrainDitCkpt {
 inline void free_train_dit_ckpt(TrainDitCkpt& ck) {
     if (ck.falloc) ggml_gallocr_free(ck.falloc);
     if (ck.talloc) ggml_gallocr_free(ck.talloc);
-    if (ck.balloc) ggml_gallocr_free(ck.balloc);
+    for (ggml_gallocr_t a : ck.ballocs) if (a) ggml_gallocr_free(a);
     if (ck.halloc) ggml_gallocr_free(ck.halloc);
     for (TrainCkptBlock& b : ck.blocks) if (b.ctx) ggml_free(b.ctx);
     if (ck.fctx) ggml_free(ck.fctx);
@@ -372,10 +382,8 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
             return fail("failed to allocate tail training graph");
     }
 
-    // --- B_l: per-block VJP fwd+bwd, shared allocator (re-planned per use in the runner) ---
+    // --- B_l: per-block VJP fwd+bwd, one allocator per distinct graph shape ---
     {
-        out.balloc = ggml_gallocr_new(buft);
-        if (!out.balloc) return fail("failed to create block graph allocator");
         out.blocks.resize((size_t)dc.depth);
         for (int l = 0; l < dc.depth; ++l) {
             TrainCkptBlock& B = out.blocks[(size_t)l];
@@ -400,6 +408,25 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
             ggml_set_output(B.grad_ctx);
             ggml_set_output(B.grad_gcond);
             keep_param_grads(B.graph, B.param_idx);
+        }
+
+        // Group blocks by graph shape and give each group its own allocator, reserved once here.
+        // Two blocks share an allocator only when their graphs are structurally identical, so
+        // ggml_gallocr_alloc_graph in the runner never takes the realloc path. A uniform scope
+        // yields exactly one group, i.e. the previous single-allocator behaviour and memory use.
+        std::map<int, size_t> shape_to_alloc;   // graph node count -> index into ballocs
+        for (int l = 0; l < dc.depth; ++l) {
+            TrainCkptBlock& B = out.blocks[(size_t)l];
+            const int shape = ggml_graph_n_nodes(B.graph);
+            auto it = shape_to_alloc.find(shape);
+            if (it == shape_to_alloc.end()) {
+                ggml_gallocr_t a = ggml_gallocr_new(buft);
+                if (!a) return fail("failed to create block graph allocator");
+                out.ballocs.push_back(a);
+                if (!ggml_gallocr_reserve(a, B.graph)) return fail("failed to reserve block graph allocator");
+                it = shape_to_alloc.emplace(shape, out.ballocs.size() - 1).first;
+            }
+            B.alloc = out.ballocs[it->second];
         }
     }
 

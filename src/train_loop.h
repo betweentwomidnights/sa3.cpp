@@ -389,14 +389,17 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
     static bool balloc_logged = false;
     for (int l = dc.depth - 1; l >= 0; --l) {
         TrainCkptBlock& B = ck.blocks[(size_t)l];
-        if (!ggml_gallocr_alloc_graph(ck.balloc, B.graph)) {
+        if (!ggml_gallocr_alloc_graph(B.alloc, B.graph)) {
             err = "failed to allocate block training graph";
             return false;
         }
         if (!balloc_logged) {
             balloc_logged = true;
-            std::fprintf(stderr, "[train] block fwd+bwd gallocr buffer: %.1f MiB (shared by %d block graphs)\n",
-                         ggml_gallocr_get_buffer_size(ck.balloc, 0) / (1024.0 * 1024.0), dc.depth);
+            double total = 0.0;
+            for (ggml_gallocr_t a : ck.ballocs) total += ggml_gallocr_get_buffer_size(a, 0) / (1024.0 * 1024.0);
+            std::fprintf(stderr,
+                         "[train] block fwd+bwd gallocr buffer: %.1f MiB across %zu graph shape(s) for %d blocks\n",
+                         total, ck.ballocs.size(), dc.depth);
         }
         ggml_graph_reset(B.graph);
         ggml_backend_graph_compute(backend, B.graph);
