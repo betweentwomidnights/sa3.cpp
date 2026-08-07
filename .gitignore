@@ -57,3 +57,10 @@ env.ps1
 
 # Ableton analysis sidecars, written next to any wav a DAW has opened
 *.asd
+
+# Personal prompt dice pools. defaults.json plus two adapter pools ship as examples;
+# everything else in here is local.
+prompts/*.json
+!prompts/defaults.json
+!prompts/kev.json
+!prompts/keygen.json
