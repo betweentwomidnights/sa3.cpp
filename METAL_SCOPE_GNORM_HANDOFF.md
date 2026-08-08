@@ -181,6 +181,54 @@ the above: `Gctx_in`/`Ggcond_in` are uploaded and consumed by nobody when `H` is
 precisely the configuration that breaks. Skipping that upload when `hgraph` is null is a two-line
 change and would test it directly.
 
+### Probes 3 and 1 (fixed-crop): dead writes exonerated, and the bug is pinned to the decomposition
+
+**Probe 3 is dead.** Skipping the `Gctx_in`/`Ggcond_in` upload entirely when `hgraph` is null
+(`SA3_SKIP_DEAD_GCTX=1`, on this branch) changes **nothing** — bit-identical to baseline, loss and
+both accumulator norms, all three steps. Unconsumed persistent-buffer writes are not the mechanism.
+
+**Probe 1 re-run with `--random-crop false`**, removing the last unlogged variable. Plain `lora`,
+`lr=1e-35`, 512 frames, seed 42:
+
+| run | H | step 1 | step 2 | step 3 |
+|---|---|---:|---:|---:|
+| `ckpt` blocks only | skipped | 0.704558 | **3.04466** | 2.60996 |
+| `mono` blocks only | n/a | 0.704558 | **1.31317** | 1.27079 |
+| `ckpt` + `proj_in` | ran | 0.704558 | **1.35079** | 0.836514 |
+| `mono` + `proj_in` | n/a | 0.704558 | **1.35079** | 0.836514 |
+
+Sampling is confirmed identical across scopes — same `id`, `t`, `mask`, `n_gen`/`n_ctx` at every
+step — so this is not an RNG/sampling artefact, and with the crop fixed there is no unlogged input
+left.
+
+- **`ckpt` + `proj_in` == `mono` + `proj_in`, exactly.** With `H` built, the decomposition
+  reproduces the monolithic graph bit-for-bit.
+- **`ckpt` blocks-only is 2.3x off its own monolithic reference** (3.04466 vs 1.31317), same scope,
+  same everything. Adapters are provably contributing `+0`. So the checkpointed path computes a
+  **wrong forward** when `H` is absent. This is a computational bug, not training dynamics.
+- **`mono` blocks-only vs `mono` + `proj_in` still differ by 2.8%** (1.31317 vs 1.35079) with no
+  decomposition involved at all. Second, smaller, independent effect — likely the same thing as the
+  ~4x baseline elevation at full scope.
+
+### What that leaves
+
+When `hgraph` is null the differences are: H's graph is never built (so `halloc` is never
+allocated), H never computes, H's gradients are never read, and — now excluded — its input uploads
+are skipped. Since step 1 is clean and step 2 is wrong, whatever it is has to be state that
+survives the step boundary.
+
+Two candidates worth trying next, in order:
+
+1. **Allocation layout.** `halloc` is a real backend buffer that exists in one case and not the
+   other, which shifts every later allocation. Allocating a same-sized dummy buffer when `H` is
+   skipped is a cheap discriminator: if the blow-up disappears, this is a layout/aliasing effect
+   rather than anything about `H` itself. (Earlier range dumps showed no overlap between F/T/H/block
+   scratch and the persistent buffer, but those were min/max spans and would miss a gap.)
+2. **H's compute as an implicit barrier.** H is the last GPU work in the step when present. An
+   end-of-step `ggml_backend_synchronize` was already tested and did *not* help, which weakens this,
+   but H does more than synchronise — it reads `x`/`tfeat`/`cross`/`global` and runs a full head
+   forward, so it touches persistent inputs the next step's F also reads.
+
 ## Open question nobody has answered
 
 The **direction**. Widening the scope raises the norm on CUDA and lowers it on Metal, with identical

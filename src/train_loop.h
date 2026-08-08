@@ -438,8 +438,13 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
     }
 
     // H: head backward against dL/dx_0 + the summed context/gcond gradients
-    ggml_backend_tensor_set(ck.Gctx_in, gctx_sum.data(), 0, gctx_sum.size() * sizeof(float));
-    ggml_backend_tensor_set(ck.Ggcond_in, ggcond_sum.data(), 0, ggcond_sum.size() * sizeof(float));
+    // EXPERIMENT (SA3_SKIP_DEAD_GCTX=1): when hgraph is null nothing consumes these two, so the
+    // uploads are dead stores into the persistent buffer. Tests whether an unconsumed write is
+    // interfering with the next step -- H-skipped is exactly the configuration that breaks.
+    if (ck.hgraph || !getenv("SA3_SKIP_DEAD_GCTX")) {
+        ggml_backend_tensor_set(ck.Gctx_in, gctx_sum.data(), 0, gctx_sum.size() * sizeof(float));
+        ggml_backend_tensor_set(ck.Ggcond_in, ggcond_sum.data(), 0, ggcond_sum.size() * sizeof(float));
+    }
     // Skipped when no adapter lives on a head weight (e.g. --lora-scope core); see train_ckpt.h.
     if (ck.hgraph) {
         ggml_graph_reset(ck.hgraph);
