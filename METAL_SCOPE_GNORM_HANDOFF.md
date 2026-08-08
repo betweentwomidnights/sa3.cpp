@@ -210,6 +210,48 @@ left.
   decomposition involved at all. Second, smaller, independent effect — likely the same thing as the
   ~4x baseline elevation at full scope.
 
+### CUDA control for the fixed-crop matrix: all four cells are bit-identical
+
+Same four runs on CUDA (plain `lora`, `lr=1e-35`, `--random-crop false`, 512 frames, seed 42):
+
+| run | H | loss s1 / s2 / s3 | gnorm s1 / s2 / s3 |
+|---|---|---|---|
+| `ckpt` blocks only | skipped | 0.434523 / 0.602845 / 0.404239 | 0.0137 / 0.0251 / 0.0594 |
+| `mono` blocks only | n/a | **identical** | **identical** |
+| `ckpt` + `proj_in` | ran | **identical** | 0.0233 / 0.0465 / 0.0684 |
+| `mono` + `proj_in` | n/a | **identical** | identical to `ckpt` |
+
+`|gctx_sum|` / `|ggcond_sum|` are identical across scopes at every step too
+(0.000175/0.038836, 0.007143/0.110514, 0.000551/0.173036). Only `gnorm` moves, and only with
+scope — the extra L2 term from one more adapted target.
+
+So the matrix is **fully degenerate on CUDA**, which makes both of your deviations unambiguous:
+
+- `ckpt` blocks-only 2.3x off its own `mono` — the `H`-skip bug.
+- **`mono` blocks-only vs `mono` +`proj_in` differing 2.8%** — on CUDA these are *exactly* equal,
+  so your second effect is real and genuinely independent of the decomposition. Two separate Metal
+  bugs, confirmed from this side.
+
+### Is `mono` even a valid reference on the M4? At this scope, yes — but check it
+
+Worth stating, since monolithic OOMs on that machine in other configurations. The two regimes are
+far apart:
+
+| config | monolithic allocator |
+|---|---|
+| plain `lora`, 72-73 targets, 512 frames (these probes) | **6,412 MiB** (CUDA measurement) |
+| materialized families (`dora-cols`/`bora`), 228 targets | 19,000-30,400 MiB -> hard OOM on 22.9 GB |
+
+The probes use the functional path, which never materializes a `W_eff`, so ~6.4 GB against a
+22.9 GB working set should fit with room. The earlier OOMs were a different regime entirely.
+
+**But confirm it rather than assume**, because the failure is silent in exactly the way that would
+poison this: an OOM leaves the Metal backend in an error state while `sa3-train` still exits 0 and
+prints finite losses — your own finding. Please report the `[train] DiT fwd+bwd graph: N nodes,
+gallocr buffer X MiB` line for the `mono` runs and confirm no
+`kIOGPUCommandBufferCallbackErrorOutOfMemory` in their output. If either `mono` cell was quietly
+OOMing, the 2.8% second effect evaporates and only the `H` bug is real.
+
 ### What that leaves
 
 When `hgraph` is null the differences are: H's graph is never built (so `halloc` is never
@@ -228,6 +270,25 @@ Two candidates worth trying next, in order:
    end-of-step `ggml_backend_synchronize` was already tested and did *not* help, which weakens this,
    but H does more than synchronise — it reads `x`/`tfeat`/`cross`/`global` and runs a full head
    forward, so it touches persistent inputs the next step's F also reads.
+
+3. **Read the persistent boundary tensors after F — this one is methodologically safe.** Your
+   scratch-checksum pass was invalid because gallocr reuses node buffers, but `xb[]`,
+   `context_p` and `gcond_p` live in the **persistent** buffer (`pbuf`), which no gallocr ever
+   touches. Reading them back with `ggml_backend_tensor_get` immediately after `F` computes is
+   therefore meaningful, and it splits the remaining space in one run:
+
+   > With the adapter frozen and inert, `ckpt` blocks-only and `ckpt` +`proj_in` see the same base
+   > model on the same sample, so `xb[depth]`, `context_p` and `gcond_p` after `F` must be
+   > identical at **every** step, including step 2.
+
+   If they already differ at step 2, `F` is computing a wrong forward and everything downstream —
+   block gradients, `gctx_sum`, `gnorm` — is just the consequence. If they match, `F` is fine and
+   the fault is in the backward decomposition (`T`/`B_l`), which would be surprising given the
+   adapter contributes nothing.
+
+   That is the cheapest way to find out whether you are chasing a forward bug or a backward one,
+   and it is the question everything else currently hinges on. `loss` alone cannot distinguish
+   them because it is computed in `T`, downstream of both.
 
 ## Open question nobody has answered
 
