@@ -375,6 +375,21 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
         profile_mark = now;
     }
     if (!train_accum_read_subset(ck.tgraph, ck, ck.tail_param_idx, accum, err)) return false;
+    // SA3_GRAD_DEBUG=1: localise WHERE the gradient norm enters. The pre-clip global L2 is what
+    // metrics reports, so accumulating it stage by stage says whether inflation arrives via the
+    // tail graph, the per-block graphs, or the head.
+    const bool gdbg = getenv("SA3_GRAD_DEBUG") != nullptr;
+    auto accum_l2 = [&]() {
+        double s = 0.0;
+        auto add = [&](const std::vector<std::vector<float>>& vv) {
+            for (const auto& v : vv) for (float f : v) s += (double)f * f; };
+        add(accum.A); add(accum.B); add(accum.mxs); add(accum.mag); add(accum.mag_r); add(accum.mag_c);
+        return std::sqrt(s);
+    };
+    auto vec_l2 = [](const std::vector<float>& v) {
+        double s = 0.0; for (float f : v) s += (double)f * f; return std::sqrt(s); };
+    if (gdbg) std::fprintf(stderr, "[gdbg] after T   accum_l2=%.6f  (tail params: %zu)\n",
+                           accum_l2(), ck.tail_param_idx.size());
     if (profile) {
         const auto now = std::chrono::steady_clock::now();
         profile_tail_ms = std::chrono::duration<double, std::milli>(now - profile_mark).count();
@@ -417,6 +432,11 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
         profile_mark = now;
     }
 
+    if (gdbg) {
+        std::fprintf(stderr, "[gdbg] after B_l accum_l2=%.6f  |gctx_sum|=%.6f  |ggcond_sum|=%.6f\n",
+                     accum_l2(), vec_l2(gctx_sum), vec_l2(ggcond_sum));
+    }
+
     // H: head backward against dL/dx_0 + the summed context/gcond gradients
     ggml_backend_tensor_set(ck.Gctx_in, gctx_sum.data(), 0, gctx_sum.size() * sizeof(float));
     ggml_backend_tensor_set(ck.Ggcond_in, ggcond_sum.data(), 0, ggcond_sum.size() * sizeof(float));
@@ -426,6 +446,8 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
         ggml_backend_graph_compute(backend, ck.hgraph);
         if (!train_accum_read_subset(ck.hgraph, ck, ck.head_param_idx, accum, err)) return false;
     }
+    if (gdbg) std::fprintf(stderr, "[gdbg] after H   accum_l2=%.6f  (H %s, head params: %zu)\n",
+                           accum_l2(), ck.hgraph ? "ran" : "SKIPPED", ck.head_param_idx.size());
     if (profile) {
         const auto now = std::chrono::steady_clock::now();
         profile_head_ms = std::chrono::duration<double, std::milli>(now - profile_mark).count();
