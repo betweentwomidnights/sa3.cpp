@@ -40,9 +40,13 @@ breakthrough.
 
 ## Headline: medium-base CUDA versus PyTorch
 
-This is the default production recipe: medium-base F16, 512 latent frames (~23.8 seconds), batch
+This is the default production recipe: medium-base F16, 512 latent frames (~47.6 seconds), batch
 size 1, DoRA-rows rank/alpha 16, checkpointed backward graphs, and the same pre-encoded ratatat
 latents. Both implementations ran on the RTX 5070 Laptop GPU.
+
+One latent frame is 4096 samples at 44.1 kHz — **0.0929 s** — for every model in the family, medium
+and small alike. So 512 frames is ~47.6 s and 256 is ~23.8 s. `--duration SEC` and `--frames N` set
+the same thing from either end, and `--duration` wins when both are given.
 
 | implementation | timing source | steady step | throughput | 2,500 updates |
 |---|---|---:|---:|---:|
@@ -167,15 +171,16 @@ uses the subsequent stable steps printed by `SA3_TRAIN_PROFILE=1`.
 
 | latent frames | audio context | sampled steps | T5 | prep | DiT | AdamW | total / step | projected 2,500 steps |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 512 | ~23.8 s | 2-5 | 104.8 ms | 2.0 ms | 9,034.3 ms | 32.5 ms | **9,173.5 ms** | **6 h 22 min** |
-| 256 | ~11.9 s | 2-6 | 100.2 ms | 1.0 ms | 5,383.8 ms | 33.2 ms | **5,518.6 ms** | **3 h 50 min** |
+| 512 | ~47.6 s | 2-5 | 104.8 ms | 2.0 ms | 9,034.3 ms | 32.5 ms | **9,173.5 ms** | **6 h 22 min** |
+| 256 | ~23.8 s | 2-6 | 100.2 ms | 1.0 ms | 5,383.8 ms | 33.2 ms | **5,518.6 ms** | **3 h 50 min** |
 
 Reducing the crop from 512 to 256 frames cut steady total step time by 39.8% (1.66x throughput).
-This is not strict reference-recipe parity: the shorter crop reduces the musical context seen by
-each update. Stable Audio 3 is a variable-length model family, however, and maintainer guidance
-indicates that adapters trained on roughly 12-second clips can still generate well at longer
-durations during inference. A 256-frame crop is therefore a practical iGPU training option rather
-than merely a smoke-test setting, although 512 frames remains the reference-style default.
+This is not strict reference-recipe parity: the shorter crop halves the musical context seen by
+each update, from ~47.6 s to ~23.8 s. Stable Audio 3 is a variable-length model family, however,
+and maintainer guidance indicates that adapters trained on clips as short as ~12 s can still
+generate well at longer durations during inference — so a 256-frame crop sits comfortably above
+that floor. It is therefore a practical iGPU training option rather than merely a smoke-test
+setting, although 512 frames remains the reference-style default.
 
 The 256-frame run was launched from Command Prompt with:
 
