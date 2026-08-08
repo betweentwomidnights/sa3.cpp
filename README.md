@@ -134,9 +134,9 @@ what's next:
 > dora-cols and the -xs variants are formula-validated only (no trained checkpoint to a/b yet) but
 > share the same apply path.
 >
-> **training an adapter here** covers six of the eight. dora-cols and dora-cols-xs currently abort in
-> the backward pass, and the bora families train correctly but ~110x slower per step than lora, so a
-> full run takes over a day. see [docs/TRAINING.md](docs/TRAINING.md).
+> **training an adapter here** covers all eight, at 0.8–2.5 s/step on a laptop 5070 (medium, rank
+> 16, the reference 512 frames) — a 2000-step run measured 34 min for dora-rows and 64 min for
+> dora-cols. see [docs/TRAINING.md](docs/TRAINING.md).
 
 credits:
 

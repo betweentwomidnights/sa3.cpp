@@ -23,8 +23,9 @@
 // VRAM-resident; the price is one extra forward pass. All step inputs, adapter tensors and
 // boundary/grad carriers live in ONE persistent backend buffer that no gallocr ever touches
 // (this also retires the "re-upload base_norm_sq every step" workaround — constants uploaded at
-// build survive). Functional adapter families only (lora / dora-rows); others use the
-// monolithic path in train_dit.h.
+// build survive). All adapter families: lora / dora-rows reach dit_lin functionally, and the rest
+// materialize a W_eff inside whichever segment graph consumes it (see install_overrides), which is
+// the whole reason they fit — built once for the step they were ~24.6 GB of live f32 weights.
 #pragma once
 
 #include "dit.h"
@@ -36,6 +37,7 @@
 #include "ggml-backend.h"
 
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -65,6 +67,7 @@ struct TrainCkptBlock {
     ggml_tensor* grad_ctx = nullptr;    // this block's dL/dcontext contribution [dim, Ctx]
     ggml_tensor* grad_gcond = nullptr;  // this block's dL/dgcond contribution [6*dim]
     std::vector<size_t> param_idx;      // indices into lora.params / TrainDitCkpt::params
+    ggml_gallocr_t alloc = nullptr;     // borrowed from TrainDitCkpt::ballocs; see the note there
 };
 
 struct TrainDitCkpt {
@@ -88,7 +91,8 @@ struct TrainDitCkpt {
     ggml_tensor* Gctx_in = nullptr;     // [dim, ctx_len] summed dL/dcontext (uploaded before H)
     ggml_tensor* Ggcond_in = nullptr;   // [6*dim] summed dL/dgcond
     std::vector<TrainDitParamTensors> params;  // adapter tensors, indexed like lora.params
-    DitLora dl;
+    std::vector<TrainLoraGraphParam> gp;       // same order; feeds train_lora_effective_weight
+    DitLora dl;                                // functional families only; empty otherwise
 
     // --- graphs ---
     ggml_context* fctx = nullptr;       // F: forward + boundary copies
@@ -100,7 +104,15 @@ struct TrainDitCkpt {
     ggml_tensor* velocity = nullptr;
     ggml_tensor* loss = nullptr;
     std::vector<size_t> tail_param_idx;
-    ggml_gallocr_t balloc = nullptr;    // shared by all block graphs (re-alloc'd per use)
+    // One allocator per DISTINCT block-graph shape, not one for all 24 blocks. With a uniform
+    // scope every block graph is identical, so a single allocator plans once and this is exactly
+    // the old behaviour. A scope that adapts only some blocks (--lora-include dit.0.) makes the
+    // graphs structurally different, and a shared gallocr then re-plans on every block boundary:
+    // ggml_gallocr_alloc_graph -> needs_realloc -> ggml_gallocr_reserve, which FREES and
+    // reallocates the buffer 24 times a step. That corrupted the step nondeterministically
+    // (~30% of runs died in ggml_cuda_set_device with "invalid device ordinal", or took an
+    // access violation). Grouping by shape means no allocator ever re-plans.
+    std::vector<ggml_gallocr_t> ballocs;
     std::vector<TrainCkptBlock> blocks;
     ggml_context* hctx = nullptr;       // H: head VJP, fwd+bwd
     ggml_gallocr_t halloc = nullptr;
@@ -117,7 +129,7 @@ struct TrainDitCkpt {
 inline void free_train_dit_ckpt(TrainDitCkpt& ck) {
     if (ck.falloc) ggml_gallocr_free(ck.falloc);
     if (ck.talloc) ggml_gallocr_free(ck.talloc);
-    if (ck.balloc) ggml_gallocr_free(ck.balloc);
+    for (ggml_gallocr_t a : ck.ballocs) if (a) ggml_gallocr_free(a);
     if (ck.halloc) ggml_gallocr_free(ck.halloc);
     for (TrainCkptBlock& b : ck.blocks) if (b.ctx) ggml_free(b.ctx);
     if (ck.fctx) ggml_free(ck.fctx);
@@ -131,10 +143,6 @@ inline void free_train_dit_ckpt(TrainDitCkpt& ck) {
 inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const TrainLoraState& lora,
                                  int frames, int cond_dim, int ctx_len,
                                  TrainDitCkpt& out, std::string& err, bool inpaint = false) {
-    if (lora.adapter_type != "lora" && lora.adapter_type != "dora-rows") {
-        err = "checkpointed backward supports functional families only (lora, dora-rows)";
-        return false;
-    }
     if (frames <= 0 || cond_dim <= 0 || ctx_len <= 0) {
         err = "invalid DiT training graph dimensions";
         return false;
@@ -150,11 +158,19 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
     out.ctx_len = ctx_len;
     const int64_t S = (int64_t)dc.mem_tokens + frames;
     const bool dora = lora.adapter_type == "dora-rows";
+    // Families dit_lin can apply functionally; the rest materialize a W_eff per segment graph
+    // (see install_overrides). Both are checkpointed — the split is only about how the adapter
+    // reaches dit_lin, not about whether the step fits in VRAM.
+    const bool functional = lora.adapter_type == "lora" || lora.adapter_type == "dora-rows";
+    const bool xs = lora.adapter_type.size() >= 3 &&
+                    lora.adapter_type.compare(lora.adapter_type.size() - 3, 3, "-xs") == 0;
     auto fail = [&](const std::string& msg) { err = msg; free_train_dit_ckpt(out); return false; };
 
     // --- persistent tensors ---
     {
-        const size_t n_tensors = 24 + (size_t)(dc.depth + 1) + lora.params.size() * 4;
+        // Per target, the widest family is bora-xs: U, V, M_xs, magnitude_r, magnitude_c. Standard
+        // families use at most lora_A, lora_B, magnitude and base_norm_sq.
+        const size_t n_tensors = 24 + (size_t)(dc.depth + 1) + lora.params.size() * 6;
         ggml_init_params ip = { ggml_tensor_overhead() * (n_tensors + 64), nullptr, true };
         out.pctx = ggml_init(ip);
         if (!out.pctx) return fail("ggml_init failed for persistent training tensors");
@@ -186,26 +202,56 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
         for (const TrainLoraParam& hp : lora.params) {
             TrainDitParamTensors tp;
             tp.stem = hp.target.stem;
-            tp.lora_A = ggml_new_tensor_2d(out.pctx, GGML_TYPE_F32, hp.target.in, lora.rank);
-            tp.lora_B = ggml_new_tensor_2d(out.pctx, GGML_TYPE_F32, lora.rank, hp.target.out);
-            ggml_set_param(tp.lora_A);
-            ggml_set_param(tp.lora_B);
-            DitLoraParam dp;
-            dp.A = tp.lora_A;
-            dp.B = tp.lora_B;
-            dp.scale = lora.alpha / (float)lora.rank;
-            dp.in = hp.target.in;
-            if (dora) {
+            TrainLoraGraphParam gp;
+            if (xs) {
+                // Frozen SVD bases are inputs (uploaded, never trained); only M_xs is a parameter.
+                tp.U = ggml_new_tensor_2d(out.pctx, GGML_TYPE_F32, lora.rank, hp.target.out);
+                tp.V = ggml_new_tensor_2d(out.pctx, GGML_TYPE_F32, lora.rank, hp.target.in);
+                tp.M_xs = ggml_new_tensor_2d(out.pctx, GGML_TYPE_F32, lora.rank, lora.rank);
+                ggml_set_param(tp.M_xs);
+                gp.U = tp.U;
+                gp.V = tp.V;
+                gp.M_xs = tp.M_xs;
+            } else {
+                tp.lora_A = ggml_new_tensor_2d(out.pctx, GGML_TYPE_F32, hp.target.in, lora.rank);
+                tp.lora_B = ggml_new_tensor_2d(out.pctx, GGML_TYPE_F32, lora.rank, hp.target.out);
+                ggml_set_param(tp.lora_A);
+                ggml_set_param(tp.lora_B);
+                gp.lora_A = tp.lora_A;
+                gp.lora_B = tp.lora_B;
+            }
+            if (!hp.magnitude.empty()) {
                 tp.magnitude = ggml_new_tensor_1d(out.pctx, GGML_TYPE_F32, (int64_t)hp.magnitude.size());
                 ggml_set_param(tp.magnitude);
-                tp.base_norm_sq = ggml_new_tensor_1d(out.pctx, GGML_TYPE_F32, hp.target.out);
-                tp.base_norm_sq_host = train_row_norm_sq(dit.get(hp.target.weight_name), hp.target.in,
-                                                         hp.target.out, 1e-12f);
-                dp.dora = true;
-                dp.magnitude = tp.magnitude;
-                dp.base_norm_sq = tp.base_norm_sq;
+                gp.magnitude = tp.magnitude;
             }
-            out.dl[hp.target.weight_name] = dp;
+            if (!hp.magnitude_r.empty()) {
+                tp.magnitude_r = ggml_new_tensor_1d(out.pctx, GGML_TYPE_F32, (int64_t)hp.magnitude_r.size());
+                ggml_set_param(tp.magnitude_r);
+                gp.magnitude_r = tp.magnitude_r;
+            }
+            if (!hp.magnitude_c.empty()) {
+                tp.magnitude_c = ggml_new_tensor_1d(out.pctx, GGML_TYPE_F32, (int64_t)hp.magnitude_c.size());
+                ggml_set_param(tp.magnitude_c);
+                gp.magnitude_c = tp.magnitude_c;
+            }
+            if (functional) {
+                DitLoraParam dp;
+                dp.A = tp.lora_A;
+                dp.B = tp.lora_B;
+                dp.scale = lora.alpha / (float)lora.rank;
+                dp.in = hp.target.in;
+                if (dora) {
+                    tp.base_norm_sq = ggml_new_tensor_1d(out.pctx, GGML_TYPE_F32, hp.target.out);
+                    tp.base_norm_sq_host = train_row_norm_sq(dit.tensors.at(hp.target.weight_name),
+                                                             hp.target.in, hp.target.out, 1e-12f);
+                    dp.dora = true;
+                    dp.magnitude = tp.magnitude;
+                    dp.base_norm_sq = tp.base_norm_sq;
+                }
+                out.dl[hp.target.weight_name] = dp;
+            }
+            out.gp.push_back(gp);
             out.params.push_back(tp);
         }
 
@@ -235,6 +281,10 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
     }
 
     const ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(dit.backend);
+    // A materialized W_eff adds ~10 nodes per target on top of what the segment already needs, and
+    // bora-xs (xs delta + row norm + col norm) is the worst case, so the non-functional families
+    // get a larger node budget in every graph.
+    const size_t gsz = functional ? 1 : 2;
     auto graph_ctx = [&](size_t graph_size, bool grads) -> ggml_context* {
         ggml_init_params ip = { ggml_tensor_overhead() * graph_size * 3 +
                                 ggml_graph_overhead_custom(graph_size, grads), nullptr, true };
@@ -245,7 +295,8 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
     auto keep_param_grads = [&](ggml_cgraph* g, const std::vector<size_t>& idx) {
         for (size_t i : idx) {
             const TrainDitParamTensors& tp = out.params[i];
-            for (ggml_tensor* p : { tp.lora_A, tp.lora_B, tp.magnitude }) {
+            for (ggml_tensor* p : { tp.lora_A, tp.lora_B, tp.M_xs, tp.magnitude,
+                                    tp.magnitude_r, tp.magnitude_c }) {
                 if (!p) continue;
                 ggml_tensor* gr = ggml_graph_get_grad(g, p);
                 if (gr) ggml_set_output(gr);
@@ -253,21 +304,53 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
         }
     };
 
+    // Materialized families build their W_eff inside the graph that consumes it, rather than once
+    // for the whole step. That is what lets them be checkpointed at all: the monolithic graph kept
+    // all ~228 f32 effective weights alive from their forward use to their backward use (~24.6 GiB
+    // of gallocr buffer on an 8 GiB card, so the driver paged it to sysmem and every kernel
+    // crawled). Here F is forward-only, so gallocr reuses each W_eff's buffer as soon as its block
+    // has run, and T/B_l/H only ever build the targets their own segment owns.
+    // `idx == nullptr` means every target (F). Reads the base from `tensors`, never `get()`, since
+    // get() is transparently shadowed by whatever is currently installed.
+    auto install_overrides = [&](ggml_context* ctx, const std::vector<size_t>* idx) {
+        std::vector<std::string> names;
+        if (functional) return names;
+        const size_t n = idx ? idx->size() : lora.params.size();
+        names.reserve(n);
+        for (size_t k = 0; k < n; ++k) {
+            const size_t i = idx ? (*idx)[k] : k;
+            const std::string& wn = lora.params[i].target.weight_name;
+            dit.overrides[wn] = train_lora_effective_weight(ctx, dit.tensors.at(wn), out.gp[i],
+                                                            lora.adapter_type, lora.rank, lora.alpha);
+            names.push_back(wn);
+        }
+        return names;
+    };
+    auto erase_overrides = [&](const std::vector<std::string>& names) {
+        for (const std::string& n : names) dit.overrides.erase(n);
+    };
+    const DitLora* dl = functional ? &out.dl : nullptr;
+
     // --- F: forward + boundary copies ---
     {
-        out.fctx = graph_ctx(16384, false);
+        // A materialized W_eff costs ~10 extra nodes per target on top of the ~10.3k the forward
+        // already uses, so the non-functional families need the larger budget.
+        const size_t fsize = functional ? 16384 : 32768;
+        out.fctx = graph_ctx(fsize, false);
         if (!out.fctx) return fail("ggml_init failed for forward graph");
-        out.fgraph = ggml_new_graph_custom(out.fctx, 16384, false);
-        DitHeadOut h = dit_head(out.fctx, dit, out.x, out.tfeat, out.cross, out.global, dc, &out.dl, true);
+        out.fgraph = ggml_new_graph_custom(out.fctx, fsize, false);
+        const std::vector<std::string> ov = install_overrides(out.fctx, nullptr);
+        DitHeadOut h = dit_head(out.fctx, dit, out.x, out.tfeat, out.cross, out.global, dc, dl, true);
         ggml_build_forward_expand(out.fgraph, ggml_cpy(out.fctx, h.context, out.context_p));
         ggml_build_forward_expand(out.fgraph, ggml_cpy(out.fctx, h.gcond, out.gcond_p));
         ggml_tensor* xc = h.x0;
         ggml_build_forward_expand(out.fgraph, ggml_cpy(out.fctx, xc, out.xb[0]));
         for (int l = 0; l < dc.depth; ++l) {
             xc = dit_block(out.fctx, dit, "dit." + std::to_string(l) + ".", xc, h.context, h.gcond,
-                           out.pos, out.ones, dc, out.local, &out.dl, true);
+                           out.pos, out.ones, dc, out.local, dl, true);
             ggml_build_forward_expand(out.fgraph, ggml_cpy(out.fctx, xc, out.xb[(size_t)l + 1]));
         }
+        erase_overrides(ov);
         out.falloc = ggml_gallocr_new(buft);
         if (!out.falloc || !ggml_gallocr_alloc_graph(out.falloc, out.fgraph))
             return fail("failed to allocate checkpointed forward graph");
@@ -275,10 +358,11 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
 
     // --- T: tail + real loss, fwd+bwd; emits dL/dx_depth ---
     {
-        out.tctx = graph_ctx(2048, true);
+        out.tctx = graph_ctx(2048 * gsz, true);
         if (!out.tctx) return fail("ggml_init failed for tail graph");
-        out.tgraph = ggml_new_graph_custom(out.tctx, 2048, true);
-        ggml_tensor* vel = ggml_cont(out.tctx, dit_tail(out.tctx, dit, out.xb[(size_t)dc.depth], dc, &out.dl, true));
+        out.tgraph = ggml_new_graph_custom(out.tctx, 2048 * gsz, true);
+        const std::vector<std::string> ov = install_overrides(out.tctx, &out.tail_param_idx);
+        ggml_tensor* vel = ggml_cont(out.tctx, dit_tail(out.tctx, dit, out.xb[(size_t)dc.depth], dc, dl, true));
         out.velocity = vel;
         ggml_set_output(vel);
         ggml_tensor* sq = ggml_sqr(out.tctx, ggml_sub(out.tctx, vel, out.target));
@@ -288,6 +372,7 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
         ggml_set_output(out.loss);
         ggml_build_forward_expand(out.tgraph, out.loss);
         ggml_build_backward_expand(out.tctx, out.tgraph, nullptr);
+        erase_overrides(ov);
         ggml_tensor* gx = ggml_graph_get_grad(out.tgraph, out.xb[(size_t)dc.depth]);
         if (!gx) return fail("tail graph produced no dL/dx gradient");
         ggml_build_forward_expand(out.tgraph, ggml_cpy(out.tctx, gx, out.g_in(dc.depth - 1)));
@@ -297,23 +382,23 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
             return fail("failed to allocate tail training graph");
     }
 
-    // --- B_l: per-block VJP fwd+bwd, shared allocator (re-planned per use in the runner) ---
+    // --- B_l: per-block VJP fwd+bwd, one allocator per distinct graph shape ---
     {
-        out.balloc = ggml_gallocr_new(buft);
-        if (!out.balloc) return fail("failed to create block graph allocator");
         out.blocks.resize((size_t)dc.depth);
         for (int l = 0; l < dc.depth; ++l) {
             TrainCkptBlock& B = out.blocks[(size_t)l];
             B.param_idx = block_param_idx[(size_t)l];
-            B.ctx = graph_ctx(6144, true);
+            B.ctx = graph_ctx(6144 * gsz, true);
             if (!B.ctx) return fail("ggml_init failed for block graph");
-            B.graph = ggml_new_graph_custom(B.ctx, 6144, true);
+            B.graph = ggml_new_graph_custom(B.ctx, 6144 * gsz, true);
+            const std::vector<std::string> ov = install_overrides(B.ctx, &B.param_idx);
             ggml_tensor* xo = dit_block(B.ctx, dit, "dit." + std::to_string(l) + ".", out.xb[(size_t)l],
-                                        out.context_p, out.gcond_p, out.pos, out.ones, dc, out.local, &out.dl, true);
+                                        out.context_p, out.gcond_p, out.pos, out.ones, dc, out.local, dl, true);
             ggml_tensor* vjp = ggml_sum(B.ctx, ggml_mul(B.ctx, xo, out.g_in(l)));
             ggml_set_loss(vjp);
             ggml_build_forward_expand(B.graph, vjp);
             ggml_build_backward_expand(B.ctx, B.graph, nullptr);
+            erase_overrides(ov);
             ggml_tensor* gx = ggml_graph_get_grad(B.graph, out.xb[(size_t)l]);
             if (!gx) return fail("block graph produced no dL/dx gradient");
             ggml_build_forward_expand(B.graph, ggml_cpy(B.ctx, gx, out.g_out(l)));
@@ -323,6 +408,25 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
             ggml_set_output(B.grad_ctx);
             ggml_set_output(B.grad_gcond);
             keep_param_grads(B.graph, B.param_idx);
+        }
+
+        // Group blocks by graph shape and give each group its own allocator, reserved once here.
+        // Two blocks share an allocator only when their graphs are structurally identical, so
+        // ggml_gallocr_alloc_graph in the runner never takes the realloc path. A uniform scope
+        // yields exactly one group, i.e. the previous single-allocator behaviour and memory use.
+        std::map<int, size_t> shape_to_alloc;   // graph node count -> index into ballocs
+        for (int l = 0; l < dc.depth; ++l) {
+            TrainCkptBlock& B = out.blocks[(size_t)l];
+            const int shape = ggml_graph_n_nodes(B.graph);
+            auto it = shape_to_alloc.find(shape);
+            if (it == shape_to_alloc.end()) {
+                ggml_gallocr_t a = ggml_gallocr_new(buft);
+                if (!a) return fail("failed to create block graph allocator");
+                out.ballocs.push_back(a);
+                if (!ggml_gallocr_reserve(a, B.graph)) return fail("failed to reserve block graph allocator");
+                it = shape_to_alloc.emplace(shape, out.ballocs.size() - 1).first;
+            }
+            B.alloc = out.ballocs[it->second];
         }
     }
 
@@ -334,10 +438,11 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
     // ggml_build_backward_expand would assert "no trainable parameters found". That is what a
     // --lora-scope of core does, since core keeps only the 24 blocks' own projections.
     if (!out.head_param_idx.empty()) {
-        out.hctx = graph_ctx(4096, true);
+        out.hctx = graph_ctx(4096 * gsz, true);
         if (!out.hctx) return fail("ggml_init failed for head graph");
-        out.hgraph = ggml_new_graph_custom(out.hctx, 4096, true);
-        DitHeadOut h = dit_head(out.hctx, dit, out.x, out.tfeat, out.cross, out.global, dc, &out.dl, true);
+        out.hgraph = ggml_new_graph_custom(out.hctx, 4096 * gsz, true);
+        const std::vector<std::string> ov = install_overrides(out.hctx, &out.head_param_idx);
+        DitHeadOut h = dit_head(out.hctx, dit, out.x, out.tfeat, out.cross, out.global, dc, dl, true);
         ggml_tensor* vjp = ggml_add(out.hctx,
             ggml_add(out.hctx,
                 ggml_sum(out.hctx, ggml_mul(out.hctx, h.x0, out.g_out(0))),
@@ -346,6 +451,7 @@ inline bool build_train_dit_ckpt(GgufModel& dit, const DitConfig& dc, const Trai
         ggml_set_loss(vjp);
         ggml_build_forward_expand(out.hgraph, vjp);
         ggml_build_backward_expand(out.hctx, out.hgraph, nullptr);
+        erase_overrides(ov);
         keep_param_grads(out.hgraph, out.head_param_idx);
         out.halloc = ggml_gallocr_new(buft);
         if (!out.halloc || !ggml_gallocr_alloc_graph(out.halloc, out.hgraph))

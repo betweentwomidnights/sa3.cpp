@@ -72,9 +72,8 @@ struct TrainConfig {
     bool random_crop = true;
     // Gradient-checkpointed backward (train_ckpt.h): run the DiT backward block-by-block so peak
     // activation memory is one block's working set instead of the whole graph (the monolithic
-    // fwd+bwd graph needs ~9.6 GB at 512 frames and pages out of VRAM on 8 GB cards). Only the
-    // functional adapter families (lora, dora-rows) support it; others fall back to the
-    // monolithic graph automatically.
+    // fwd+bwd graph needs ~9.6 GB at 512 frames -- ~24.6 GB for the materialized families -- and
+    // pages out of VRAM on 8 GB cards). All adapter families support it.
     bool ckpt_backward = true;
     // Pre-encoded latents (train_latents.h): encode each training file ONCE, full-length, at
     // startup and random-crop in LATENT space per step — the reference training method (required

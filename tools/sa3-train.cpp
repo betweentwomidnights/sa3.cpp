@@ -389,9 +389,10 @@ int main(int argc, char** argv) {
         sa3::TrainDitGraph graph;
         sa3::TrainDitCkpt ck;
         // Checkpointed (per-block) backward: peak activation memory is one block's working set,
-        // so the step stays VRAM-resident. Functional families only; others use the monolithic graph.
-        const bool use_ckpt = cfg.ckpt_backward &&
-                              (cfg.adapter_type == "lora" || cfg.adapter_type == "dora-rows");
+        // so the step stays VRAM-resident. Every adapter family supports it -- the families
+        // dit_lin cannot apply functionally materialize their W_eff inside each segment's own
+        // graph instead of once for the whole step (see install_overrides in train_ckpt.h).
+        const bool use_ckpt = cfg.ckpt_backward;
         int graph_frames = 0, graph_cond_dim = 0, graph_ctx_len = 0;
         sa3::TrainAdamWParams opt;
         opt.learning_rate = cfg.learning_rate;

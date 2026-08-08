@@ -169,31 +169,73 @@ pass `--svd-bases bases.gguf` to load precomputed bases instead — generate the
 `python tools/compute_svd_bases.py --dit models/... --rank 8 --out bases.gguf` for exact
 `torch.linalg.svd` parity with the reference implementation.
 
-Accepted is not the same as working. Six of the eight train today; the two column-normalizing
-families do not:
+All eight train, and all eight are within about 3x of each other per step:
 
-| adapter type | trains | s/step |
+| adapter type | s/step | first step |
 |---|---|---|
-| `lora` | yes | 0.5 |
-| `dora-rows` (default) | yes | 3.2 |
-| `lora-xs` | yes | 16.3 |
-| `dora-rows-xs` | yes | 30.9 |
-| `bora` | yes | 59.4 |
-| `bora-xs` | yes | 69.6 |
-| `dora-cols` | **no** | — |
-| `dora-cols-xs` | **no** | — |
+| `lora` | 0.80 | 1.02 |
+| `lora-xs` | 1.05 | 1.33 |
+| `dora-rows` (default) | 1.25 | 6.17 |
+| `dora-rows-xs` | 1.57 | 2.00 |
+| `dora-cols-xs` | 1.84 | 2.31 |
+| `dora-cols` | 1.95 | 2.35 |
+| `bora-xs` | 2.33 | 2.67 |
+| `bora` | 2.47 | 2.88 |
 
-`dora-cols` and `dora-cols-xs` abort during the backward pass with
-`GGML_ASSERT(ggml_is_padded_1d(a))` in `ggml_build_backward_expand`, which correlates with the
-column normalization those two share.
+CUDA / RTX 5070 Laptop, medium, rank 16, the reference 512 frames, averaged over steps 10-40. A
+2000-step run is 30-90 minutes depending on family; the two measured end to end came in at 34 min
+(`dora-rows`) and 64 min (`dora-cols`).
 
-Timings are CUDA / RTX 5070 Laptop, medium, 128 frames, and are meant as ratios rather than
-absolutes. The spread matters when planning a run: `dora-rows` at 3.2 s/step is a couple of hours
-for 2000 steps, while `bora-xs` at 69.6 s/step is closer to a day and a half for the same
-schedule. `dora-rows` is the default and by far the best-trodden path.
+Measure over enough steps to reach steady state. The first step carries graph build and, for
+`dora-rows`, the one-off `base_norm_sq` reduction over every targeted weight — 6.17 s against a
+1.25 s steady step, so a 2- or 3-step average is mostly setup and ranks the families wrongly.
+
+Two things used to make this table much worse, both fixed:
+
+- `dora-cols` and `dora-cols-xs` aborted during the backward pass on
+  `GGML_ASSERT(ggml_is_padded_1d(a))`. ggml differentiates transpose into a non-contiguous view
+  and `ggml_scale` rejects one, so the column-norm helper's transposed gradient reached the
+  scale on the low-rank delta. It now interposes a `cont`, whose backward re-materializes the
+  gradient contiguously.
+- Six of the eight ran a monolithic backward asking for 24.6 GiB of allocator on an 8 GiB card,
+  so the driver paged it to system RAM: `dora-cols` measured 92.76 s/step at 512 frames against
+  1.95 now, with the allocator down to 1126 MiB. Gradient checkpointing had been gated to the two
+  families `dit_lin` can apply functionally; the rest now build their effective weight inside
+  whichever segment graph consumes it, so they are checkpointed too. See `--checkpoint-backward`.
+
+`dora-rows` remains the default and the best-trodden path.
 
 Each sample is conditioned by its caption text. A dataset-level `prompt_config.json` can optionally
 compose that caption with general metadata tags or path-derived text.
+
+### Path-derived captions are off by default
+
+`use_paths` defaults to **false**, which is a deliberate departure from underfit, where filenames
+are part of the dice pool. Turn it on only if your filenames actually read as descriptions of the
+music:
+
+```json
+{ "prompt_config": { "use_tags": true, "use_paths": true, "balance": { "tags": 40, "paths": 30 } } }
+```
+
+With that on, roughly a third of steps train on the file path verbatim — and `path_hide_ext`,
+`path_hide_dirs` and `path_hide_topmost` all default to false, so a track lands in the model as
+
+```
+03 - Gettysburg [Q-gtqz_il-w].wav
+```
+
+A track number, a YouTube ID and a file extension are not a description of a piece of music, and
+training on them teaches the adapter to emit your material in response to noise. That dilutes the
+conditioning the rest of the run is trying to build, and it shows up at inference as an adapter
+that responds best to no prompt at all rather than to a prompt from its training distribution.
+
+If your filenames are genuinely descriptive, `use_paths` is worth having, and `hide_ext` /
+`hide_dirs` / `hide_topmost_dir` trim the parts that are not. Otherwise leave it off and let the
+tags plus the CFG dropout (`--cfg-dropout-prob`, default 0.1) do the generalizing.
+
+Check what a run is actually training on before committing hours to it — the per-step log prints
+the composed caption, and a quick tally of `prompt="..."` across the log will show the mix.
 
 ## Target Scopes
 
