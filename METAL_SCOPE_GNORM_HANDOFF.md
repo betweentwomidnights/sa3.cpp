@@ -342,6 +342,59 @@ Mono OOM check you asked for, on the fixed-crop matrix: `mono` blocks-only
 matching your 6,412 MiB CUDA figure. Zero `Insufficient Memory`, zero command-buffer failures in
 all four cells. **The 2.8% second effect is not an OOM artefact.**
 
+## ROOT CAUSE: F reads scratch it does not fully write
+
+`SA3_ZERO_F_SCRATCH=1` (on this branch) memsets every non-persistent tensor in `fgraph` before each
+`ggml_backend_graph_compute`. That alone fixes the broken configuration:
+
+| run | step 1 | step 2 | step 3 | `xb[0]` abssum |
+|---|---:|---:|---:|---:|
+| blocks-only, baseline | 0.704558 | **3.04466** | 2.60996 | 1.474471e+06 |
+| blocks-only, **F scratch zeroed** | 0.704558 | **1.35079** | 0.836514 | **1.376813e+06** |
+| +`proj_in` (known-correct reference) | 0.704558 | **1.35079** | 0.836514 | 1.376813e+06 |
+
+The zeroed blocks-only run reproduces the reference trajectory exactly and its `xb[0]` matches to
+seven digits. (The FNV differs in the last bits because the two runs carry different adapter sets,
+so the ~1e-33 residual is not identical — irrelevant at this scale.)
+
+**Mechanism.** F's allocation is planned once at build and never changes, so "step 1 right, step 2
+wrong" was never explicable by a bad plan. What it is: F reads a scratch buffer it does not fully
+write. Step 1 is correct only because a freshly allocated backend buffer happens to be zeroed; from
+step 2 that memory holds F's own step-1 leftovers, and `x0` comes out wrong. Whether the
+uninitialised read lands on live data depends on the gallocr plan, which is why adding `proj_in`'s
+four nodes flipped it — and why `H` was only ever a correlate. `H` never caused anything.
+
+**This also retires the earlier confusion.** `context_p`/`gcond_p` were always bit-identical because
+their producing nodes do not touch the affected buffer; only the `x0` branch does. And the CPU
+backend reproducing it is consistent — gallocr is backend-agnostic, so the same plan and the same
+under-written destination occur there too.
+
+### What is NOT yet known
+
+Which op under-writes its destination. Candidates worth checking in `dit_head`'s `x0` path: anything
+producing a tensor larger than the region its kernel writes — a padded/strided destination, a
+`ggml_cpy`/`ggml_cont` over a view that does not cover the full destination, or the memory-token
+concat. Identifying it is the difference between a real fix and the blunt workaround.
+
+### Ruled out along the way (all with measurements)
+
+Aliasing between graph buffers — dumped scratch extents for F/T/B/H plus persistent in both configs:
+**no overlaps** except `B[0]`/`B[1]`, which share one allocator by design (#28's shape grouping).
+Also excluded earlier: BLAS/Accelerate, RNG draw order (`lora_A` bit-identical across scopes),
+sampling (all F inputs bit-identical, crop fixed), the optimizer (`B` bit-identical at step 2),
+adapter magnitude (lr swept 20 orders), dead `Gctx_in`/`Ggcond_in` writes, and my own instrumentation.
+
+### Fix options
+
+1. **Find and fix the under-writing op.** Correct, and fixes it for every backend and every graph
+   that happens to hit the same plan — this is not necessarily specific to `--lora-scope core`, it
+   is specific to an allocation layout, so other scopes could hit it too.
+2. **Zero F's scratch each step.** Blunt but cheap (67 MiB memset, ~ms against a 12 s step) and
+   provably correct here. Reasonable as a stopgap.
+3. **Gate `--lora-scope core` on Metal.** Narrowest, but note the finding above: if the trigger is
+   an allocation layout rather than the scope itself, gating `core` does not guarantee other scopes
+   are safe.
+
 ## Open question nobody has answered
 
 The **direction**. Widening the scope raises the norm on CUDA and lowers it on Metal, with identical

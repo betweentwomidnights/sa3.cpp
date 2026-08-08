@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -363,6 +364,62 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
     accum.mag_r.resize(lora.params.size());
     accum.mag_c.resize(lora.params.size());
 
+    // SA3_ALLOC_DEBUG=1: dump every graph's scratch extent once all of them are allocated
+    // (block graphs are allocated inside the loop, so step 2 is the first point they all exist).
+    // F is planned once at build, so a bad plan alone cannot explain "step 1 right, step 2 wrong";
+    // what would is F's scratch overlapping memory the block loop writes during step 1.
+    if (getenv("SA3_ALLOC_DEBUG")) {
+        static int adbg = 0;
+        if (++adbg == 2) {
+            char* plo = (char*)ggml_backend_buffer_get_base(ck.pbuf);
+            char* phi = plo + ggml_backend_buffer_get_size(ck.pbuf);
+            struct Ext { const char* nm; char* lo; char* hi; };
+            std::vector<Ext> ex;
+            auto scan = [&](ggml_cgraph* g, const char* nm) {
+                if (!g) return;
+                char* lo = (char*)-1; char* hi = nullptr;
+                for (int i = 0; i < ggml_graph_n_nodes(g); ++i) {
+                    ggml_tensor* t = ggml_graph_node(g, i);
+                    if (!t->data) continue;
+                    char* b = (char*)t->data; char* e = b + ggml_nbytes(t);
+                    if (b >= plo && e <= phi) continue;         // persistent, not scratch
+                    if (b < lo) lo = b;
+                    if (e > hi) hi = e;
+                }
+                if (hi) ex.push_back({nm, lo, hi});
+            };
+            scan(ck.fgraph, "F"); scan(ck.tgraph, "T");
+            for (size_t i = 0; i < ck.blocks.size() && i < 2; ++i)
+                scan(ck.blocks[i].graph, i == 0 ? "B[0]" : "B[1]");
+            scan(ck.hgraph, "H");
+            std::fprintf(stderr, "[alloc] persistent [%p .. %p] %.1f MiB\n", (void*)plo, (void*)phi,
+                         (double)(phi - plo) / (1024.0 * 1024.0));
+            for (auto& e : ex)
+                std::fprintf(stderr, "[alloc] %-5s scratch [%p .. %p] %8.1f MiB\n", e.nm,
+                             (void*)e.lo, (void*)e.hi, (double)(e.hi - e.lo) / (1024.0 * 1024.0));
+            for (size_t i = 0; i < ex.size(); ++i) {
+                if (ex[i].lo < phi && ex[i].hi > plo)
+                    std::fprintf(stderr, "[alloc] *** %s OVERLAPS PERSISTENT ***\n", ex[i].nm);
+                for (size_t j = i + 1; j < ex.size(); ++j)
+                    if (ex[i].lo < ex[j].hi && ex[j].lo < ex[i].hi)
+                        std::fprintf(stderr, "[alloc] *** %s OVERLAPS %s ***\n", ex[i].nm, ex[j].nm);
+            }
+        }
+    }
+    // SA3_ZERO_F_SCRATCH=1: wipe F's scratch before every compute. If F reads a buffer it does
+    // not fully write, step 1 is right only because the allocation started zeroed, and step 2
+    // sees step 1's leftovers. Zeroing makes every step look like step 1.
+    if (getenv("SA3_ZERO_F_SCRATCH")) {
+        char* plo = (char*)ggml_backend_buffer_get_base(ck.pbuf);
+        char* phi = plo + ggml_backend_buffer_get_size(ck.pbuf);
+        for (int i = 0; i < ggml_graph_n_nodes(ck.fgraph); ++i) {
+            ggml_tensor* t = ggml_graph_node(ck.fgraph, i);
+            if (!t->data) continue;
+            char* b = (char*)t->data;
+            if (b >= plo && b + ggml_nbytes(t) <= phi) continue;   // never touch persistent
+            std::memset(b, 0, ggml_nbytes(t));
+        }
+    }
     // F: forward, storing block boundaries + context/gcond into persistent tensors
     ggml_backend_graph_compute(backend, ck.fgraph);
     // SA3_FWD_DEBUG=1: dump F's outputs. These live in the PERSISTENT buffer, which no gallocr
