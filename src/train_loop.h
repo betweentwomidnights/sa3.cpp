@@ -365,6 +365,38 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
 
     // F: forward, storing block boundaries + context/gcond into persistent tensors
     ggml_backend_graph_compute(backend, ck.fgraph);
+    // SA3_FWD_DEBUG=1: dump F's outputs. These live in the PERSISTENT buffer, which no gallocr
+    // ever touches, so reading them back after F is meaningful — unlike scratch node outputs,
+    // whose buffers gallocr reuses. With a frozen inert adapter these must be scope-independent.
+    if (getenv("SA3_FWD_DEBUG")) {
+        static int fdbg_step = 0;
+        ++fdbg_step;
+        ggml_backend_synchronize(backend);
+        auto dump = [&](const char* nm, ggml_tensor* t) {
+            if (!t) return;
+            const size_t nb = ggml_nbytes(t);
+            std::vector<char> raw(nb);
+            ggml_backend_tensor_get(t, raw.data(), 0, nb);
+            uint64_t fnv = 1469598103934665603ULL;
+            for (size_t i = 0; i < nb; ++i) { fnv ^= (unsigned char)raw[i]; fnv *= 1099511628211ULL; }
+            double s = 0.0;
+            const float* f = (const float*)raw.data();
+            for (size_t i = 0; i < nb / sizeof(float); ++i) s += std::fabs(f[i]);
+            std::fprintf(stderr, "[fwd] step %d %-11s abssum=%+.6e fnv=%016llx\n",
+                         fdbg_step, nm, s, (unsigned long long)fnv);
+        };
+        // F's inputs, uploaded before it ran. context_p/gcond_p depend on cross/tfeat/global;
+        // x0 depends on x/local/pos. If x differs, the divergence is upstream of F entirely.
+        if (!ck.params.empty()) { dump("ADPT:A[0]", ck.params[0].lora_A); dump("ADPT:B[0]", ck.params[0].lora_B); }
+        dump("IN:x", ck.x);
+        dump("IN:target", ck.target);
+        dump("IN:local", ck.local);
+        dump("IN:cross", ck.cross);
+        dump("xb[0]", ck.xb.empty() ? nullptr : ck.xb.front());
+        dump("xb[depth]", ck.xb.empty() ? nullptr : ck.xb.back());
+        dump("context_p", ck.context_p);
+        dump("gcond_p", ck.gcond_p);
+    }
     // T: tail + real loss; emits dL/dx_depth into the first ping-pong carrier
     ggml_graph_reset(ck.tgraph);
     ggml_backend_graph_compute(backend, ck.tgraph);

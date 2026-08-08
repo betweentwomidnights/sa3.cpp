@@ -290,6 +290,58 @@ Two candidates worth trying next, in order:
    and it is the question everything else currently hinges on. `loss` alone cannot distinguish
    them because it is computed in `T`, downstream of both.
 
+### Probe 3 (safe forward read): F computes a wrong `x0`, with everything upstream bit-identical
+
+Ran it. `xb[]`, `context_p`, `gcond_p` read from the persistent buffer immediately after F, plus
+F's inputs and the shared adapter tensors. Plain `lora`, `lr=1e-35`, `--random-crop false`,
+512 frames, seed 42, checkpointed, blocks-only vs +`proj_in`. FNV over raw bytes, so any bit
+difference shows.
+
+**Step 1: every tensor bit-identical.** **Step 2:**
+
+| tensor | blocks-only | +`proj_in` | |
+|---|---|---|---|
+| `IN:x` | `1b1de7f35f1a3484` | `1b1de7f35f1a3484` | identical |
+| `IN:target` | `46c2f6e91696cdb3` | `46c2f6e91696cdb3` | identical |
+| `IN:local` | `be05445d6c098a83` | `be05445d6c098a83` | identical |
+| `IN:cross` | `885c52e59a4a3c36` | `885c52e59a4a3c36` | identical |
+| `ADPT:A[0]` | `6754814d3f32d4a3` | `6754814d3f32d4a3` | identical |
+| `ADPT:B[0]` | `4a5ba5a04ab0c598` | `4a5ba5a04ab0c598` | identical (abssum 9.56e-33) |
+| `context_p` | `6bdaa5c2c8f53962` | `6bdaa5c2c8f53962` | identical |
+| `gcond_p` | `6a1c57b46977eca7` | `6a1c57b46977eca7` | identical |
+| **`xb[0]`** | `27d945097a8d4c2f` | `0386318a8691ba7c` | **differs, abssum 1.474e6 vs 1.377e6 (7%)** |
+| **`xb[depth]`** | `fc1b9484783dc1e5` | `d3aa93d289504f44` | **differs** |
+
+So at step 2: identical inputs, identical shared adapters, frozen base weights, `B ~ 9.6e-33`.
+The sole difference between the runs is that one extra target carries four graph nodes
+(`mul_mat`, `mul_mat`, `scale`, `add`) contributing ~1e-33. **`x0` moves 7%.**
+
+**This answers your fork: it is a forward bug, not a backward one.** Everything downstream —
+block gradients, `gctx_sum`, `gnorm`, loss — is consequence.
+
+**And it localises inside `dit_head` itself.** `x0`, `context` and `gcond` all come out of the same
+`dit_head()` call. Two are bit-identical; only `x0` diverges — and `x0` is the branch containing
+`proj_in`, the target whose adapter is being added.
+
+RNG draw-order is excluded: `lora_A` is bit-identical across the two runs despite the differing
+target count, so the shared 72 adapters are the same objects. Sampling is excluded (all inputs
+identical, crop fixed). The optimizer is excluded (`B` identical at step 2; it only diverges at
+step 3, as a consequence).
+
+Note the trigger: at step 1 `B` is **exactly** 0 and `x0` is bit-identical; at step 2 `B` is
+~1e-33 and `x0` is 7% off. So it is not the adapter's magnitude but the transition from
+"contributes exactly zero" to "contributes a denormal-scale value" — or, equivalently, whatever
+changes in F's execution once those four nodes carry nonzero data.
+
+Given no overlap was found between F/T/H/block scratch and the persistent buffer (min/max spans
+only, so a gap could hide), your allocation-layout candidate is now the leading one: the four extra
+nodes change F's gallocr plan, and F is the graph whose output is wrong.
+
+Mono OOM check you asked for, on the fixed-crop matrix: `mono` blocks-only
+`DiT fwd+bwd graph: 7884 nodes, gallocr buffer 6412.1 MiB`, +`proj_in` 7907 nodes / 6420.9 MiB —
+matching your 6,412 MiB CUDA figure. Zero `Insufficient Memory`, zero command-buffer failures in
+all four cells. **The 2.8% second effect is not an OOM artefact.**
+
 ## Open question nobody has answered
 
 The **direction**. Widening the scope raises the norm on CUDA and lowers it on Metal, with identical
