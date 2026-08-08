@@ -144,6 +144,43 @@ moves them by 1 part in 8000, which is the scale you would expect.
 Losses are scope-independent on CUDA at every step (0.6534 / 0.8558 / 0.3111 across all three
 runs, varying only in the 4th decimal), so none of this perturbs the trajectory here.
 
+### Metal answer to probe 1: the invariant breaks, and it isolates the decomposition
+
+Ran it on Metal exactly as specified (`--adapter-type lora`, `--learning-rate 1e-35`, 512 frames,
+seed 42, 3 steps), and added a monolithic pair so the decomposition itself is under test.
+
+| run | H | step 1 | step 2 | step 3 | gnorm (steps 1-3) |
+|---|---|---|---|---|---|
+| `ckpt` blocks only | skipped | 0.876117 | **1.04967** | 1.81555 | 0.0491 / 4.1408 / 1.7276 |
+| `ckpt` + `proj_in` | ran | 0.876117 | **1.42897** | 1.27942 | 0.0801 / 0.3483 / 0.2761 |
+| `mono` blocks only | n/a | 0.876117 | **1.41798** | 1.79573 | 0.0491 / 0.4473 / 1.1438 |
+| `mono` + `proj_in` | n/a | 0.876117 | **1.42897** | 1.27942 | 0.0801 / 0.3483 / 0.2761 |
+
+`|gctx_sum|` / `|ggcond_sum|` at step 2, checkpointed: blocks-only `0.388184 / 9.194522` against
++`proj_in` `0.006269 / 1.872330`. Step 1 is identical in both (`0.000457 / 0.321336`), matching CUDA.
+
+**Three things fall out.**
+
+1. **`ckpt` + `proj_in` is bit-identical to `mono` + `proj_in`** — loss *and* gnorm, all three steps.
+   When `H` runs, the checkpointed decomposition reproduces the monolithic graph exactly.
+2. **`ckpt` blocks-only is the lone outlier**, ~26% off the other three at step 2. At `lr=1e-35`
+   nothing moves, so all four step-2 forwards should be the same base model on the same sample.
+   Only checkpointed-with-`H`-skipped is not.
+3. **`mono` breaks the invariant too, but by 0.8%** (1.41798 vs 1.42897) — small, scope-dependent,
+   and present with no decomposition involved at all. Plausibly the same thing as the ~4x baseline
+   elevation at full scope, and separate from the `H` effect.
+
+So the large effect is **not** training dynamics: with `H` skipped the checkpointed path computes a
+different forward, and step 1 being clean means it is state carried across the step boundary rather
+than anything wrong at build time. Your reading of the CUDA result — that the accumulation is where
+Metal diverges — is where this points, with the added constraint that it only diverges when `H` is
+absent, since `H` present reproduces `mono` bit-for-bit.
+
+Worth noting probes 2 and 3 are now the obvious follow-ups, and (3) is especially interesting given
+the above: `Gctx_in`/`Ggcond_in` are uploaded and consumed by nobody when `H` is skipped, which is
+precisely the configuration that breaks. Skipping that upload when `hgraph` is null is a two-line
+change and would test it directly.
+
 ## Open question nobody has answered
 
 The **direction**. Widening the scope raises the norm on CUDA and lowers it on Metal, with identical
