@@ -6,7 +6,15 @@ durable parts land in `docs/METAL.md` / `docs/TRAINING.md`.
 Branch `experiment/metal-lora-scope-gnorm`, off `79f57b8` (post-#28 main). Nothing here blocks
 anything shipped — #28 merged clean and this reproduces on `main`.
 
-> ## STATUS: ROOT-CAUSED. One question left, and it is a code read.
+> ## STATUS: SOLVED — ggml Metal bug, minimal reproducer in `tests/metal_set_wide_row_repro.cpp`
+>
+> **Non-inplace `ggml_set` on Metal truncates its `src0 -> dst` copy at 1024 elements per row**
+> (the Apple max threads per threadgroup). Unwritten count is exactly `rows x max(0, ne0 - 1024)`.
+> CPU and CUDA are correct; `test_set` misses it because it only covers `ne0 = 6`. Everything below
+> about `H`, `--lora-scope core` and Metal-vs-CUDA was downstream of which recycled buffer the
+> truncated tail happened to inherit. See the SOLVED section for the table and the repro command.
+>
+> ~~STATUS: ROOT-CAUSED. One question left, and it is a code read.~~
 >
 > **Cause.** `fgraph` node 25, `GGML_OP_SET` (`ne=[1536,576]`, `dst != src0`), does not write its
 > full destination. It is the memory-token concat — 576 = 64 memory tokens + 512 frames — and the
