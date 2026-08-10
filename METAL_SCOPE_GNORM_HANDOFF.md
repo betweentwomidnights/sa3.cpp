@@ -395,6 +395,64 @@ adapter magnitude (lr swept 20 orders), dead `Gctx_in`/`Ggcond_in` writes, and m
    an allocation layout rather than the scope itself, gating `core` does not guarantee other scopes
    are safe.
 
+## THE OP: node 25, `GGML_OP_SET`, does not write its full destination
+
+Poison probe (`SA3_POISON_F="lo:hi"`, on this branch) fills fgraph nodes in a range with
+`0xDEADBEEF` before F runs, then reads `xb[0]`. A node whose kernel fully writes its destination is
+immune; one that is read before being written propagates the pattern. **Step 1 only**, so the clean
+run is known-correct and any change is caused by the fill.
+
+```
+clean         xb[0] abssum=+1.214878e+06
+poison all    xb[0] abssum=+2.051229e+23     <- F reads uninitialised scratch
+```
+
+Binary search over the node range, 13 probes, converged on **node 25**:
+
+```
+[node] 0021 SET  ne=[1536,576] dst=0x160d9b000 src0=0x160738000 separate  src: NONE[1536,576] NONE[1536,64]
+[node] 0025 SET  ne=[1536,576] dst=0x1610fb000 src0=0x160d9b000 separate  src: SET[1536,576] MUL_MAT[1536,512]
+```
+
+**This is the memory-token concat.** `576 = 64 memory tokens + 512 frames`. Node 21 writes the 64
+memory-token rows; node 25 writes the 512 projected-latent rows into the same `[1536,576]` tensor.
+`ggml_set` writes only its target region — the other 64 rows are supposed to come from `src0`.
+
+`dst` is a **different buffer from `src0`** (`0x1610fb000` vs `0x160d9b000`), so for the result to be
+correct the kernel must copy `src0` into `dst` before writing its region. **It does not** — which is
+exactly what the poison probe proves: if `dst` were fully written, pre-existing content could not
+affect the output.
+
+So rows 0..64 of node 25's output are whatever happened to be in that buffer. On step 1 the backend
+buffer is freshly allocated; from step 2 it holds F's own leftovers.
+
+**Why the scope changes the outcome.** Both configurations have `dst != src0` — aliasing is *not*
+the discriminator. What differs is which recycled buffer gallocr hands node 25, and therefore what
+stale content those 64 rows inherit. Adding `proj_in`'s six nodes shifts the plan (the same `SET`
+sits at index 31 there, `dst=0x162ee3000`), and that buffer happens to carry benign content. Nothing
+about `H`, `--lora-scope core`, or Metal is causal — they are all downstream of which buffer got
+reused.
+
+**Confirming fix, already measured:** zeroing F's scratch every step
+(`SA3_ZERO_F_SCRATCH=1`) makes the broken configuration reproduce the correct trajectory exactly.
+
+### What to check next, and it is a read not a run
+
+`ggml_compute_forward_set` on CPU copies `src0` into `dst` when not inplace (guarded by an
+`inplace` flag). The question is whether ggml's **Metal** `SET` kernel does the same, and whether
+`ggml_set()` non-inplace is contractually required to. If the Metal kernel omits that copy, this is
+a ggml bug affecting any non-inplace `SET` whose destination is a recycled buffer — not specific to
+this graph, and worth an upstream report.
+
+Two reasons this is worth reading rather than bisecting further: it does not reproduce on the PC, so
+there is nothing to bisect there; and the answer is a few lines of kernel source either way.
+
+### Impact reassessment
+
+Wider than "scoped training on Apple". The trigger is a gallocr plan that hands node 25 a dirty
+buffer. Any scope, any backend and any graph shape could land on such a plan — `--lora-scope core`
+on Metal is simply one instance we found. Gating `core` would not make the rest safe.
+
 ## Open question nobody has answered
 
 The **direction**. Widening the scope raises the norm on CUDA and lowers it on Metal, with identical

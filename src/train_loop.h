@@ -420,6 +420,49 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
             std::memset(b, 0, ggml_nbytes(t));
         }
     }
+    // SA3_POISON_F="lo:hi": fill fgraph nodes [lo,hi) with 0xDEADBEEF before F runs. A node whose
+    // kernel fully writes its destination is unaffected; one that is read before being written
+    // propagates the pattern into F's output. Bisecting the range names the offending node.
+    // Step 1 suffices: with a clean buffer step 1 is correct, so any change is caused by the fill.
+    if (const char* pf = getenv("SA3_POISON_F")) {
+        int lo = 0, hi = 1 << 30;
+        std::sscanf(pf, "%d:%d", &lo, &hi);
+        char* plo = (char*)ggml_backend_buffer_get_base(ck.pbuf);
+        char* phi = plo + ggml_backend_buffer_get_size(ck.pbuf);
+        const uint32_t pat = 0xDEADBEEFu;
+        int filled = 0;
+        for (int i = lo; i < hi && i < ggml_graph_n_nodes(ck.fgraph); ++i) {
+            ggml_tensor* t = ggml_graph_node(ck.fgraph, i);
+            if (!t->data) continue;
+            char* b = (char*)t->data;
+            const size_t nb = ggml_nbytes(t);
+            if (b >= plo && b + nb <= phi) continue;          // never touch persistent
+            for (size_t k = 0; k + 4 <= nb; k += 4) std::memcpy(b + k, &pat, 4);
+            ++filled;
+        }
+        std::fprintf(stderr, "[poison] filled %d nodes in [%d,%d) of %d\n",
+                     filled, lo, hi, ggml_graph_n_nodes(ck.fgraph));
+    }
+    // SA3_LIST_F="lo:hi": describe fgraph nodes in a range (op, type, shape, sources).
+    if (const char* lf = getenv("SA3_LIST_F")) {
+        static bool done = false;
+        if (!done) { done = true;
+            int lo = 0, hi = 1 << 30; std::sscanf(lf, "%d:%d", &lo, &hi);
+            for (int i = lo; i < hi && i < ggml_graph_n_nodes(ck.fgraph); ++i) {
+                ggml_tensor* t = ggml_graph_node(ck.fgraph, i);
+                char srcs[256] = ""; size_t off = 0;
+                for (int k = 0; k < GGML_MAX_SRC && t->src[k]; ++k)
+                    off += snprintf(srcs + off, sizeof(srcs) - off, "%s%s[%lld,%lld]",
+                                    k ? " " : "", ggml_op_name(t->src[k]->op),
+                                    (long long)t->src[k]->ne[0], (long long)t->src[k]->ne[1]);
+                std::fprintf(stderr, "[node] %04d %-12s ne=[%lld,%lld] dst=%p src0=%p %s  src: %s\n",
+                             i, ggml_op_name(t->op),
+                             (long long)t->ne[0], (long long)t->ne[1],
+                             t->data, t->src[0] ? t->src[0]->data : nullptr,
+                             (t->src[0] && t->data == t->src[0]->data) ? "INPLACE" : "separate", srcs);
+            }
+        }
+    }
     // F: forward, storing block boundaries + context/gcond into persistent tensors
     ggml_backend_graph_compute(backend, ck.fgraph);
     // SA3_FWD_DEBUG=1: dump F's outputs. These live in the PERSISTENT buffer, which no gallocr
