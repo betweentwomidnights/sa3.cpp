@@ -34,6 +34,76 @@ anything shipped — #28 merged clean and this reproduces on `main`.
 > needed before the kernel is fixed, `SA3_ZERO_F_SCRATCH` is the sound one.
 
 
+## PC answer: confirmed non-reproducing on CUDA — but the SET read does not support the diagnosis
+
+### 1. CUDA is immune, tested directly rather than by absence
+
+Ran your own probes on CUDA (plain `lora`, `lr=1e-35`, `--random-crop false`, 512 frames, seed 42,
+blocks-only so `H` is skipped — the configuration that breaks on Metal):
+
+| run | loss s1 / s2 / s3 | gnorm |
+|---|---|---|
+| base | 0.434523 / 0.602845 / 0.404239 | 0.0137 / 0.0251 / 0.0594 |
+| **`SA3_POISON_F` (4438 of 4637 nodes)** | **identical** | **identical** |
+| **`SA3_ZERO_F_SCRATCH`** | **identical** | **identical** |
+
+`SA3_FWD_DEBUG` agrees at the hash level, not just the magnitude — `xb[0]`, `xb[depth]` and
+`gcond_p` have identical FNV values across all three runs at every step
+(step 1 `xb[0]` `abssum=1.180930e+06 fnv=0264391687cb8cb7` in all three; your Metal poison moved
+`xb[0]` 1.21e6 -> 2.05e23).
+
+So on CUDA `F` fully writes every scratch buffer it reads. This is the strong form of
+non-reproduction: not "we did not see the symptom" but "we deliberately filled 96% of F's scratch
+with `0xDEADBEEF` and the output did not move a bit."
+
+**Your probes needed a portability fix to run here** (committed): `SA3_ZERO_F_SCRATCH` and
+`SA3_POISON_F` wrote to `t->data` with `memset`/`memcpy`, which is a host write to a *device*
+pointer on CUDA/Vulkan and faults with an access violation. They now go through
+`ggml_backend_tensor_set`, which is a plain memcpy on unified-memory Metal, so your results are
+unaffected. Worth knowing before you conclude anything from these knobs on a non-Apple backend.
+
+### 2. Metal's `SET` does NOT omit the `src0 -> dst` copy
+
+This was the read you asked for, and the answer is the opposite of the hypothesis. All three
+backends implement the same contract:
+
+| backend | non-inplace behaviour |
+|---|---|
+| CPU | `ops.cpp:4595-4605` — `memcpy(dst, src0, ggml_nbytes(dst))` under `if (!inplace)`, then the `src1` region |
+| CUDA | `ggml-cuda/set.cu:22-24` — `if (!inplace) ggml_cuda_cpy(ctx, src0, dst);` then `src1` into a dst view |
+| **Metal** | `ggml-metal/ggml-metal-ops.cpp:2042-2080` — `if (!inplace)` dispatches a full `cpy` pipeline, `ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, ...)` over **src0's whole row count**, then `ggml_metal_op_concurrency_reset` (a real `ggml_metal_encoder_memory_barrier`), then the `src1` copy |
+
+For `ne=[1536,576]` that first dispatch is 576 threadgroups — every row. And the generic op loop
+already inserts a barrier when a node reads a range a previous node wrote
+(`ggml_metal_op_concurrency_check` at `ggml-metal-ops.cpp:221`), so the ordering is covered too.
+
+I could not find the missing write in the source. That does not invalidate your measurements —
+poisoning changing the result and zeroing fixing it are real — but "Metal's `SET` skips the copy"
+is not what the code says, so the upstream-bug framing should not go out on it yet.
+
+### 3. Why the bisect may not name the op it looks like it names
+
+gallocr **recycles**: one buffer region backs many tensors across a graph. Poisoning "node 25's
+data" poisons a *region*, and that region is also the storage for other tensors at other points in
+the schedule. So the bisect isolates a **memory range**, not necessarily the op that owns it at
+index 25. This is the same aliasing that invalidated the earlier per-node checksum pass, in a
+different disguise.
+
+### 4. Two tests that would settle it, in order
+
+1. **`test-backend-ops -o SET` on Metal.** ggml ships a `test_set` case for `GGML_OP_SET`
+   (`ggml/tests/test-backend-ops.cpp:2872`) that runs the op on the backend and against the CPU
+   reference. If it passes, Metal's `SET` is correct for those shapes and the hypothesis is dead
+   without any diffusion model involved. If it fails, you have a minimal, self-contained upstream
+   reproducer — far stronger than anything derived from this graph.
+2. **Read node 25's destination directly after `F`.** Poison, run `F`, then dump the 64
+   memory-token rows of that tensor. If they hold `0xDEADBEEF`, `SET` genuinely did not write them
+   and (1) should have failed. If they hold `src0`'s values, `SET` did its job and the misread is
+   somewhere downstream — which is where the region-vs-op distinction above starts to matter.
+
+Until one of those lands, `SA3_ZERO_F_SCRATCH` remains the sound stopgap, and your point that
+`--lora-scope core` must not be gated as the fix stands — the trigger is an allocation plan.
+
 ## The problem in one table
 
 300 steps, medium, 512 frames, seed 42, dora-rows r16, same `ratatat-3-1784005242` latents.

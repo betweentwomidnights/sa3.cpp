@@ -406,6 +406,16 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
             }
         }
     }
+    // Fill a scratch tensor with a repeating 4-byte pattern. Goes through
+    // ggml_backend_tensor_set rather than memset on t->data: that pointer is DEVICE memory on
+    // CUDA/Vulkan, so a host write faults (0xC0000005), and the probe would be Apple-only. The
+    // backend upload path is a plain memcpy on unified-memory Metal, so nothing is lost there.
+    auto fill_scratch = [](ggml_tensor* t, uint32_t pat) {
+        const size_t nb = ggml_nbytes(t);
+        std::vector<uint8_t> host(nb);
+        for (size_t k = 0; k + 4 <= nb; k += 4) std::memcpy(host.data() + k, &pat, 4);
+        ggml_backend_tensor_set(t, host.data(), 0, nb);
+    };
     // SA3_ZERO_F_SCRATCH=1: wipe F's scratch before every compute. If F reads a buffer it does
     // not fully write, step 1 is right only because the allocation started zeroed, and step 2
     // sees step 1's leftovers. Zeroing makes every step look like step 1.
@@ -414,10 +424,10 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
         char* phi = plo + ggml_backend_buffer_get_size(ck.pbuf);
         for (int i = 0; i < ggml_graph_n_nodes(ck.fgraph); ++i) {
             ggml_tensor* t = ggml_graph_node(ck.fgraph, i);
-            if (!t->data) continue;
+            if (!t->data || !t->buffer) continue;
             char* b = (char*)t->data;
             if (b >= plo && b + ggml_nbytes(t) <= phi) continue;   // never touch persistent
-            std::memset(b, 0, ggml_nbytes(t));
+            fill_scratch(t, 0u);
         }
     }
     // SA3_POISON_F="lo:hi": fill fgraph nodes [lo,hi) with 0xDEADBEEF before F runs. A node whose
@@ -433,11 +443,11 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
         int filled = 0;
         for (int i = lo; i < hi && i < ggml_graph_n_nodes(ck.fgraph); ++i) {
             ggml_tensor* t = ggml_graph_node(ck.fgraph, i);
-            if (!t->data) continue;
+            if (!t->data || !t->buffer) continue;
             char* b = (char*)t->data;
             const size_t nb = ggml_nbytes(t);
             if (b >= plo && b + nb <= phi) continue;          // never touch persistent
-            for (size_t k = 0; k + 4 <= nb; k += 4) std::memcpy(b + k, &pat, 4);
+            fill_scratch(t, pat);
             ++filled;
         }
         std::fprintf(stderr, "[poison] filled %d nodes in [%d,%d) of %d\n",
