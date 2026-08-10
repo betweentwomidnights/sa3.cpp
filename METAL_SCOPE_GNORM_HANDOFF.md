@@ -20,7 +20,12 @@ anything shipped — #28 merged clean and this reproduces on `main`.
 > matter. Sections below written before this was known — notably "It is specifically `H`" — are
 > **superseded**; they are kept for the evidence, not the conclusions.
 >
-> **NEXT STEP (PC): read ggml's Metal `SET` kernel.** CPU's `ggml_compute_forward_set` copies
+> **UPDATE:** the kernel read came back — Metal's `SET` implements the copy and passes 12/12 unit
+> tests, so the general "Metal omits the copy" hypothesis is **dead**. But poisoning node 25 alone
+> still leaves `0xDEADBEEF` in `xb[0]` rows 0..63. Next step is now a **minimal standalone `SET`
+> reproducer at `ne=[1536,576]`** — see the M4 answer section. Superseded instruction follows:
+>
+> **~~NEXT STEP (PC): read ggml's Metal `SET` kernel.~~** CPU's `ggml_compute_forward_set` copies
 > `src0` into `dst` when not inplace. Does `ggml-metal`'s? And is that copy contractually required
 > of `ggml_set()` non-inplace? If Metal omits it, this is an upstream ggml bug affecting any
 > non-inplace `SET` onto a recycled buffer, well beyond this graph.

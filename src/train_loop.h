@@ -502,6 +502,25 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
         dump("IN:target", ck.target);
         dump("IN:local", ck.local);
         dump("IN:cross", ck.cross);
+        // Scan xb[0] for surviving poison. xb[0] is PERSISTENT, so unlike a scratch tensor it
+        // cannot have been recycled between F finishing and this read — the region-vs-op
+        // confound does not apply here. Poison surviving into a row means nothing wrote it.
+        if (!ck.xb.empty() && ck.xb.front()) {
+            ggml_tensor* t = ck.xb.front();
+            const size_t n = (size_t)ggml_nelements(t);
+            std::vector<uint32_t> v(n);
+            ggml_backend_tensor_get(t, v.data(), 0, n * sizeof(uint32_t));
+            const int64_t row = t->ne[0];
+            long long hits = 0, firstrow = -1, lastrow = -1;
+            for (size_t i = 0; i < n; ++i) if (v[i] == 0xDEADBEEFu) {
+                ++hits; const long long r = (long long)(i / (size_t)row);
+                if (firstrow < 0) firstrow = r; lastrow = r;
+            }
+            std::fprintf(stderr, "[scan] xb[0] ne=[%lld,%lld] poison_words=%lld", 
+                         (long long)t->ne[0], (long long)t->ne[1], hits);
+            if (hits) std::fprintf(stderr, "  rows %lld..%lld", firstrow, lastrow);
+            std::fprintf(stderr, "\n");
+        }
         dump("xb[0]", ck.xb.empty() ? nullptr : ck.xb.front());
         dump("xb[depth]", ck.xb.empty() ? nullptr : ck.xb.back());
         dump("context_p", ck.context_p);
