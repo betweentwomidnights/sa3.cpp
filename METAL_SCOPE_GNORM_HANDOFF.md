@@ -6,6 +6,34 @@ durable parts land in `docs/METAL.md` / `docs/TRAINING.md`.
 Branch `experiment/metal-lora-scope-gnorm`, off `79f57b8` (post-#28 main). Nothing here blocks
 anything shipped — #28 merged clean and this reproduces on `main`.
 
+> ## STATUS: ROOT-CAUSED. One question left, and it is a code read.
+>
+> **Cause.** `fgraph` node 25, `GGML_OP_SET` (`ne=[1536,576]`, `dst != src0`), does not write its
+> full destination. It is the memory-token concat — 576 = 64 memory tokens + 512 frames — and the
+> 64 rows it does not write are supposed to come from `src0`. `dst` is a recycled buffer, so those
+> rows inherit whatever was there. Proven: poisoning F's scratch with `0xDEADBEEF` drives `xb[0]`
+> from 1.21e6 to 2.05e23, a 13-probe bisect isolates node 25, and zeroing F's scratch
+> (`SA3_ZERO_F_SCRATCH=1`) makes the broken configuration reproduce the correct trajectory exactly.
+>
+> **`H`, `--lora-scope core` and Metal were all correlates, never causes.** They change gallocr's
+> plan, which changes which recycled buffer node 25 gets, which changes whether the stale rows
+> matter. Sections below written before this was known — notably "It is specifically `H`" — are
+> **superseded**; they are kept for the evidence, not the conclusions.
+>
+> **NEXT STEP (PC): read ggml's Metal `SET` kernel.** CPU's `ggml_compute_forward_set` copies
+> `src0` into `dst` when not inplace. Does `ggml-metal`'s? And is that copy contractually required
+> of `ggml_set()` non-inplace? If Metal omits it, this is an upstream ggml bug affecting any
+> non-inplace `SET` onto a recycled buffer, well beyond this graph.
+>
+> This is a **read, not a run** — it does not reproduce on the PC, so there is nothing to bisect
+> there. Non-reproduction is itself consistent with CUDA's `SET` doing the copy correctly, which
+> would confirm the diagnosis from the other side.
+>
+> **Do not gate `--lora-scope core` as a fix.** The trigger is an allocation plan, not the scope.
+> Any scope or graph shape can land on a plan that hands node 25 a dirty buffer. If a stopgap is
+> needed before the kernel is fixed, `SA3_ZERO_F_SCRATCH` is the sound one.
+
+
 ## The problem in one table
 
 300 steps, medium, 512 frames, seed 42, dora-rows r16, same `ratatat-3-1784005242` latents.
@@ -46,7 +74,10 @@ accumulators are inflated with it (`gctx_sum` 64x, `ggcond_sum` 5x).
 **Step 1 is identical between scopes** — `gctx_sum` 0.000457 in both, `ggcond_sum` 0.321407 vs
 0.321394. Nothing is wrong at init; step 1's *update* creates the divergence.
 
-## It is specifically `H`, not "a segment with no trainable params"
+## ~~It is specifically `H`, not "a segment with no trainable params"~~ (SUPERSEDED)
+
+> **Superseded.** `H` is a correlate, not a cause — see the status block at the top. The measurements
+> below are sound; the conclusion drawn from them is not.
 
 `core` has zero tail params as well as zero head params, so `T` also runs with nothing trainable —
 the same hazard the `H` skip-guard exists for. Split by adding exactly one target:
@@ -83,6 +114,12 @@ the block loop, so it cannot affect the same step's block gradients — the chai
 - **Per-node checksum dumps** — methodologically invalid. gallocr reuses scratch buffers, so reading
   node outputs after the graph completes returns whatever last occupied that memory. Any conclusion
   from that pass, including a dramatic "node 0 diverges", is an artefact.
+- **"It is specifically `H`"** — the biggest one. `H` correlates perfectly (48->49 targets flips it)
+  but causes nothing; it changes gallocr's plan, which changes which recycled buffer node 25 gets.
+  I held this through several rounds and PC Claude reached it independently, so it is worth naming
+  explicitly rather than quietly dropping.
+- **"the ordering inverts between machines" as a mystery** — real observation, but it needed no
+  special explanation once the cause was allocation layout.
 - **Cross-machine step-by-step loss comparison** — meaningless. Dataset directories differ, so file
   enumeration and the RNG stream diverge; seed 42 does not give the same samples.
 
@@ -453,13 +490,20 @@ Wider than "scoped training on Apple". The trigger is a gallocr plan that hands 
 buffer. Any scope, any backend and any graph shape could land on such a plan — `--lora-scope core`
 on Metal is simply one instance we found. Gating `core` would not make the rest safe.
 
-## Open question nobody has answered
+## ~~Open question nobody has answered~~ — ANSWERED
+
+> The sign flip is explained: narrowing the scope changes gallocr's plan, so node 25 gets a
+> different recycled buffer and inherits different stale rows. The direction was never meaningful.
+
+<details><summary>original wording</summary>
 
 The **direction**. Widening the scope raises the norm on CUDA and lowers it on Metal, with identical
 host-side optimizer code. Whatever the mechanism is, it has to explain a sign flip, not just a
 magnitude.
 
-## Suggested next probes on Metal, given the CUDA result
+</details>
+
+## ~~Suggested next probes on Metal~~ — ALL THREE RUN, see results above
 
 The accumulation diverging while step 1 is clean narrows it to state carried across the step
 boundary. Cheapest discriminators, roughly in order:
