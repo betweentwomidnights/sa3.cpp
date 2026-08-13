@@ -44,6 +44,31 @@ class ModelArtifactsTest(unittest.TestCase):
             ["stable-audio-3-small-sfx-base-dit-0.5B-v1.0-F32.gguf"],
         )
 
+    def test_quantized_encodings_resolve_dit_and_same(self):
+        for enc, suffix in (("q4_k_m", "Q4_K_M"), ("q5_k_m", "Q5_K_M"), ("q8_0", "Q8_0")):
+            plan = build_download_plan("thepatch", "medium", enc)
+            files = plan[0][1]
+            self.assertIn(f"stable-audio-3-medium-dit-1.5B-v1.0-{suffix}.gguf", files)
+            self.assertIn(f"stable-audio-3-medium-same-l-v1.0-{suffix}.gguf", files)
+            # the conditioner is quality-critical and tiny: always F32, never quantized
+            self.assertIn("stable-audio-3-medium-conditioner-v1.0-F32.gguf", files)
+
+    def test_quantized_request_still_gets_an_f16_training_base(self):
+        # Training bases are published F16/F32 only while CUDA's out_prod backward rejects a
+        # quantized src0. A quantized set plus --training-base must not ask for a file that does
+        # not exist; it falls back to F16 for the base DiT only.
+        plan = build_download_plan("thepatch", "medium", "q4_k_m", training_base=True)
+        self.assertIn("stable-audio-3-medium-dit-1.5B-v1.0-Q4_K_M.gguf", plan[0][1])
+        self.assertEqual(
+            plan[1][1],
+            ["stable-audio-3-medium-base-dit-1.5B-v1.0-F16.gguf"],
+        )
+
+    def test_unknown_encoding_is_rejected_and_names_the_valid_ones(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_download_plan("thepatch", "medium", "q3_k_s")
+        self.assertIn("q4_k_m", str(ctx.exception))
+
     def test_notice_retains_required_attribution(self):
         notice = notice_text("medium")
         self.assertIn(

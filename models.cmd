@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 rem Download the sa3.cpp GGUF model set from HuggingFace (public repos) with curl.exe - no Python.
-rem Usage: models.cmd [--variant medium^|small-music^|small-sfx] [--encoding f16^|f32] [--training-base] [--namespace <hf-user>] [--out DIR] [--dry-run]
+rem Usage: models.cmd [--variant medium^|small-music^|small-sfx] [--encoding f16^|f32^|q4_k_m^|q5_k_m^|q8_0] [--training-base] [--namespace <hf-user>] [--out DIR] [--dry-run]
 rem   default: medium f16 into .\models
 
 set "VARIANT=medium"
@@ -29,10 +29,17 @@ if /I "%VARIANT%"=="small-music" ( set "DIT_SIZE=0.5B" & set "SAME=same-s" & got
 if /I "%VARIANT%"=="small-sfx"   ( set "DIT_SIZE=0.5B" & set "SAME=same-s" & goto variant_ok )
 echo unknown variant: %VARIANT% ^(medium^|small-music^|small-sfx^) & exit /b 1
 :variant_ok
-if /I "%ENCODING%"=="f16" ( set "ENC=F16" & goto encoding_ok )
-if /I "%ENCODING%"=="f32" ( set "ENC=F32" & goto encoding_ok )
-echo unknown encoding: %ENCODING% ^(f16^|f32^) & exit /b 1
+rem Training bases are published F16/F32 only -- CUDA's out_prod backward does not take a quantized
+rem src0 yet -- so a quantized request still pulls an F16 base DiT. The [fetch] lines show it.
+set "BASE_ENC="
+if /I "%ENCODING%"=="f16"    ( set "ENC=F16"     & goto encoding_ok )
+if /I "%ENCODING%"=="f32"    ( set "ENC=F32"     & goto encoding_ok )
+if /I "%ENCODING%"=="q4_k_m" ( set "ENC=Q4_K_M"  & set "BASE_ENC=F16" & goto encoding_ok )
+if /I "%ENCODING%"=="q5_k_m" ( set "ENC=Q5_K_M"  & set "BASE_ENC=F16" & goto encoding_ok )
+if /I "%ENCODING%"=="q8_0"   ( set "ENC=Q8_0"    & set "BASE_ENC=F16" & goto encoding_ok )
+echo unknown encoding: %ENCODING% ^(f16^|f32^|q4_k_m^|q5_k_m^|q8_0^) & exit /b 1
 :encoding_ok
+if not defined BASE_ENC set "BASE_ENC=%ENC%"
 set "VAR_REPO=%NAMESPACE%/stable-audio-3-%VARIANT%-GGUF"
 set "BASE_REPO=%NAMESPACE%/stable-audio-3-%VARIANT%-base-GGUF"
 set "SHARED=%NAMESPACE%/t5gemma-b-b-ul2-GGUF"
@@ -42,7 +49,7 @@ if not exist "%OUT%" mkdir "%OUT%"
 call :dl "%VAR_REPO%" "%BASE%-dit-%DIT_SIZE%-v1.0-%ENC%.gguf"
 if errorlevel 1 exit /b 1
 if "%TRAINING_BASE%"=="1" (
-    call :dl "%BASE_REPO%" "%BASE%-base-dit-%DIT_SIZE%-v1.0-%ENC%.gguf"
+    call :dl "%BASE_REPO%" "%BASE%-base-dit-%DIT_SIZE%-v1.0-%BASE_ENC%.gguf"
     if errorlevel 1 exit /b 1
 )
 call :dl "%VAR_REPO%" "%BASE%-%SAME%-v1.0-%ENC%.gguf"
@@ -61,7 +68,7 @@ if "%TRAINING_BASE%"=="1" (
 exit /b 0
 
 :help
-echo Usage: models.cmd [--variant medium^|small-music^|small-sfx] [--encoding f16^|f32] [--training-base] [--namespace HF_USER] [--out DIR] [--dry-run]
+echo Usage: models.cmd [--variant medium^|small-music^|small-sfx] [--encoding f16^|f32^|q4_k_m^|q5_k_m^|q8_0] [--training-base] [--namespace HF_USER] [--out DIR] [--dry-run]
 exit /b 0
 
 :dl

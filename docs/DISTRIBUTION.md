@@ -109,12 +109,33 @@ grouped under an hf **collection** "Stable Audio 3 (GGUF)". the `models` downloa
 variant repo (DiT + SAME + conditioner) + the shared encoder repo. Passing `--training-base`
 also fetches the matching dedicated base-DiT repo used by `sa3-train`.
 
-## quant matrix (initial)
+## quant matrix
 
-ship **F32 + F16** first (f16 = `tools/quantize_gguf.py`, the production path; f32 for cpu
-validation). integer quants (Q8_0/Q6_K/Q5_K_M/Q4_K_M) are a later pass — note in the card which
-exist. the SAME autoencoder is quality-critical and small, so keep it F16/F32 (don't aggressively
-quantize), mirroring acestep keeping its VAE at BF16.
+published per variant, for **both** the DiT and the SAME: `F32`, `F16`, `Q8_0`, `Q5_K_M`, `Q4_K_M`.
+`--encoding` selects the pair (`sa3-generate` resolves DiT and SAME with the same suffix). the
+conditioner, text encoder and tokenizer stay `F32` — small and quality-critical, nothing to gain.
+
+an earlier revision of this section said to keep the SAME at F16/F32 rather than quantize it. that
+was a precaution written before the tooling existed, and measurement superseded it: `sa3-quant-check`
+reports `below-threshold=0` at `threshold=0.990` for every DiT and SAME at all three quant tiers,
+across all three variants.
+
+| | Q8_0 | Q5_K_M | Q4_K_M |
+|---|---:|---:|---:|
+| medium DiT (F16 2773 MB) | 1483 | 1053 | 962 |
+| medium SAME-L (F16 1626 MB) | 865 | 617 | 570 |
+| small-music / small-sfx DiT (F16 877 MB) | ~471-481 | ~333-343 | ~302-312 |
+| small-* SAME-S (F16 207 MB) | 110 | 79 | 72 |
+
+**quantization buys footprint everywhere and speed only on some backends.** CUDA and Vulkan gain
+~33% end to end; Metal is flat (Q8_0 1.7% faster, Q4_K_M 2.1% *slower*) because the load-time saving
+and the added per-step compute cancel. say so on the cards — a Mac user picking Q4_K_M for speed
+would be picking it for the wrong reason. see `docs/METAL.md` §9.
+
+**training bases stay F16/F32.** not intrinsic: the functional adapter path keeps the frozen base as
+a `mul_mat` argument, and training on a quantized base already works on the CPU backend. CUDA's
+`out_prod` backward takes F32 or contiguous F16 `src0` only, so a quantized base aborts there — and
+CUDA is what people train on.
 
 ## license
 
