@@ -229,6 +229,9 @@ target_link_libraries(sa3-dit-lin-functional-test PRIVATE sa3)
 add_executable(sa3-lora-compose-test tests/lora_compose_test.cpp)
 target_link_libraries(sa3-lora-compose-test PRIVATE sa3)
 
+add_executable(sa3-set-wide-row-test tests/set_wide_row_test.cpp)
+target_link_libraries(sa3-set-wide-row-test PRIVATE sa3)
+
 if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     add_test(NAME sa3-train-config-test COMMAND sa3-train-config-test)
@@ -247,6 +250,7 @@ if(BUILD_TESTING)
     add_test(NAME sa3-train-inpaint-test COMMAND sa3-train-inpaint-test)
     add_test(NAME sa3-dit-lin-functional-test COMMAND sa3-dit-lin-functional-test)
     add_test(NAME sa3-lora-compose-test COMMAND sa3-lora-compose-test)
+    add_test(NAME sa3-set-wide-row-test COMMAND sa3-set-wide-row-test)
     if(Python3_Interpreter_FOUND)
         add_test(NAME sa3-model-artifacts-test
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_artifacts_test.py")

@@ -9,6 +9,7 @@ build-cuda/
 build-vulkan/
 build-hip/
 build-metal/
+build-metal-noblas/
 build-all/
 *.o
 *.obj
