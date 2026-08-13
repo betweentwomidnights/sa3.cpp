@@ -13,7 +13,6 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <string>
 #include <vector>
 
@@ -364,168 +363,8 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
     accum.mag_r.resize(lora.params.size());
     accum.mag_c.resize(lora.params.size());
 
-    // SA3_ALLOC_DEBUG=1: dump every graph's scratch extent once all of them are allocated
-    // (block graphs are allocated inside the loop, so step 2 is the first point they all exist).
-    // F is planned once at build, so a bad plan alone cannot explain "step 1 right, step 2 wrong";
-    // what would is F's scratch overlapping memory the block loop writes during step 1.
-    if (getenv("SA3_ALLOC_DEBUG")) {
-        static int adbg = 0;
-        if (++adbg == 2) {
-            char* plo = (char*)ggml_backend_buffer_get_base(ck.pbuf);
-            char* phi = plo + ggml_backend_buffer_get_size(ck.pbuf);
-            struct Ext { const char* nm; char* lo; char* hi; };
-            std::vector<Ext> ex;
-            auto scan = [&](ggml_cgraph* g, const char* nm) {
-                if (!g) return;
-                char* lo = (char*)-1; char* hi = nullptr;
-                for (int i = 0; i < ggml_graph_n_nodes(g); ++i) {
-                    ggml_tensor* t = ggml_graph_node(g, i);
-                    if (!t->data) continue;
-                    char* b = (char*)t->data; char* e = b + ggml_nbytes(t);
-                    if (b >= plo && e <= phi) continue;         // persistent, not scratch
-                    if (b < lo) lo = b;
-                    if (e > hi) hi = e;
-                }
-                if (hi) ex.push_back({nm, lo, hi});
-            };
-            scan(ck.fgraph, "F"); scan(ck.tgraph, "T");
-            for (size_t i = 0; i < ck.blocks.size() && i < 2; ++i)
-                scan(ck.blocks[i].graph, i == 0 ? "B[0]" : "B[1]");
-            scan(ck.hgraph, "H");
-            std::fprintf(stderr, "[alloc] persistent [%p .. %p] %.1f MiB\n", (void*)plo, (void*)phi,
-                         (double)(phi - plo) / (1024.0 * 1024.0));
-            for (auto& e : ex)
-                std::fprintf(stderr, "[alloc] %-5s scratch [%p .. %p] %8.1f MiB\n", e.nm,
-                             (void*)e.lo, (void*)e.hi, (double)(e.hi - e.lo) / (1024.0 * 1024.0));
-            for (size_t i = 0; i < ex.size(); ++i) {
-                if (ex[i].lo < phi && ex[i].hi > plo)
-                    std::fprintf(stderr, "[alloc] *** %s OVERLAPS PERSISTENT ***\n", ex[i].nm);
-                for (size_t j = i + 1; j < ex.size(); ++j)
-                    if (ex[i].lo < ex[j].hi && ex[j].lo < ex[i].hi)
-                        std::fprintf(stderr, "[alloc] *** %s OVERLAPS %s ***\n", ex[i].nm, ex[j].nm);
-            }
-        }
-    }
-    // Fill a scratch tensor with a repeating 4-byte pattern. Goes through
-    // ggml_backend_tensor_set rather than memset on t->data: that pointer is DEVICE memory on
-    // CUDA/Vulkan, so a host write faults (0xC0000005), and the probe would be Apple-only. The
-    // backend upload path is a plain memcpy on unified-memory Metal, so nothing is lost there.
-    auto fill_scratch = [](ggml_tensor* t, uint32_t pat) {
-        const size_t nb = ggml_nbytes(t);
-        std::vector<uint8_t> host(nb);
-        for (size_t k = 0; k + 4 <= nb; k += 4) std::memcpy(host.data() + k, &pat, 4);
-        ggml_backend_tensor_set(t, host.data(), 0, nb);
-    };
-    // SA3_ZERO_F_SCRATCH=1: wipe F's scratch before every compute. If F reads a buffer it does
-    // not fully write, step 1 is right only because the allocation started zeroed, and step 2
-    // sees step 1's leftovers. Zeroing makes every step look like step 1.
-    if (getenv("SA3_ZERO_F_SCRATCH")) {
-        char* plo = (char*)ggml_backend_buffer_get_base(ck.pbuf);
-        char* phi = plo + ggml_backend_buffer_get_size(ck.pbuf);
-        for (int i = 0; i < ggml_graph_n_nodes(ck.fgraph); ++i) {
-            ggml_tensor* t = ggml_graph_node(ck.fgraph, i);
-            if (!t->data || !t->buffer) continue;
-            char* b = (char*)t->data;
-            if (b >= plo && b + ggml_nbytes(t) <= phi) continue;   // never touch persistent
-            fill_scratch(t, 0u);
-        }
-    }
-    // SA3_POISON_F="lo:hi": fill fgraph nodes [lo,hi) with 0xDEADBEEF before F runs. A node whose
-    // kernel fully writes its destination is unaffected; one that is read before being written
-    // propagates the pattern into F's output. Bisecting the range names the offending node.
-    // Step 1 suffices: with a clean buffer step 1 is correct, so any change is caused by the fill.
-    if (const char* pf = getenv("SA3_POISON_F")) {
-        int lo = 0, hi = 1 << 30;
-        std::sscanf(pf, "%d:%d", &lo, &hi);
-        char* plo = (char*)ggml_backend_buffer_get_base(ck.pbuf);
-        char* phi = plo + ggml_backend_buffer_get_size(ck.pbuf);
-        const uint32_t pat = 0xDEADBEEFu;
-        int filled = 0;
-        for (int i = lo; i < hi && i < ggml_graph_n_nodes(ck.fgraph); ++i) {
-            ggml_tensor* t = ggml_graph_node(ck.fgraph, i);
-            if (!t->data || !t->buffer) continue;
-            char* b = (char*)t->data;
-            const size_t nb = ggml_nbytes(t);
-            if (b >= plo && b + nb <= phi) continue;          // never touch persistent
-            fill_scratch(t, pat);
-            ++filled;
-        }
-        std::fprintf(stderr, "[poison] filled %d nodes in [%d,%d) of %d\n",
-                     filled, lo, hi, ggml_graph_n_nodes(ck.fgraph));
-    }
-    // SA3_LIST_F="lo:hi": describe fgraph nodes in a range (op, type, shape, sources).
-    if (const char* lf = getenv("SA3_LIST_F")) {
-        static bool done = false;
-        if (!done) { done = true;
-            int lo = 0, hi = 1 << 30; std::sscanf(lf, "%d:%d", &lo, &hi);
-            for (int i = lo; i < hi && i < ggml_graph_n_nodes(ck.fgraph); ++i) {
-                ggml_tensor* t = ggml_graph_node(ck.fgraph, i);
-                char srcs[256] = ""; size_t off = 0;
-                for (int k = 0; k < GGML_MAX_SRC && t->src[k]; ++k)
-                    off += snprintf(srcs + off, sizeof(srcs) - off, "%s%s[%lld,%lld]",
-                                    k ? " " : "", ggml_op_name(t->src[k]->op),
-                                    (long long)t->src[k]->ne[0], (long long)t->src[k]->ne[1]);
-                std::fprintf(stderr, "[node] %04d %-12s ne=[%lld,%lld] dst=%p src0=%p %s  src: %s\n",
-                             i, ggml_op_name(t->op),
-                             (long long)t->ne[0], (long long)t->ne[1],
-                             t->data, t->src[0] ? t->src[0]->data : nullptr,
-                             (t->src[0] && t->data == t->src[0]->data) ? "INPLACE" : "separate", srcs);
-            }
-        }
-    }
     // F: forward, storing block boundaries + context/gcond into persistent tensors
     ggml_backend_graph_compute(backend, ck.fgraph);
-    // SA3_FWD_DEBUG=1: dump F's outputs. These live in the PERSISTENT buffer, which no gallocr
-    // ever touches, so reading them back after F is meaningful — unlike scratch node outputs,
-    // whose buffers gallocr reuses. With a frozen inert adapter these must be scope-independent.
-    if (getenv("SA3_FWD_DEBUG")) {
-        static int fdbg_step = 0;
-        ++fdbg_step;
-        ggml_backend_synchronize(backend);
-        auto dump = [&](const char* nm, ggml_tensor* t) {
-            if (!t) return;
-            const size_t nb = ggml_nbytes(t);
-            std::vector<char> raw(nb);
-            ggml_backend_tensor_get(t, raw.data(), 0, nb);
-            uint64_t fnv = 1469598103934665603ULL;
-            for (size_t i = 0; i < nb; ++i) { fnv ^= (unsigned char)raw[i]; fnv *= 1099511628211ULL; }
-            double s = 0.0;
-            const float* f = (const float*)raw.data();
-            for (size_t i = 0; i < nb / sizeof(float); ++i) s += std::fabs(f[i]);
-            std::fprintf(stderr, "[fwd] step %d %-11s abssum=%+.6e fnv=%016llx\n",
-                         fdbg_step, nm, s, (unsigned long long)fnv);
-        };
-        // F's inputs, uploaded before it ran. context_p/gcond_p depend on cross/tfeat/global;
-        // x0 depends on x/local/pos. If x differs, the divergence is upstream of F entirely.
-        if (!ck.params.empty()) { dump("ADPT:A[0]", ck.params[0].lora_A); dump("ADPT:B[0]", ck.params[0].lora_B); }
-        dump("IN:x", ck.x);
-        dump("IN:target", ck.target);
-        dump("IN:local", ck.local);
-        dump("IN:cross", ck.cross);
-        // Scan xb[0] for surviving poison. xb[0] is PERSISTENT, so unlike a scratch tensor it
-        // cannot have been recycled between F finishing and this read — the region-vs-op
-        // confound does not apply here. Poison surviving into a row means nothing wrote it.
-        if (!ck.xb.empty() && ck.xb.front()) {
-            ggml_tensor* t = ck.xb.front();
-            const size_t n = (size_t)ggml_nelements(t);
-            std::vector<uint32_t> v(n);
-            ggml_backend_tensor_get(t, v.data(), 0, n * sizeof(uint32_t));
-            const int64_t row = t->ne[0];
-            long long hits = 0, firstrow = -1, lastrow = -1;
-            for (size_t i = 0; i < n; ++i) if (v[i] == 0xDEADBEEFu) {
-                ++hits; const long long r = (long long)(i / (size_t)row);
-                if (firstrow < 0) firstrow = r; lastrow = r;
-            }
-            std::fprintf(stderr, "[scan] xb[0] ne=[%lld,%lld] poison_words=%lld", 
-                         (long long)t->ne[0], (long long)t->ne[1], hits);
-            if (hits) std::fprintf(stderr, "  rows %lld..%lld", firstrow, lastrow);
-            std::fprintf(stderr, "\n");
-        }
-        dump("xb[0]", ck.xb.empty() ? nullptr : ck.xb.front());
-        dump("xb[depth]", ck.xb.empty() ? nullptr : ck.xb.back());
-        dump("context_p", ck.context_p);
-        dump("gcond_p", ck.gcond_p);
-    }
     // T: tail + real loss; emits dL/dx_depth into the first ping-pong carrier
     ggml_graph_reset(ck.tgraph);
     ggml_backend_graph_compute(backend, ck.tgraph);
@@ -536,21 +375,6 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
         profile_mark = now;
     }
     if (!train_accum_read_subset(ck.tgraph, ck, ck.tail_param_idx, accum, err)) return false;
-    // SA3_GRAD_DEBUG=1: localise WHERE the gradient norm enters. The pre-clip global L2 is what
-    // metrics reports, so accumulating it stage by stage says whether inflation arrives via the
-    // tail graph, the per-block graphs, or the head.
-    const bool gdbg = getenv("SA3_GRAD_DEBUG") != nullptr;
-    auto accum_l2 = [&]() {
-        double s = 0.0;
-        auto add = [&](const std::vector<std::vector<float>>& vv) {
-            for (const auto& v : vv) for (float f : v) s += (double)f * f; };
-        add(accum.A); add(accum.B); add(accum.mxs); add(accum.mag); add(accum.mag_r); add(accum.mag_c);
-        return std::sqrt(s);
-    };
-    auto vec_l2 = [](const std::vector<float>& v) {
-        double s = 0.0; for (float f : v) s += (double)f * f; return std::sqrt(s); };
-    if (gdbg) std::fprintf(stderr, "[gdbg] after T   accum_l2=%.6f  (tail params: %zu)\n",
-                           accum_l2(), ck.tail_param_idx.size());
     if (profile) {
         const auto now = std::chrono::steady_clock::now();
         profile_tail_ms = std::chrono::duration<double, std::milli>(now - profile_mark).count();
@@ -593,27 +417,15 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
         profile_mark = now;
     }
 
-    if (gdbg) {
-        std::fprintf(stderr, "[gdbg] after B_l accum_l2=%.6f  |gctx_sum|=%.6f  |ggcond_sum|=%.6f\n",
-                     accum_l2(), vec_l2(gctx_sum), vec_l2(ggcond_sum));
-    }
-
     // H: head backward against dL/dx_0 + the summed context/gcond gradients
-    // EXPERIMENT (SA3_SKIP_DEAD_GCTX=1): when hgraph is null nothing consumes these two, so the
-    // uploads are dead stores into the persistent buffer. Tests whether an unconsumed write is
-    // interfering with the next step -- H-skipped is exactly the configuration that breaks.
-    if (ck.hgraph || !getenv("SA3_SKIP_DEAD_GCTX")) {
-        ggml_backend_tensor_set(ck.Gctx_in, gctx_sum.data(), 0, gctx_sum.size() * sizeof(float));
-        ggml_backend_tensor_set(ck.Ggcond_in, ggcond_sum.data(), 0, ggcond_sum.size() * sizeof(float));
-    }
+    ggml_backend_tensor_set(ck.Gctx_in, gctx_sum.data(), 0, gctx_sum.size() * sizeof(float));
+    ggml_backend_tensor_set(ck.Ggcond_in, ggcond_sum.data(), 0, ggcond_sum.size() * sizeof(float));
     // Skipped when no adapter lives on a head weight (e.g. --lora-scope core); see train_ckpt.h.
     if (ck.hgraph) {
         ggml_graph_reset(ck.hgraph);
         ggml_backend_graph_compute(backend, ck.hgraph);
         if (!train_accum_read_subset(ck.hgraph, ck, ck.head_param_idx, accum, err)) return false;
     }
-    if (gdbg) std::fprintf(stderr, "[gdbg] after H   accum_l2=%.6f  (H %s, head params: %zu)\n",
-                           accum_l2(), ck.hgraph ? "ran" : "SKIPPED", ck.head_param_idx.size());
     if (profile) {
         const auto now = std::chrono::steady_clock::now();
         profile_head_ms = std::chrono::duration<double, std::milli>(now - profile_mark).count();
