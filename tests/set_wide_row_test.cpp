@@ -1,4 +1,11 @@
-// Minimal reproducer for the sa3.cpp Metal scoped-training corruption.
+// Regression test for non-inplace ggml_set on wide rows, on whichever GPU backend is present.
+//
+// Metal's ggml_metal_op_set dispatched only ne01 threadgroups for its src0->dst copy, while
+// kernel_cpy_t_t derives its row-chunk index as tgpig[0]/ne01 and copies one element per thread.
+// That pinned the chunk index at 0 and truncated every row at nth = min(1024, ne00) elements, so
+// the tail kept whatever the destination buffer already held. Invisible below 1024 wide, which is
+// why test-backend-ops (SET only at ne00=6) passed 12/12 while corrupting a 1536-wide tensor.
+// Fixed in the ggml fork; this guards the next bump, on any backend.
 //
 // Replicates dit.h:305-308 exactly and nothing else:
 //
@@ -102,10 +109,12 @@ static int run(ggml_backend_t backend, const char* label, int64_t dim, int64_t m
 int main(int argc, char** argv) {
     ggml_backend_t cpu = ggml_backend_cpu_init();
     ggml_backend_t gpu = nullptr;
+    std::string gpu_label = "GPU";
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
         ggml_backend_dev_t d = ggml_backend_dev_get(i);
         if (ggml_backend_dev_type(d) == GGML_BACKEND_DEVICE_TYPE_GPU) {
             gpu = ggml_backend_dev_init(d, nullptr);
+            gpu_label = std::string("GPU(") + ggml_backend_name(gpu) + ")";
             std::printf("GPU backend: %s\n", ggml_backend_dev_description(d));
             break;
         }
@@ -119,7 +128,7 @@ int main(int argc, char** argv) {
     int fails = 0;
     for (auto& c : cases) {
         fails += run(cpu, "CPU", c.dim, c.mem, c.T, true);
-        if (gpu) fails += run(gpu, "GPU(Metal)", c.dim, c.mem, c.T, true);
+        if (gpu) fails += run(gpu, gpu_label.c_str(), c.dim, c.mem, c.T, true);
     }
     std::printf(fails ? "RESULT: %d FAILING CASES\n" : "RESULT: all pass\n", fails);
     return fails ? 1 : 0;
