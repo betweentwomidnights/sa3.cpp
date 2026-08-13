@@ -37,6 +37,30 @@ inference WAV is byte-identical before and after the patch. A 32x16 threadgroup/
 adapter byte-identical and peak RSS at 5.75 GiB. The immutable tag `sa3-training-v1-metal` points to
 the exact audited commit `922875a6`; PR #1's merge commit `f75b63f6` has the same source tree.
 
+Two pins have followed on the same v0.16.0 line, both bug fixes rather than new backend milestones,
+so neither carries a new tag. Both are reachable from `feature/sa3-training-vulkan-v0.16.0`, which
+is what the pin policy below actually requires.
+
+**Q4_K_M / q5_K `get_rows`** (ggml PR #2, merge `f561ab0d`, pinned at `e9c70fd6`). Fixes k-quant
+element dequantization in `get_rows` and adds gguf tensor ndims accessors. Landed with the
+quantization work.
+
+**Wide-row non-inplace `SET`** (ggml PR #3, merge `5e4d3a8c`, contains `74d2abbd`).
+`ggml_metal_op_set` dispatched only `ne01` threadgroups for its `src0 -> dst` copy while
+`kernel_cpy_t_t` derives its row-chunk index as `tgpig[0]/ne01`, pinning that index at 0 and
+truncating every row at `nth = min(1024, ne00)` elements. The untouched tail kept whatever the
+destination buffer held. sa3's DiT prepends 64 memory tokens to a `[1536, T]` activation with two
+non-inplace `ggml_set` calls, so 512 of every row's 1536 channels were stale — zeros on step 1,
+since fresh buffers are zeroed, and previous graph data afterwards. Scoped training on Apple was
+silently corrupted: `--lora-scope core` completed normally with finite losses and a broken adapter.
+
+Note this is the **same defect the Metal milestone above already fixed in `ACC`** — the two
+functions are near-identical copies, `ggml_metal_op_acc` carries the multiplier as `ne01*nwg`, and
+`ggml_metal_op_set` was missed. Treat them as a pair when touching either. `test-backend-ops`
+passed 12/12 throughout because it exercises `SET` only at `ne00 = 6`, well under the 1024
+threshold; `tests/set_wide_row_test.cpp` in this repo covers the real shape on whichever GPU
+backend is present.
+
 ## Updating the fork
 
 Keep the official repository as `upstream` and the SA3 fork as `origin` inside the submodule:
@@ -86,9 +110,23 @@ gitlink to its exact commit. Keep every published pin reachable from the public 
 | trainer v1 | `sa3-training-v1-cpu-cuda` | ggml `v0.15.3` (`eced84c`) | `feature/sa3-training-v0.15.3` | `cfec69c` | CPU, CUDA |
 | Vulkan v1 | `sa3-training-v1-vulkan` | ggml `v0.15.3` (`eced84c`) | `feature/sa3-training-vulkan-v0.15.3` | `5a87d69c` | CPU, CUDA, Vulkan |
 | Metal v1 | `sa3-training-v1-metal` | ggml `v0.16.0` (`524f974b`) | `feature/sa3-training-vulkan-v0.16.0` (PR #1) | `922875a6` | CPU, CUDA, Vulkan, Metal |
+| Q4_K_M `get_rows` fix | — (bug fix) | ggml `v0.16.0` (`524f974b`) | `feature/sa3-training-vulkan-v0.16.0` (PR #2) | `e9c70fd6` | CPU, CUDA, Vulkan, Metal |
+| Wide-row `SET` fix | — (bug fix) | ggml `v0.16.0` (`524f974b`) | `feature/sa3-training-vulkan-v0.16.0` (PR #3) | `5e4d3a8c` | CPU, CUDA, Vulkan, Metal |
 
 Add a row when the parent pin changes. Later backend milestones receive new immutable tags and rows
-rather than changing any existing trainer-v1 tag.
+rather than changing any existing trainer-v1 tag. A pin that only fixes a bug on an existing line
+gets a row but no tag: the tags mark audited backend milestones, while the requirement that every
+published pin stay reachable is met by the fork branch itself.
+
+To read the pin from a checkout rather than trusting this table:
+
+```sh
+git -C ggml rev-parse HEAD            # the exact pinned commit
+git -C ggml describe --tags           # e.g. sa3-training-v1-metal-6-g5e4d3a8c
+```
+
+`describe` is the quick sanity check — the suffix counts commits past the last audited milestone,
+so `-6-` means six commits of fixes have landed since `sa3-training-v1-metal`.
 
 ## Updating existing clones and downstream forks
 

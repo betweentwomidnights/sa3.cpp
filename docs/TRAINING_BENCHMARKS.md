@@ -13,7 +13,9 @@ checkpoint writes.
 - 64 GB system memory
 - F16 training-base DiTs, default DoRA-rows rank/alpha 16 recipe
 - Batch size 1, pre-encoded ratatat latents, seed 42
-- sa3.cpp `d7939a2`, ggml `5a87d69c`
+- sa3.cpp `d7939a2`, ggml `5a87d69c` — the revisions these numbers were measured at, not the
+  current pin. `docs/GGML_FORK.md` tracks what is pinned now; `git -C ggml describe --tags` reads
+  it from a checkout.
 
 ## ggml v0.16.0 matched Intel validation
 
