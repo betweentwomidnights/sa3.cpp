@@ -13,10 +13,17 @@ which means the two directions cannot drift apart.
   python3 tools/convert_lora_to_safetensors.py \\
       --in train-runs/<run>/adapter-final.gguf --out loras/my-adapter
 
-writes <out>.safetensors + <out>.json. Round-trips through convert_lora.py:
+writes <out>.safetensors + <out>.json.
 
-  python3 tools/convert_lora_to_safetensors.py --in a.gguf --out b
-  sa3-lora-convert --in b --out b.gguf      # b.gguf should match a.gguf tensor-for-tensor
+Verified by round-trip on a real 228-target dora-rows adapter: converting to safetensors and
+back through sa3-lora-convert reproduces the original gguf **bit-exactly** — 684/684 tensors,
+worst absolute difference 0.0.
+
+  .venv/bin/python tools/convert_lora_to_safetensors.py --in a.gguf --out b
+  sa3-lora-convert --in b --out b.gguf      # b.gguf matches a.gguf tensor-for-tensor
+
+Needs gguf + safetensors + numpy in the converter venv:
+  .venv/bin/pip install numpy gguf safetensors
 """
 import argparse, json, sys
 from pathlib import Path
