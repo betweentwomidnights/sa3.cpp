@@ -88,9 +88,37 @@ sa3-train --model medium --dit medium-base-q4.gguf --dataset <ds> --latents-dir 
 Expect finite losses in the same range as an F16 base, roughly 5% higher. A quantized forward should
 cost a little accuracy; it should not change the shape of the curve.
 
+## Speed: quantized is FASTER than f16 on all three measured backends
+
+Steady state, mean of steps 6-15 (never trust a 2-step mean — it is mostly graph build, and it
+misled me twice on this exact question):
+
+| backend | q4_K_M | f16 | |
+|---|---:|---:|---|
+| CUDA | **0.93 s** | 1.08 s | medium, 128 frames, dora-rows |
+| Vulkan | **1.72 s** | 1.90 s | same |
+| CPU | **29.2 s** | 46.9 s | 64 frames, plain lora |
+
+So there is no speed penalty to design around — the target is "at least match f16", and inline
+dequant reaches it.
+
+The Vulkan shader needed one optimization to get there (`4d20817d`): every type here is
+`QUANT_R == 1`, so `dequantize()` returns two **adjacent** elements, which are two adjacent
+`tile_a` slots. Loading a pair per call rather than fetching a pair per element and discarding half
+halves the work — and for a k-quant that work is dominated by unpacking the block's scale bytes,
+not by the element. **Metal's helpers return 16 values at a time (`thread type4x4 &`), so the same
+idea should go further there**, though its tile is indexed `[ti][tk]` and its load loop varies `tk`
+fastest, so an invocation's consecutive loads walk rows rather than elements — that loop needs
+restructuring before a run of elements can share a call.
+
+Also worth knowing: the bulk-dequant route (what CUDA does) is **not** a small change on Vulkan and
+probably is not on Metal either. `mul_mat` has a bespoke path precisely because dequant-to-scratch
+needs two-phase `prealloc_size_x` sizing plus descriptor-set requests; `out_prod` goes through the
+generic `ggml_vk_op_f32` helper and would need the same plumbing. Inline dequant turned out to be
+both smaller and fast enough, so prefer it.
+
 ## Known-not-done
 
-Vulkan is **correct but slow** — ~3.5x slower per step than an F16 base, because the tile load
-dequantizes a pair to keep one value and redoes block math per element. Adjacent `ti` in a tile row
-are adjacent elements of the same `src0` row, so they can share one `dequantize()`. Left for a
-follow-up so the correct version landed first. Do not take the current Vulkan timings as the ceiling.
+Nothing blocking. The obvious further optimization is widening the pair load to a longer run so the
+block scale unpack is amortised over more elements — worth more on Metal (16-wide helpers) than on
+Vulkan (2-wide).
