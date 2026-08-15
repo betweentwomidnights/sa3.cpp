@@ -30,17 +30,18 @@ FLOAT_ENCODINGS = ("F16", "F32")
 QUANT_ENCODINGS = ("Q4_K_M", "Q5_K_M", "Q8_0")
 ENCODINGS = FLOAT_ENCODINGS + QUANT_ENCODINGS
 
-# Training bases are published F16/F32 only, and that is a kernel gap rather than a design limit.
-# Training on a quantized base already works on the CPU backend -- measured 1.6x faster than F16 on
-# a 2.9x smaller file, with sane gradients -- because the functional adapter path keeps the frozen
-# base as a mul_mat argument. CUDA cannot do it yet: the backward needs out_prod(W, transpose(grad))
-# and CUDA's out_prod takes F32 or contiguous F16 src0 only (ggml-cuda/out-prod.cu). CPU handles
-# quantized src0 through the row-dequantize path. Since CUDA is the backend people actually train
-# on, publishing a quantized base would ship something that aborts for most users.
+# Training bases are published F16, F32 and Q4_K_M. Training on a quantized base works on every
+# backend -- CPU, CUDA, Vulkan and Metal -- because the functional adapter path keeps the frozen base
+# as a mul_mat argument, and ggml PR #4 taught out_prod(W, transpose(grad)) to take a quantized src0.
+# It is also faster than F16 everywhere measured, on a 2.9x smaller file, and an adapter trained this
+# way is audibly indistinguishable from an F16-trained control. See docs/TRAINING.md.
 #
-# Asking for a quantized set plus --training-base is still reasonable (quantized inference,
-# trainable base), so the base DiT falls back to F16 rather than failing. download_models.py
-# --dry-run prints the resolved plan, so the substitution is visible rather than silent.
+# Only Q4_K_M is published: it is the tier where the footprint win matters, and adding Q5_K_M/Q8_0
+# bases would be three more large files for a saving nobody asked for. A request for a tier we do not
+# publish falls back to F16 rather than failing, since "quantized inference plus a trainable base" is
+# a reasonable ask. download_models.py --dry-run prints the resolved plan, so any substitution is
+# visible rather than silent.
+TRAINING_BASE_ENCODINGS = FLOAT_ENCODINGS + ("Q4_K_M",)
 TRAINING_BASE_FALLBACK = "F16"
 
 
@@ -95,7 +96,7 @@ def build_download_plan(namespace, variant, encoding, training_base=False):
         )
     ]
     if training_base:
-        base_enc = TRAINING_BASE_FALLBACK if enc in QUANT_ENCODINGS else enc
+        base_enc = enc if enc in TRAINING_BASE_ENCODINGS else TRAINING_BASE_FALLBACK
         plan.append(
             (
                 f"{namespace}/{model}-base-GGUF",

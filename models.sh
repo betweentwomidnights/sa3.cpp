@@ -48,12 +48,13 @@ case "$VARIANT" in
 esac
 
 ENC=$(printf '%s' "$ENCODING" | tr '[:lower:]' '[:upper:]')   # F16 / F32
-# Training bases are published F16/F32 only -- CUDA's out_prod backward does not take a quantized
-# src0 yet -- so a quantized request still pulls an F16 base DiT. The [fetch] lines below show it.
+# Training bases are published F16, F32 and Q4_K_M -- training on a quantized base works on every
+# backend. Q5_K_M/Q8_0 bases are not published, so those requests pull an F16 base DiT instead. The
+# [fetch] lines below show which one was resolved.
 BASE_ENC="$ENC"
 case "$ENC" in
-  F16|F32) ;;
-  Q4_K_M|Q5_K_M|Q8_0) BASE_ENC="F16" ;;
+  F16|F32|Q4_K_M) ;;
+  Q5_K_M|Q8_0) BASE_ENC="F16" ;;
   *) echo "unknown encoding: $ENCODING (f16|f32|q4_k_m|q5_k_m|q8_0)" >&2; exit 1 ;;
 esac
 VAR_REPO="$NAMESPACE/stable-audio-3-$VARIANT-GGUF"

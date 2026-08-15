@@ -29,12 +29,13 @@ if /I "%VARIANT%"=="small-music" ( set "DIT_SIZE=0.5B" & set "SAME=same-s" & got
 if /I "%VARIANT%"=="small-sfx"   ( set "DIT_SIZE=0.5B" & set "SAME=same-s" & goto variant_ok )
 echo unknown variant: %VARIANT% ^(medium^|small-music^|small-sfx^) & exit /b 1
 :variant_ok
-rem Training bases are published F16/F32 only -- CUDA's out_prod backward does not take a quantized
-rem src0 yet -- so a quantized request still pulls an F16 base DiT. The [fetch] lines show it.
+rem Training bases are published F16, F32 and Q4_K_M -- training on a quantized base works on every
+rem backend. Q5_K_M/Q8_0 bases are not published, so those pull an F16 base DiT. The [fetch] lines
+rem show which one was resolved.
 set "BASE_ENC="
 if /I "%ENCODING%"=="f16"    ( set "ENC=F16"     & goto encoding_ok )
 if /I "%ENCODING%"=="f32"    ( set "ENC=F32"     & goto encoding_ok )
-if /I "%ENCODING%"=="q4_k_m" ( set "ENC=Q4_K_M"  & set "BASE_ENC=F16" & goto encoding_ok )
+if /I "%ENCODING%"=="q4_k_m" ( set "ENC=Q4_K_M"  & goto encoding_ok )
 if /I "%ENCODING%"=="q5_k_m" ( set "ENC=Q5_K_M"  & set "BASE_ENC=F16" & goto encoding_ok )
 if /I "%ENCODING%"=="q8_0"   ( set "ENC=Q8_0"    & set "BASE_ENC=F16" & goto encoding_ok )
 echo unknown encoding: %ENCODING% ^(f16^|f32^|q4_k_m^|q5_k_m^|q8_0^) & exit /b 1

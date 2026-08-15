@@ -126,16 +126,25 @@ across all three variants.
 | medium SAME-L (F16 1626 MB) | 865 | 617 | 570 |
 | small-music / small-sfx DiT (F16 877 MB) | ~471-481 | ~333-343 | ~302-312 |
 | small-* SAME-S (F16 207 MB) | 110 | 79 | 72 |
+| medium base DiT (F16 2773 MB) | — | — | 962 |
+| small-* base DiT (F16 877 MB) | — | — | 302 |
 
 **quantization buys footprint everywhere and speed only on some backends.** CUDA and Vulkan gain
 ~33% end to end; Metal is flat (Q8_0 1.7% faster, Q4_K_M 2.1% *slower*) because the load-time saving
 and the added per-step compute cancel. say so on the cards — a Mac user picking Q4_K_M for speed
 would be picking it for the wrong reason. see `docs/METAL.md` §9.
 
-**training bases stay F16/F32.** not intrinsic: the functional adapter path keeps the frozen base as
-a `mul_mat` argument, and training on a quantized base already works on the CPU backend. CUDA's
-`out_prod` backward takes F32 or contiguous F16 `src0` only, so a quantized base aborts there — and
-CUDA is what people train on.
+**training bases are published `F32`, `F16` and `Q4_K_M`.** training on a quantized base works on
+every backend as of ggml PR #4, which taught `out_prod` to take a quantized `src0` — that backward,
+`out_prod(W, transpose(grad))`, was the only op in the way, since the functional adapter path
+otherwise keeps the frozen base as a plain `mul_mat` argument. it is *faster* than F16 on every
+backend measured, not a tradeoff, and a 2000-step adapter trained on a Q4_K_M base is audibly
+indistinguishable from an F16-trained control. see `docs/TRAINING.md`.
+
+only Q4_K_M is published as a base: it is the tier where the 2.9x footprint win matters, and Q5_K_M
+/ Q8_0 bases would be three more large files for a saving nobody asked for. requesting one of those
+tiers with `--training-base` resolves the base DiT — and only the base DiT — to F16, which
+`--dry-run` prints.
 
 ## license
 

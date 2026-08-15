@@ -6,6 +6,7 @@ license_name: stable-audio-community
 license_link: LICENSE.md
 pipeline_tag: text-to-audio
 base_model: stabilityai/stable-audio-3-small-music
+base_model_relation: quantized
 tags:
 - audio-generation
 - music
@@ -30,12 +31,33 @@ the shared **encoder + tokenizer** from
 
 | component | file | notes |
 |---|---|---|
-| DiT (diffusion transformer) | `stable-audio-3-small-music-dit-0.5B-v1.0-{F16,F32}.gguf` | pick one precision |
-| autoencoder (SAME-S) | `stable-audio-3-small-music-same-s-v1.0-{F16,F32}.gguf` | pick one precision |
+| DiT (diffusion transformer) | `stable-audio-3-small-music-dit-0.5B-v1.0-{F32,F16,Q8_0,Q5_K_M,Q4_K_M}.gguf` | pick one encoding |
+| autoencoder (SAME-S) | `stable-audio-3-small-music-same-s-v1.0-{F32,F16,Q8_0,Q5_K_M,Q4_K_M}.gguf` | **must match the DiT** |
 | conditioner | `stable-audio-3-small-music-conditioner-v1.0-F32.gguf` | tiny sidecar (prompt padding + seconds_total) |
 | encoder + tokenizer | → [t5gemma-b-b-ul2-GGUF](https://huggingface.co/thepatch/t5gemma-b-b-ul2-GGUF) | **shared** across all SA3 variants |
 
 > **note:** SAME-S needs an **even** `--frames` count (the packed sequence must divide the chunk size).
+
+## Encodings
+
+`sa3-generate --encoding` resolves the DiT and the SAME with the same suffix, so download the pair.
+
+| encoding | DiT | SAME-S | total |
+|---|---:|---:|---:|
+| F32 | 1751 MB | 413 MB | 2164 MB |
+| F16 | 877 MB | 207 MB | 1084 MB |
+| Q8_0 | 481 MB | 110 MB | 591 MB |
+| Q5_K_M | 343 MB | 79 MB | 422 MB |
+| Q4_K_M | 312 MB | 72 MB | 384 MB |
+
+`q4_k_m` and `q5_k_m` promote the attention V, feed-forward down and embedding tensors to Q6_K;
+`q8_0` is uniform. Every tier passes `sa3-quant-check` with `below-threshold=0` at cosine `0.990`
+against the F16 reference, for the DiT and the SAME alike.
+
+**Quantization buys footprint everywhere and speed only on some backends.** CUDA and Vulkan gain
+roughly 33% end to end. **Metal is flat** — Q8_0 is 1.7% faster and Q4_K_M 2.1% *slower* than F16,
+because the load-time saving and the added per-step dequant cancel out. On a Mac, pick a quant for
+the memory, not for the speed.
 
 ## Usage
 
@@ -46,6 +68,13 @@ python tools/download_models.py --variant small-music --encoding f16
 
 # --model resolves the gguf set in ./models by name
 sa3-generate --model small-music --prompt "lo-fi hip hop beat, warm vinyl, mellow keys" --out song.wav
+```
+
+For a quantized set, pass the encoding to both — the downloader and the generator use the same names:
+
+```bash
+python tools/download_models.py --variant small-music --encoding q4_k_m
+sa3-generate --model small-music --encoding q4_k_m --prompt "lo-fi hip hop beat" --out song.wav
 ```
 
 ## Performance

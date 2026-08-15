@@ -6,6 +6,7 @@ license_name: stable-audio-community
 license_link: LICENSE.md
 pipeline_tag: text-to-audio
 base_model: stabilityai/stable-audio-3-medium
+base_model_relation: quantized
 tags:
 - audio-generation
 - music
@@ -30,13 +31,34 @@ This is a multi-file model. Grab the **DiT** + **SAME** at your chosen precision
 
 | component | file | notes |
 |---|---|---|
-| DiT (diffusion transformer) | `stable-audio-3-medium-dit-1.5B-v1.0-{F16,F32}.gguf` | pick one precision |
-| autoencoder (SAME-L) | `stable-audio-3-medium-same-l-v1.0-{F16,F32}.gguf` | pick one precision |
+| DiT (diffusion transformer) | `stable-audio-3-medium-dit-1.5B-v1.0-{F32,F16,Q8_0,Q5_K_M,Q4_K_M}.gguf` | pick one encoding |
+| autoencoder (SAME-L) | `stable-audio-3-medium-same-l-v1.0-{F32,F16,Q8_0,Q5_K_M,Q4_K_M}.gguf` | **must match the DiT** |
 | conditioner | `stable-audio-3-medium-conditioner-v1.0-F32.gguf` | tiny sidecar (prompt padding + seconds_total) |
 | encoder + tokenizer | → [t5gemma-b-b-ul2-GGUF](https://huggingface.co/thepatch/t5gemma-b-b-ul2-GGUF) | **shared** across all SA3 variants |
 
 **F16** is the production path (~3.5s for 12s of audio on an 8GB laptop GPU); **F32** is for CPU
 validation. The conditioner + encoder + tokenizer stay F32 (small / quality-critical).
+
+## Encodings
+
+`sa3-generate --encoding` resolves the DiT and the SAME with the same suffix, so download the pair.
+
+| encoding | DiT | SAME-L | total |
+|---|---:|---:|---:|
+| F32 | 5545 MB | 3251 MB | 8796 MB |
+| F16 | 2773 MB | 1626 MB | 4399 MB |
+| Q8_0 | 1483 MB | 865 MB | 2348 MB |
+| Q5_K_M | 1053 MB | 617 MB | 1670 MB |
+| Q4_K_M | 962 MB | 570 MB | 1532 MB |
+
+`q4_k_m` and `q5_k_m` promote the attention V, feed-forward down and embedding tensors to Q6_K;
+`q8_0` is uniform. Every tier passes `sa3-quant-check` with `below-threshold=0` at cosine `0.990`
+against the F16 reference, for the DiT and the SAME alike.
+
+**Quantization buys footprint everywhere and speed only on some backends.** CUDA and Vulkan gain
+roughly 33% end to end. **Metal is flat** — Q8_0 is 1.7% faster and Q4_K_M 2.1% *slower* than F16,
+because the load-time saving and the added per-step dequant cancel out. On a Mac, pick a quant for
+the memory, not for the speed.
 
 ## Usage
 
@@ -48,6 +70,13 @@ python tools/download_models.py --variant medium --encoding f16   # fetches this
 
 # --model resolves the 5 gguf files in ./models by name
 sa3-generate --model medium --prompt "upbeat funk groove with slap bass" --out song.wav
+```
+
+For a quantized set, pass the encoding to both — the downloader and the generator use the same names:
+
+```bash
+python tools/download_models.py --variant medium --encoding q4_k_m
+sa3-generate --model medium --encoding q4_k_m --prompt "upbeat funk groove with slap bass" --out song.wav
 ```
 
 ## Performance

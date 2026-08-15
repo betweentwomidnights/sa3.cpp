@@ -53,16 +53,28 @@ class ModelArtifactsTest(unittest.TestCase):
             # the conditioner is quality-critical and tiny: always F32, never quantized
             self.assertIn("stable-audio-3-medium-conditioner-v1.0-F32.gguf", files)
 
-    def test_quantized_request_still_gets_an_f16_training_base(self):
-        # Training bases are published F16/F32 only while CUDA's out_prod backward rejects a
-        # quantized src0. A quantized set plus --training-base must not ask for a file that does
-        # not exist; it falls back to F16 for the base DiT only.
+    def test_q4_request_gets_a_q4_training_base(self):
+        # Training on a quantized base works on every backend, so a Q4_K_M request resolves to a
+        # Q4_K_M base rather than substituting F16 -- the whole point of publishing the quant base.
         plan = build_download_plan("thepatch", "medium", "q4_k_m", training_base=True)
         self.assertIn("stable-audio-3-medium-dit-1.5B-v1.0-Q4_K_M.gguf", plan[0][1])
         self.assertEqual(
             plan[1][1],
-            ["stable-audio-3-medium-base-dit-1.5B-v1.0-F16.gguf"],
+            ["stable-audio-3-medium-base-dit-1.5B-v1.0-Q4_K_M.gguf"],
         )
+
+    def test_unpublished_base_tier_falls_back_to_f16(self):
+        # Only Q4_K_M is published as a base. Q5_K_M/Q8_0 plus --training-base must not ask for a
+        # file that does not exist, so the base DiT -- and only the base DiT -- falls back to F16.
+        for enc in ("q5_k_m", "q8_0"):
+            with self.subTest(encoding=enc):
+                plan = build_download_plan("thepatch", "medium", enc, training_base=True)
+                suffix = enc.upper()
+                self.assertIn(f"stable-audio-3-medium-dit-1.5B-v1.0-{suffix}.gguf", plan[0][1])
+                self.assertEqual(
+                    plan[1][1],
+                    ["stable-audio-3-medium-base-dit-1.5B-v1.0-F16.gguf"],
+                )
 
     def test_unknown_encoding_is_rejected_and_names_the_valid_ones(self):
         with self.assertRaises(ValueError) as ctx:
