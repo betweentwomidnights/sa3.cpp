@@ -37,9 +37,10 @@ inference WAV is byte-identical before and after the patch. A 32x16 threadgroup/
 adapter byte-identical and peak RSS at 5.75 GiB. The immutable tag `sa3-training-v1-metal` points to
 the exact audited commit `922875a6`; PR #1's merge commit `f75b63f6` has the same source tree.
 
-Two pins have followed on the same v0.16.0 line, both bug fixes rather than new backend milestones,
-so neither carries a new tag. Both are reachable from `feature/sa3-training-vulkan-v0.16.0`, which
-is what the pin policy below actually requires.
+Three pins have followed on the same v0.16.0 line. None is a new backend milestone, so none carries
+a new tag. The first two are merged and reachable from `feature/sa3-training-vulkan-v0.16.0`, which
+is what the pin policy below requires; the third is still on its own branch and has to merge there
+before it can be pinned on `main`.
 
 **Q4_K_M / q5_K `get_rows`** (ggml PR #2, merge `f561ab0d`, pinned at `e9c70fd6`). Fixes k-quant
 element dequantization in `get_rows` and adds gguf tensor ndims accessors. Landed with the
@@ -60,6 +61,61 @@ functions are near-identical copies, `ggml_metal_op_acc` carries the multiplier 
 passed 12/12 throughout because it exercises `SET` only at `ne00 = 6`, well under the 1024
 threshold; `tests/set_wide_row_test.cpp` in this repo covers the real shape on whichever GPU
 backend is present.
+
+**Quantized `src0` for `OUT_PROD`** (branch `feature/vulkan-out-prod-quant`, pinned at `2f6e2a7c`;
+the branch name predates the CUDA and Metal commits on it). This is a new capability, not a fix: it
+is what lets a LoRA train on a quantized base. The backward of `mul_mat` is
+`out_prod(W, transpose(grad))`, and with `W` quantized that is the **only** op in the way — the
+forward already worked, because a functional adapter never does anything with `W` except pass it to
+`mul_mat`, the same property that made quantized inference work.
+
+- **CUDA** (`c162c6ce`) — nearly free. `out-prod.cu` already dequantized a non-f32 `src0` into a
+  transient pool buffer for frozen f16 weights and `ggml_get_to_fp32_cuda` covers every k-quant, so
+  widening `is f16` to `is not f32` was the change.
+- **Vulkan** (`18db5476`, `4d20817d`) — new `out_prod_quant.comp` with inline dequant.
+- **Metal** (`2f6e2a7c`) — new `kernel_out_prod_q`, inline dequant, same SIMD-group tiling.
+
+All three are generated for q4_K, q5_K, q6_K and q8_0 only, the types a `q4_k_m` / `q5_k_m` /
+`q8_0` mix actually produces. The rest of the type table is deliberately absent until someone
+validates it.
+
+**Quantized is faster than F16 on every backend measured**, so there is no accuracy/speed tradeoff
+to reason about — steady state, mean of steps 6-15, medium with 128 frames and `dora-rows` except
+where noted:
+
+| backend | q4_K_M | F16 |
+|---|---:|---:|
+| CUDA | 0.93 s | 1.08 s |
+| Metal (M4) | 2.77 s | 3.28 s |
+| Vulkan | 1.72 s | 1.90 s |
+| CPU | 29.2 s | 46.9 s (64 frames, plain lora) |
+
+Never trust a two-step mean here: it is mostly graph build and it inverted this exact comparison
+twice during development.
+
+Two traps are worth carrying forward, because they are the same class of bug wearing different
+clothes. On Vulkan, `dequantize()` returns a **pair** whose members depend on `QUANT_R`, and for
+`QUANT_R == 1` — every k-quant — `iqs` must be **even**, since the k-quants halve it internally. On
+Metal the helpers instead take a *group* index and emit 16 values, so a work item must stage a whole
+16-wide run of a row rather than one element; doing it per element repeats the block's scale unpack
+sixteen times, and on a k-quant that unpack is the cost, not the element arithmetic. In both cases
+**Q8_0 masks the mistake completely** — its layout is insensitive to the index convention — so a
+Q8_0 pass is not evidence. Check a k-quant explicitly.
+
+The gate is `test-backend-ops -o OUT_PROD`: 128/128 on Metal and 124/124 on both Vulkan devices,
+220/220 on CUDA. `base_types` reaches Q4_K and Q8_0 but not Q5_K or Q6_K, and a `q4_k_m` mix emits
+Q6_K, so explicit cases for those two were added alongside the Metal kernel. `supports_op` is not
+always the only gate: Vulkan has a blanket assert in `ggml_vk_op_f32` permitting a quantized `src0`
+only for `GET_ROWS` and `CPY`, which `OUT_PROD` had to join. Metal has no equivalent, but its
+`supports_op` and the op's own assert now share `ggml_metal_op_out_prod_supports_src0` so the
+supported list cannot drift from the kernel instantiations.
+
+Two routes were rejected on Metal and the reasoning generalizes. Dequantizing to scratch and reusing
+the f32 kernel, which is what CUDA does, does not cover the case that matters: Metal's `CPY` accepts
+a quantized *source* only for the legacy quants (Q1_0, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0), so `q4_k_m`
+would be left out. And the bulk-dequant plumbing is not a small change on either Vulkan or Metal —
+`mul_mat` has a bespoke path precisely because dequant-to-scratch needs two-phase `prealloc` sizing,
+which `out_prod` does not have. Inline dequant is smaller and already faster than F16.
 
 ## Updating the fork
 
