@@ -38,9 +38,8 @@ adapter byte-identical and peak RSS at 5.75 GiB. The immutable tag `sa3-training
 the exact audited commit `922875a6`; PR #1's merge commit `f75b63f6` has the same source tree.
 
 Three pins have followed on the same v0.16.0 line. None is a new backend milestone, so none carries
-a new tag. The first two are merged and reachable from `feature/sa3-training-vulkan-v0.16.0`, which
-is what the pin policy below requires; the third is still on its own branch and has to merge there
-before it can be pinned on `main`.
+a new tag, and all three are merged and reachable from `feature/sa3-training-vulkan-v0.16.0`, which
+is what the pin policy below requires.
 
 **Q4_K_M / q5_K `get_rows`** (ggml PR #2, merge `f561ab0d`, pinned at `e9c70fd6`). Fixes k-quant
 element dequantization in `get_rows` and adds gguf tensor ndims accessors. Landed with the
@@ -62,8 +61,9 @@ passed 12/12 throughout because it exercises `SET` only at `ne00 = 6`, well unde
 threshold; `tests/set_wide_row_test.cpp` in this repo covers the real shape on whichever GPU
 backend is present.
 
-**Quantized `src0` for `OUT_PROD`** (branch `feature/vulkan-out-prod-quant`, pinned at `2f6e2a7c`;
-the branch name predates the CUDA and Metal commits on it). This is a new capability, not a fix: it
+**Quantized `src0` for `OUT_PROD`** (ggml PR #4, merge `ba817aa1`, contains `2f6e2a7c`; the branch
+name `feature/vulkan-out-prod-quant` predates the CUDA and Metal commits on it). This is a new
+capability, not a fix: it
 is what lets a LoRA train on a quantized base. The backward of `mul_mat` is
 `out_prod(W, transpose(grad))`, and with `W` quantized that is the **only** op in the way — the
 forward already worked, because a functional adapter never does anything with `W` except pass it to
@@ -202,6 +202,11 @@ gitlink to its exact commit. Keep every published pin reachable from the public 
 | Metal v1 | `sa3-training-v1-metal` | ggml `v0.16.0` (`524f974b`) | `feature/sa3-training-vulkan-v0.16.0` (PR #1) | `922875a6` | CPU, CUDA, Vulkan, Metal |
 | Q4_K_M `get_rows` fix | — (bug fix) | ggml `v0.16.0` (`524f974b`) | `feature/sa3-training-vulkan-v0.16.0` (PR #2) | `e9c70fd6` | CPU, CUDA, Vulkan, Metal |
 | Wide-row `SET` fix | — (bug fix) | ggml `v0.16.0` (`524f974b`) | `feature/sa3-training-vulkan-v0.16.0` (PR #3) | `5e4d3a8c` | CPU, CUDA, Vulkan, Metal |
+| Quantized-base training | — (see note) | ggml `v0.16.0` (`524f974b`) | `feature/sa3-training-vulkan-v0.16.0` (PR #4) | `ba817aa1` | CPU, CUDA, Vulkan, Metal |
+
+The last row is a new capability rather than a bug fix, but it still takes no tag: it adds a kernel
+to three existing backends instead of bringing up a new one, and every backend it touches was
+already audited under `sa3-training-v1-metal`.
 
 Add a row when the parent pin changes. Later backend milestones receive new immutable tags and rows
 rather than changing any existing trainer-v1 tag. A pin that only fixes a bug on an existing line
@@ -212,11 +217,11 @@ To read the pin from a checkout rather than trusting this table:
 
 ```sh
 git -C ggml rev-parse HEAD            # the exact pinned commit
-git -C ggml describe --tags           # e.g. sa3-training-v1-metal-6-g5e4d3a8c
+git -C ggml describe --tags           # e.g. sa3-training-v1-metal-11-gba817aa1
 ```
 
 `describe` is the quick sanity check — the suffix counts commits past the last audited milestone,
-so `-6-` means six commits of fixes have landed since `sa3-training-v1-metal`.
+so `-11-` means eleven commits have landed since `sa3-training-v1-metal`.
 
 ## Updating existing clones and downstream forks
 
