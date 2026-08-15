@@ -80,18 +80,35 @@ All three are generated for q4_K, q5_K, q6_K and q8_0 only, the types a `q4_k_m`
 validates it.
 
 **Quantized is faster than F16 on every backend measured**, so there is no accuracy/speed tradeoff
-to reason about — steady state, mean of steps 6-15, medium with 128 frames and `dora-rows` except
-where noted:
+to reason about — steady state, medium with 128 frames and `dora-rows` except where noted:
 
-| backend | q4_K_M | F16 |
-|---|---:|---:|
-| CUDA | 0.93 s | 1.08 s |
-| Metal (M4) | 2.77 s | 3.28 s |
-| Vulkan | 1.72 s | 1.90 s |
-| CPU | 29.2 s | 46.9 s (64 frames, plain lora) |
+| backend | q4_K_M | F16 | |
+|---|---:|---:|---|
+| CUDA | 0.93 s | 1.08 s | mean of steps 6-15 |
+| Metal (M4) | 2.95 s | 3.39 s | counterbalanced, see below |
+| Vulkan | 1.72 s | 1.90 s | mean of steps 6-15 |
+| CPU | 29.2 s | 46.9 s | 64 frames, plain lora |
 
-Never trust a two-step mean here: it is mostly graph build and it inverted this exact comparison
-twice during development.
+Two measurement traps, both of which produced a wrong published number before being caught.
+
+Never trust a two-step mean: it is mostly graph build, and it inverted this exact comparison twice
+during development.
+
+**And on the M4, never trust a plain "run A then B".** The machine throttles across a sequence, so
+whichever config runs first on a cool machine wins, and the effect is larger than the difference
+being measured. Running q4 then F16 back to back produced 2.77 s vs 3.28 s (18%); a counterbalanced
+ABBA measurement — q4/F16/F16/q4, twice, 20 steps each with a 75 s cooldown before every run — put
+the same comparison at 2.95 s vs 3.39 s (14.7%). Both blocks agreed to 0.1 points and the two
+configs' spreads did not overlap (q4 2.907-2.982, F16 3.349-3.412), which is the bar to insist on:
+if the spreads overlap, the ordering is still doing the talking. A single A-then-B run at 512 frames
+was contaminated badly enough to invert the sign, reporting q4 5.4% *slower*, so 512 frames is
+currently unmeasured rather than measured.
+
+Worth holding alongside this: quantization on Metal was compute-flat for *inference* (PR #23, Q8_0
+1.7% faster and Q4_K_M 2.1% slower). Training gains here because `out_prod` reads the frozen weight
+every backward step, so the smaller base buys bandwidth the inference path was not short of. A large
+Metal speedup from quantization is not the default expectation and should be measured, not assumed
+from the CUDA and Vulkan results.
 
 Two traps are worth carrying forward, because they are the same class of bug wearing different
 clothes. On Vulkan, `dequantize()` returns a **pair** whose members depend on `QUANT_R`, and for
@@ -101,6 +118,23 @@ Metal the helpers instead take a *group* index and emit 16 values, so a work ite
 sixteen times, and on a k-quant that unpack is the cost, not the element arithmetic. In both cases
 **Q8_0 masks the mistake completely** — its layout is insensitive to the index convention — so a
 Q8_0 pass is not evidence. Check a k-quant explicitly.
+
+A short probe cannot tell you whether a quantized base *degrades an adapter as training accumulates*,
+which is the failure that would matter. A full 2000-step run at 512 frames on Metal against
+`train-runs/metal-full-FIXED-512-2000` — same seed, dataset, adapter family and rank, differing only
+in the base encoding — says it does not:
+
+| steps | Q4_K_M loss | F16 loss | delta |
+|---|---:|---:|---:|
+| 1-250 | 0.6853 | 0.6613 | +3.6% |
+| 751-1000 | 0.6498 | 0.6309 | +3.0% |
+| 1251-1500 | 0.6446 | 0.6285 | +2.6% |
+| 1751-2000 | 0.6135 | 0.5985 | +2.5% |
+
+The gap *narrows* monotonically, and per-step loss correlation across all 2000 steps is 0.99890 —
+the same trajectory at slightly lower precision, not a different one that averages out similarly.
+`tools/compare_runs.py` does this comparison and first checks that both runs drew the same sample
+order, since without that the rest of the numbers mean nothing.
 
 The gate is `test-backend-ops -o OUT_PROD`: 128/128 on Metal and 124/124 on both Vulkan devices,
 220/220 on CUDA. `base_types` reaches Q4_K and Q8_0 but not Q5_K or Q6_K, and a `q4_k_m` mix emits
