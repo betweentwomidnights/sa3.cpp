@@ -1,5 +1,14 @@
 # stable-audio-3 in c++
 
+> **update 8/16/2026 — you can train a lora on a q4 base now, and it actually sounds decent. a
+> 2000-step dora trained on a q4_k_m base came out audibly indistinguishable from the same run on
+> f16, and it trains *faster*, on a base 2.9x smaller. works on cuda, vulkan, metal and cpu.**
+>
+> **quantized ggufs are up on huggingface for all three variants — q4_k_m / q5_k_m / q8_0 for the
+> DiT and the autoencoder, plus q4_k_m training bases. `--encoding q4_k_m` gets you the set.**
+>
+> **hoping to update the interfaces and embedded applications for such things shortly.**
+
 > **update 7/17/2026 — Metal backend LoRA training is now implemented via CLI. Training is now
 > validated on CUDA, Vulkan, Metal, and CPU.**
 >
@@ -30,6 +39,7 @@ cd sa3.cpp
 
 # 2. download a model set into ./models  (no python — curl from HuggingFace)
 ./models.sh            # windows: models.cmd    (add --training-base for native LoRA training)
+./models.sh --encoding q4_k_m --training-base   # quantized set + a q4 base you can train on
 
 # 3. put the tools on PATH for this shell (points SA3_MODELS_DIR at ./models too)
 source ./env.sh        # windows:  env.cmd  (cmd)   or   . .\env.ps1  (powershell)

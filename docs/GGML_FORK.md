@@ -85,6 +85,7 @@ to reason about — steady state, medium with 128 frames and `dora-rows` except 
 | backend | q4_K_M | F16 | |
 |---|---:|---:|---|
 | CUDA | 0.93 s | 1.08 s | mean of steps 6-15 |
+| CUDA, 512 frames | 1.143 s | 1.178 s | counterbalanced, see below |
 | Metal (M4) | 2.95 s | 3.39 s | counterbalanced, see below |
 | Vulkan | 1.72 s | 1.90 s | mean of steps 6-15 |
 | CPU | 29.2 s | 46.9 s | 64 frames, plain lora |
@@ -100,9 +101,21 @@ being measured. Running q4 then F16 back to back produced 2.77 s vs 3.28 s (18%)
 ABBA measurement — q4/F16/F16/q4, twice, 20 steps each with a 75 s cooldown before every run — put
 the same comparison at 2.95 s vs 3.39 s (14.7%). Both blocks agreed to 0.1 points and the two
 configs' spreads did not overlap (q4 2.907-2.982, F16 3.349-3.412), which is the bar to insist on:
-if the spreads overlap, the ordering is still doing the talking. A single A-then-B run at 512 frames
-was contaminated badly enough to invert the sign, reporting q4 5.4% *slower*, so 512 frames is
-currently unmeasured rather than measured.
+if the spreads overlap, the ordering is still doing the talking.
+
+**512 frames inverted the sign on both machines, for both of us, in the same way.** The M4's single
+A-then-B run at 512 frames reported q4 5.4% *slower*; a sequential CUDA run at 512 frames reported
+q4 2.3% *slower* (1.023 vs 1.000). Both were published before either was counterbalanced. The CUDA
+ABBA rerun — q4/F16/F16/q4, 60 steps each with a 60 s cooldown, mean of steps 11-60 — puts it at
+**q4 1.1427 s vs F16 1.1776 s, i.e. q4 3.0% *faster***, with both pairs agreeing in sign
+(early 0.974, late 0.967) and order effects of only -1.0% and -0.3%. The per-slot losses reproduce
+exactly across the repeated slots (q4 0.7540 twice, F16 0.7260 twice), so the runs are deterministic
+and timing is the only thing varying. q4 also had the tighter spread (sd 0.096 vs 0.132).
+
+The lesson is not "512 frames is special" — it is that the sequential-run error is roughly the size
+of the effect, so at any crop where the true difference is small it decides the answer. Where the
+effect is large (128 frames, ~14%) sequential ordering happens to be survivable; where it is small
+it is not, and you cannot know which case you are in before measuring properly.
 
 Worth holding alongside this: quantization on Metal was compute-flat for *inference* (PR #23, Q8_0
 1.7% faster and Q4_K_M 2.1% slower). Training gains here because `out_prod` reads the frozen weight
