@@ -24,6 +24,26 @@ STABILITY_LICENSE_SHA256 = "d6f6b1a4dce5c852bd6d7d9482d002baf0ccdb71e662250b73be
 
 SHARED_REPO = "t5gemma-b-b-ul2-GGUF"
 
+# Encodings the DiT and SAME are published in. The conditioner, text encoder and tokenizer are
+# always F32 -- they are small and quality-critical, so there is nothing to gain by quantizing them.
+FLOAT_ENCODINGS = ("F16", "F32")
+QUANT_ENCODINGS = ("Q4_K_M", "Q5_K_M", "Q8_0")
+ENCODINGS = FLOAT_ENCODINGS + QUANT_ENCODINGS
+
+# Training bases are published F16, F32 and Q4_K_M. Training on a quantized base works on every
+# backend -- CPU, CUDA, Vulkan and Metal -- because the functional adapter path keeps the frozen base
+# as a mul_mat argument, and ggml PR #4 taught out_prod(W, transpose(grad)) to take a quantized src0.
+# It is also faster than F16 everywhere measured, on a 2.9x smaller file, and an adapter trained this
+# way is audibly indistinguishable from an F16-trained control. See docs/TRAINING.md.
+#
+# Only Q4_K_M is published: it is the tier where the footprint win matters, and adding Q5_K_M/Q8_0
+# bases would be three more large files for a saving nobody asked for. A request for a tier we do not
+# publish falls back to F16 rather than failing, since "quantized inference plus a trainable base" is
+# a reasonable ask. download_models.py --dry-run prints the resolved plan, so any substitution is
+# visible rather than silent.
+TRAINING_BASE_ENCODINGS = FLOAT_ENCODINGS + ("Q4_K_M",)
+TRAINING_BASE_FALLBACK = "F16"
+
 
 def dit_identity(variant, training_base=False):
     """Return the catalog identity embedded in a DiT GGUF."""
@@ -58,8 +78,10 @@ def build_download_plan(namespace, variant, encoding, training_base=False):
     if variant not in VARIANTS:
         raise ValueError(f"unknown model variant: {variant}")
     enc = encoding.upper()
-    if enc not in ("F16", "F32"):
-        raise ValueError(f"unsupported encoding: {encoding}")
+    if enc not in ENCODINGS:
+        raise ValueError(
+            f"unsupported encoding: {encoding} (expected one of {', '.join(e.lower() for e in ENCODINGS)})"
+        )
 
     size, same = VARIANTS[variant]
     model = f"stable-audio-3-{variant}"
@@ -74,10 +96,11 @@ def build_download_plan(namespace, variant, encoding, training_base=False):
         )
     ]
     if training_base:
+        base_enc = enc if enc in TRAINING_BASE_ENCODINGS else TRAINING_BASE_FALLBACK
         plan.append(
             (
                 f"{namespace}/{model}-base-GGUF",
-                [dit_filename(variant, enc, training_base=True)],
+                [dit_filename(variant, base_enc, training_base=True)],
             )
         )
     plan.append(

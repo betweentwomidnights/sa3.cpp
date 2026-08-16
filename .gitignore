@@ -11,6 +11,8 @@ build-hip/
 build-metal/
 build-metal-noblas/
 build-all/
+# Standalone ggml builds, for running the fork's own test-backend-ops
+build-ggml-tests*/
 *.o
 *.obj
 *.exe

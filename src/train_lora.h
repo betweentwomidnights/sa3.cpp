@@ -2,6 +2,7 @@
 #pragma once
 
 #include "gguf_model.h"
+#include "lora.h"        // read_to_f32 -- one implementation of the quantized unpack, not two
 #include "train_svd.h"
 
 #include <algorithm>
@@ -128,6 +129,14 @@ inline void train_tensor_to_f32(ggml_tensor* t, std::vector<float>& out) {
         else if (t->data) std::memcpy(tmp.data(), t->data, tmp.size() * sizeof(ggml_fp16_t));
         else { std::fill(out.begin(), out.end(), 0.0f); return; }
         ggml_fp16_to_fp32_row(tmp.data(), out.data(), n);
+    } else if (ggml_is_quantized(t->type)) {
+        // Training on a quantized base: the dora/bora families read the frozen weight here to
+        // precompute row and column norms. Asking ggml_backend_tensor_get for n floats would
+        // over-read the tensor (a Q4_K row is ~0.56 bytes/element) and trip its bounds assert,
+        // which is what used to abort a quantized run before any graph was built. read_to_f32
+        // pulls the packed bytes and unpacks them with the type's own reference dequantizer.
+        if (!t->buffer && !t->data) { std::fill(out.begin(), out.end(), 0.0f); return; }
+        read_to_f32(t, out);
     } else if (t->buffer) {
         ggml_backend_tensor_get(t, out.data(), 0, out.size() * sizeof(float));
     } else if (t->data) {

@@ -7,7 +7,8 @@ Fetches one model variant (DiT + SAME + conditioner) plus the shared T5Gemma enc
 
   python3 -m pip install -U "huggingface_hub"
   python3 tools/download_models.py --variant medium --encoding f16
-  python3 tools/download_models.py --variant medium --encoding f16 --training-base
+  python3 tools/download_models.py --variant medium --encoding q4_k_m --training-base
+  python3 tools/download_models.py --variant medium --encoding q8_0 --dry-run
   HF_TOKEN=hf_... python3 tools/download_models.py --variant small-sfx   # if a repo is gated
 
 For the fastest official Hugging Face path, install a recent `huggingface_hub`
@@ -17,7 +18,7 @@ The published default namespace is ``thepatch``; override it with --namespace.
 """
 import argparse, importlib.util, os, sys
 
-from model_artifacts import VARIANTS, build_download_plan
+from model_artifacts import ENCODINGS, VARIANTS, build_download_plan
 
 DEFAULT_NAMESPACE = "thepatch"
 
@@ -46,21 +47,30 @@ def print_transfer_info():
 def main():
     ap = argparse.ArgumentParser(description="Download sa3.cpp GGUF models from HuggingFace.")
     ap.add_argument("--variant", default="medium", choices=list(VARIANTS))
-    ap.add_argument("--encoding", default="f16", choices=["f16", "f32"],
+    ap.add_argument("--encoding", default="f16", choices=[e.lower() for e in ENCODINGS],
                     help="weight encoding for DiT + SAME (default f16, the production path)")
     ap.add_argument("--namespace", default=DEFAULT_NAMESPACE, help="HuggingFace org/user")
     ap.add_argument("--out", default="models", help="output dir (default ./models)")
     ap.add_argument("--training-base", action="store_true",
                     help="also fetch the matching -base DiT required for LoRA training")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the resolved repo/file plan and exit, downloading nothing")
     args = ap.parse_args()
+
+    plan = build_download_plan(args.namespace, args.variant, args.encoding, args.training_base)
+
+    if args.dry_run:
+        for repo, files in plan:
+            print(repo)
+            for fname in files:
+                print(f"  {fname}")
+        return
 
     try:
         from huggingface_hub import snapshot_download
         from huggingface_hub.utils import get_token
     except ImportError:
         sys.exit('missing dependency: python3 -m pip install -U "huggingface_hub"')
-
-    plan = build_download_plan(args.namespace, args.variant, args.encoding, args.training_base)
 
     os.makedirs(args.out, exist_ok=True)
     token = os.environ.get("HF_TOKEN") or get_token()
