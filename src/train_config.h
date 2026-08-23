@@ -1,6 +1,7 @@
 // train_config.h - configuration parsing for native SA3 LoRA training.
 #pragma once
 
+#include "encoding.h"
 #include "yyjson.h"
 
 #include <cctype>
@@ -446,8 +447,8 @@ inline bool validate_train_config(const TrainConfig& c, std::string& err) {
         err = "unsupported model variant: " + c.model_variant;
         return false;
     }
-    if (c.encoding != "f16" && c.encoding != "F16" && c.encoding != "f32" && c.encoding != "F32") {
-        err = "unsupported encoding (expected f16|f32): " + c.encoding;
+    if (encoding_suffix(c.encoding).empty()) {
+        err = "unsupported encoding (expected f16|f32|q4_k_m|q5_k_m|q5_k|q8_0): " + c.encoding;
         return false;
     }
     if (c.train_split.empty() || c.test_split.empty() || c.evaluation_split.empty()) {
