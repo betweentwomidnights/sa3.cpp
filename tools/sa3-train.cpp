@@ -364,7 +364,7 @@ int main(int argc, char** argv) {
                     const std::string stem = std::filesystem::path(pair.audio_path).stem().string();
                     if (lat_cache.count(stem)) continue;
                     sa3::TrainAudio decoded;
-                    if (!sa3::decode_mp3_planar_ffmpeg(pair.audio_path, 44100, sc.out_channels / sc.patch_size, decoded, err))
+                    if (!sa3::decode_train_audio_file(pair.audio_path, 44100, sc.out_channels / sc.patch_size, decoded, err))
                         throw std::runtime_error(err);
                     sa3::TrainLatentEntry e;
                     if (!sa3::train_pre_encode_file(ae, sc, decoded, cfg.target_latent_rms, e, err))
@@ -528,7 +528,7 @@ int main(int argc, char** argv) {
                     seconds_total = e.seconds_total;
                 } else {
                     sa3::TrainAudio decoded, windowed;
-                    if (!sa3::decode_mp3_planar_ffmpeg(pair.audio_path, 44100, sc.out_channels / sc.patch_size, decoded, err))
+                    if (!sa3::decode_train_audio_file(pair.audio_path, 44100, sc.out_channels / sc.patch_size, decoded, err))
                         throw std::runtime_error(err);
                     // Stage 2: random-crop window start (fixed length -> the training graph is unchanged).
                     int crop_start = 0;

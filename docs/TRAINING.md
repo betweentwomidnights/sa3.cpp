@@ -33,7 +33,7 @@ Two things that are easy to miss:
   44.1 kHz, so 512 frames = 47.6 s, 256 = 23.8 s. `--duration` is the friendlier knob and wins when
   both are given. Shorter crops train faster and use less memory; the reference regime is ~47 s.
 - **MP3 datasets need `ffmpeg` on `PATH`.** Decoding shells out to it (see [Dataset](#dataset)).
-  WAV inputs do not.
+  WAV already at 44.1 kHz does not — it is read natively.
 
 Training prints what it is actually doing at startup, which is worth a glance before walking away:
 
@@ -97,11 +97,16 @@ datasets/my-training-set/
 
 Training honors `train/filelist.txt`. Test and evaluation splits are loaded only for validation/evaluation and are rejected if any train item overlaps by basename, canonical path, or `audio_sha256`.
 
-**MP3 decoding requires `ffmpeg` on `PATH`.** `sa3-train` shells out to it (`ffmpeg -f f32le …`) to
-read compressed audio; there is no built-in MP3 decoder. Inference has no such dependency — it reads
-WAV directly — so a machine that generates fine can still fail to train. Check with `ffmpeg -version`
-before a long run; a missing binary surfaces as a decode failure per file rather than a clear
-"ffmpeg not found".
+**Compressed audio requires `ffmpeg` on `PATH`.** `sa3-train` shells out to it (`ffmpeg -f f32le …`)
+to read anything it cannot read itself; there is no built-in MP3 decoder. Check with
+`ffmpeg -version` before a long run; a missing binary surfaces as a decode failure per file rather
+than a clear "ffmpeg not found".
+
+A WAV that already matches the training layout (44.1 kHz, and either the target channel count or
+mono) is read natively, so a WAV dataset trains with no `ffmpeg` at all — the decode is bit-identical
+to the ffmpeg path. WAV at any other rate still goes through ffmpeg, deliberately: the only resampler
+in this tree is linear, which is fine for a2a conditioning but is not what the reference training
+data was resampled with.
 
 ## Train
 
