@@ -18,7 +18,8 @@ The published default namespace is ``thepatch``; override it with --namespace.
 """
 import argparse, importlib.util, os, sys
 
-from model_artifacts import ENCODINGS, VARIANTS, build_download_plan
+from model_artifacts import (ENCODINGS, TEXT_ENCODER_DEFAULT, TEXT_ENCODER_ENCODINGS,
+                             VARIANTS, build_download_plan)
 
 DEFAULT_NAMESPACE = "thepatch"
 
@@ -49,6 +50,9 @@ def main():
     ap.add_argument("--variant", default="medium", choices=list(VARIANTS))
     ap.add_argument("--encoding", default="f16", choices=[e.lower() for e in ENCODINGS],
                     help="weight encoding for DiT + SAME (default f16, the production path)")
+    ap.add_argument("--t5-encoding", default=TEXT_ENCODER_DEFAULT.lower(),
+                    choices=[e.lower() for e in TEXT_ENCODER_ENCODINGS],
+                    help="text encoder encoding (default f16, equivalent to f32 at half the size)")
     ap.add_argument("--namespace", default=DEFAULT_NAMESPACE, help="HuggingFace org/user")
     ap.add_argument("--out", default="models", help="output dir (default ./models)")
     ap.add_argument("--training-base", action="store_true",
@@ -57,7 +61,8 @@ def main():
                     help="print the resolved repo/file plan and exit, downloading nothing")
     args = ap.parse_args()
 
-    plan = build_download_plan(args.namespace, args.variant, args.encoding, args.training_base)
+    plan = build_download_plan(args.namespace, args.variant, args.encoding, args.training_base,
+                               text_encoding=args.t5_encoding)
 
     if args.dry_run:
         for repo, files in plan:

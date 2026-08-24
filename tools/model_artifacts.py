@@ -24,11 +24,26 @@ STABILITY_LICENSE_SHA256 = "d6f6b1a4dce5c852bd6d7d9482d002baf0ccdb71e662250b73be
 
 SHARED_REPO = "t5gemma-b-b-ul2-GGUF"
 
-# Encodings the DiT and SAME are published in. The conditioner, text encoder and tokenizer are
-# always F32 -- they are small and quality-critical, so there is nothing to gain by quantizing them.
+# Encodings the DiT and SAME are published in. The conditioner and tokenizer are always F32 --
+# those two really are small (a 793 KiB conditioner, a 14 MiB vocab), so there is nothing to gain.
 FLOAT_ENCODINGS = ("F16", "F32")
 QUANT_ENCODINGS = ("Q4_K_M", "Q5_K_M", "Q8_0")
 ENCODINGS = FLOAT_ENCODINGS + QUANT_ENCODINGS
+
+# The text encoder is not small: at F32 it is 1074 MiB, the largest file in the set and bigger than
+# a small-music DiT. Measured on small-music/Metal against an F32 control, swapping only the encoder:
+#
+#   F16   537 MiB  conditioning cos 1.000000000, generated-audio cos 0.999971  -- free
+#   Q8_0  285 MiB  conditioning cos 0.999789,    generated-audio cos 0.991496  -- a real tradeoff
+#   Q4_K_M 206 MiB conditioning cos 0.977908,    generated-audio cos 0.797692  -- not shipped
+#
+# Q4_K_M is excluded on evidence, not caution: it is 11.8% SLOWER than F32 for the encoder (the T5
+# forward is too small to amortize dequant, unlike the DiT) while doing real damage to prompt
+# fidelity, so Q8_0 dominates it outright. Note that training loss is nearly blind to all of this --
+# Q4_K_M moved mean loss by 0.02% over 100 matched steps. Validate an encoder with conditioning
+# cosine (SA3_DUMP_COND) and generated audio, never with a loss curve.
+TEXT_ENCODER_ENCODINGS = ("F16", "F32", "Q8_0")
+TEXT_ENCODER_DEFAULT = "F16"
 
 # Training bases are published F16, F32 and Q4_K_M. Training on a quantized base works on every
 # backend -- CPU, CUDA, Vulkan and Metal -- because the functional adapter path keeps the frozen base
@@ -68,7 +83,18 @@ def dit_filename(variant, encoding, training_base=False):
     return f"{identity['basename']}-{size}-{VERSION}-{encoding.upper()}.gguf"
 
 
-def build_download_plan(namespace, variant, encoding, training_base=False):
+def text_encoder_filename(encoding):
+    """Return the published text-encoder filename for an encoding."""
+    enc = encoding.upper()
+    if enc not in TEXT_ENCODER_ENCODINGS:
+        raise ValueError(
+            f"unsupported text-encoder encoding: {encoding} "
+            f"(expected one of {', '.join(e.lower() for e in TEXT_ENCODER_ENCODINGS)})"
+        )
+    return f"t5gemma-b-b-ul2-encoder-0.3B-{VERSION}-{enc}.gguf"
+
+
+def build_download_plan(namespace, variant, encoding, training_base=False, text_encoding=None):
     """Return ``[(repo_id, [filenames...]), ...]`` for download_models.py.
 
     Training needs the inference components as well as the base DiT, so
@@ -107,7 +133,7 @@ def build_download_plan(namespace, variant, encoding, training_base=False):
         (
             f"{namespace}/{SHARED_REPO}",
             [
-                f"t5gemma-b-b-ul2-encoder-0.3B-{VERSION}-F32.gguf",
+                text_encoder_filename(text_encoding or TEXT_ENCODER_DEFAULT),
                 f"t5gemma-b-b-ul2-{VERSION}-vocab.gguf",
             ],
         )
