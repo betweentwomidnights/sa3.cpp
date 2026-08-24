@@ -47,6 +47,9 @@ struct TrainConfig {
     float adam_eps = 1.0e-8f;
     int batch_size = 1;
     int cpu_threads = 0;  // 0 = SA3_THREADS, then ggml default; only affects CPU backends
+    // Backend selection, same vocabulary as inference: ""/unset -> SA3_DEVICE env then
+    // GPU-if-available; "cpu" forces the CPU backend.
+    std::string device;
     int frames = 512;
     float duration_sec = 0.0f;
     unsigned long long seed = 42;
@@ -247,6 +250,7 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
     else if (key == "cond" || key == "cond_path") c.cond_path = value;
     else if (key == "dit" || key == "dit_path") c.dit_path = value;
     else if (key == "same" || key == "same_path") c.same_path = value;
+    else if (key == "device") c.device = value;
     else if (key == "dataset" || key == "dataset-dir" || key == "dataset_dir") c.dataset_dir = value;
     else if (key == "lora-scope" || key == "lora_scope") c.lora_scope = value;
     else if (key == "lora-include" || key == "lora_include") c.lora_include = train_split_csv(value);

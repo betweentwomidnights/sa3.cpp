@@ -338,7 +338,8 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             train_job_logf(hooks, "[train] prompt config: %s\n", cfg.prompt_config_path.c_str());
         train_job_logf(hooks, "[train] base DiT: %s\n", paths.dit.c_str());
 
-        ggml_backend_t backend = sa3::make_backend(cfg.cpu_threads);
+        ggml_backend_t backend = sa3::make_backend(cfg.cpu_threads,
+                                                   cfg.device.empty() ? nullptr : cfg.device.c_str());
         sa3::Tokenizer tok = sa3::Tokenizer::load(paths.tok.c_str());
         sa3::GgufModel te = sa3::load_gguf(paths.t5.c_str(), backend);
         sa3::GgufModel dit = sa3::load_gguf(paths.dit.c_str(), backend);
@@ -381,7 +382,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 for (const std::string& p : cfg.lora_exclude) scope_line += " -" + p;
                 scope_line += "]";
             }
-            train_job_log(hooks, scope_line);
+            train_job_log(hooks, scope_line + "\n");
         }
 
         sa3::GgufModel svd_bases;

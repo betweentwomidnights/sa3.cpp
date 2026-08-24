@@ -190,6 +190,109 @@ SA3_API const char* sa3_version(void);
 SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path,
                              const char* out_gguf_path, char* err, int err_len);
 
+
+/* ---------------------------------------------------------------------------------------------
+ * Training
+ *
+ * sa3_train() runs a whole LoRA/DoRA training job in-process: the same code path as the sa3-train
+ * CLI (src/train_job.h), so an adapter trained here is byte-identical to one trained on the command
+ * line with the same config. It BLOCKS for the length of the run (hours) -- call it on a worker
+ * thread and drive it through the callbacks.
+ *
+ * The dataset still comes from a directory laid out as docs/TRAINING.md describes. A host that
+ * cannot decode audio itself gets it read from disk (WAV natively, everything else via ffmpeg); a
+ * sandboxed host that cannot spawn ffmpeg supplies samples through hooks.load_audio instead.
+ *
+ * Checkpoints, metrics.jsonl, and the final adapter are written under output_dir exactly as the CLI
+ * writes them, so a cancelled run resumes with resume_path.
+ */
+
+/* Zero-initialize, then set what you need; 0/NULL means the CLI default shown.
+ * Anything not exposed here can be set through config_json, which is applied FIRST and then
+ * overridden by whichever fields below are non-zero. */
+typedef struct {
+    const char* models_dir;      /* NULL -> $SA3_MODELS_DIR, else "models" */
+    const char* variant;         /* NULL -> "medium" ("medium" | "small-music" | "small-sfx") */
+    const char* encoding;        /* NULL -> "f16"; quantized bases ("q4_k_m", "q8_0", ...) train too */
+    const char* dataset_dir;     /* REQUIRED */
+    const char* output_dir;      /* NULL -> train-runs/<dataset name> */
+    const char* latents_dir;     /* optional pre-encoded latents; skips audio decode entirely */
+    const char* prompt_config;   /* optional dataset.json for prompt tag-composition */
+    const char* resume_path;     /* optional adapter-step-N.gguf or trainer-state-step-N.gguf */
+    const char* adapter_type;    /* NULL -> "dora-rows" */
+    const char* lora_scope;      /* NULL -> "full" ("full" | "core") */
+    const char* config_json;     /* optional JSON of any train config key, applied before the above */
+    const char* device;          /* NULL/"" -> SA3_DEVICE then GPU-if-available; "cpu" forces CPU */
+
+    int     steps;               /* 0 -> 10000 total optimizer updates */
+    int     rank;                /* 0 -> 16 (alpha follows rank unless set) */
+    float   alpha;               /* 0 -> follows rank */
+    float   learning_rate;       /* 0 -> 1e-4 */
+    int     frames;              /* 0 -> 512 latent frames (~47.6 s); duration_sec wins if set */
+    float   duration_sec;        /* seconds of audio per crop; overrides frames */
+    int     batch_size;          /* 0 -> 1 */
+    int     checkpoint_every;    /* 0 -> 500 updates; negative disables intermediate checkpoints */
+    int     cpu_threads;         /* 0 -> SA3_THREADS/default; CPU backend only */
+    int     pre_encode;          /* 1 = encode the dataset to latents once up front */
+    int64_t seed;                /* 0 -> 42 */
+} sa3_train_config;
+
+/* One optimizer update. Pointers are valid only for the duration of the callback. */
+typedef struct {
+    int    epoch;
+    int    step;                 /* 1-based update index */
+    int    max_steps;            /* 0 when the run is not step-bounded */
+    const char* id;              /* dataset item id */
+    const char* prompt;          /* the composed caption this step trained on */
+    const char* mask;            /* inpaint mask type, "" when not inpainting */
+    float  t;                    /* sampled (and dist-shifted) timestep */
+    float  learning_rate;
+    float  loss;
+    double grad_norm;            /* pre-clip global norm */
+    double step_seconds;
+    int    cfg_dropped;
+    int    updated;              /* 0 while still accumulating toward batch_size */
+    int    n_gen;
+    int    n_ctx;
+} sa3_train_step;
+
+typedef void (*sa3_train_log_cb)(void* user, const char* line);
+typedef void (*sa3_train_step_cb)(void* user, const sa3_train_step* step);
+
+/* Return non-zero to stop at the next sample boundary. The run still writes a checkpoint and a
+ * final adapter before returning, so a cancelled run is resumable rather than lost. */
+typedef int (*sa3_train_cancel_cb)(void* user);
+
+/* Supply decoded audio for one dataset item instead of having the library read audio_path.
+ * Return 1 having set both out-params, 0 to let the library read the file itself.
+ * *samples must be PLANAR (samples[ch * n_samp + s]) at the requested sample_rate and channel
+ * count, and must stay valid until the callback returns -- the library copies it. */
+typedef int (*sa3_train_audio_cb)(void* user, const char* audio_path, int sample_rate, int channels,
+                                  const float** samples, int* n_samp);
+
+typedef struct {
+    sa3_train_log_cb    on_log;         /* NULL = silent */
+    sa3_train_step_cb   on_step;
+    sa3_train_cancel_cb should_cancel;
+    sa3_train_audio_cb  load_audio;
+    void*               user;           /* passed back to every callback above */
+    const char*         command_line;   /* recorded in the run's command.txt; NULL = skip */
+} sa3_train_hooks;
+
+typedef struct {
+    int    steps;                    /* last completed update */
+    int    cancelled;
+    double mean_step_seconds;
+    char   final_adapter[1024];      /* adapter-final.gguf */
+    char   last_checkpoint[1024];    /* adapter-step-N.gguf, "" if none was written */
+    char   preview_command[2048];    /* ready-to-run sa3-generate line */
+} sa3_train_result;
+
+/* Run a training job to completion. Returns 0 on success (out filled), non-zero on failure with a
+ * message in err. Blocks. Does not need a sa3_context -- training loads its own models. */
+SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
+                      sa3_train_result* out, char* err, int err_len);
+
 #ifdef __cplusplus
 }
 #endif
