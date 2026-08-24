@@ -20,6 +20,9 @@ namespace sa3 {
 struct TrainConfig {
     std::string model_variant = "medium";
     std::string encoding = "f16";
+    // Text-encoder precision, resolved independently of `encoding` -- the useful combination is a
+    // quantized DiT with an F16 encoder. Empty => auto (prefers F16, see text_encoder_auto_priority).
+    std::string text_encoding;
     std::string models_dir = "models";
     std::string tok_path;
     std::string t5_path;
@@ -244,6 +247,7 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
 
     if      (key == "model" || key == "model_variant") c.model_variant = value;
     else if (key == "encoding") c.encoding = value;
+    else if (key == "t5-encoding" || key == "t5_encoding") c.text_encoding = value;
     else if (key == "models-dir" || key == "models_dir") c.models_dir = value;
     else if (key == "tok" || key == "tok_path") c.tok_path = value;
     else if (key == "t5" || key == "t5_path") c.t5_path = value;
@@ -525,6 +529,7 @@ inline std::string train_config_usage(const char* argv0) {
        << "              --steps N (alias: --max-steps; default 10000)\n"
        << "              --resume adapter-step-N.gguf|trainer-state-step-N.gguf (N -> --steps total)\n"
        << "              --encoding f16|f32|q4_k_m|q5_k_m|q5_k|q8_0 (default f16; quantized bases train)\n"
+       << "              --t5-encoding ENC (text encoder precision; default auto, prefers F16)\n"
        << "              --device cpu|<gpu> (default: SA3_DEVICE, else GPU if available)\n"
        << "adapter: --adapter-type lora|dora-rows|dora-cols|bora|*-xs --rank N --alpha F (default: = rank)\n"
        << "          --lora-scope full|core (full=228 weights, core=168 per-block projections)\n"

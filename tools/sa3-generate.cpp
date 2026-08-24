@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
     const char* cond_p = nullptr;            // per-variant conditioner sidecar gguf (optional; falls back to --t5 if bundled)
     const char* model_variant = nullptr;     // --model: resolve the 5 base ggufs by naming convention
     const char* encoding = "f16";            // --encoding f16|f32|q4_k_m|q5_k_m|q5_k|q8_0 (which DiT/SAME precision --model picks)
+    const char* t5_encoding = "";            // --t5-encoding: text encoder precision; "" = auto (prefers F16)
     const char* env_md = getenv("SA3_MODELS_DIR");
     const char* models_dir = (env_md && *env_md) ? env_md : "models";  // --models-dir / SA3_MODELS_DIR
     const char* env_ad = getenv("SA3_ADAPTERS_DIR");
@@ -60,6 +61,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--model")  && i+1 < argc) model_variant = argv[++i];
         else if (!strcmp(argv[i], "--encoding") && i+1 < argc) encoding = argv[++i];
+        else if (!strcmp(argv[i], "--t5-encoding") && i+1 < argc) t5_encoding = argv[++i];
         else if (!strcmp(argv[i], "--models-dir") && i+1 < argc) models_dir = argv[++i];
         else if (!strcmp(argv[i], "--adapters-dir") && i+1 < argc) adapters_dir = argv[++i];
         else if (!strcmp(argv[i], "--tok")    && i+1 < argc) tok_p = argv[++i];
@@ -156,7 +158,15 @@ int main(int argc, char** argv) {
             resolved.push_back(std::move(p)); slot = resolved.back().c_str();
         };
         fill(tok_p,  "t5gemma-b-b-ul2-v1.0-vocab",             ".gguf");
-        fill(t5_p,   "t5gemma-b-b-ul2-encoder-",               ".gguf");        // shared encoder (F32)
+        if (!t5_p) {   // shared encoder; --t5-encoding picks the precision, "" = auto (prefers F16)
+            std::string terr, p = sa3::resolve_text_encoder(md, t5_encoding, terr);
+            if (p.empty()) {
+                fprintf(stderr, "[sa3] --model %s: %s in %s/ (run: python tools/download_models.py --variant %s)\n",
+                        mv.c_str(), terr.c_str(), md.c_str(), mv.c_str());
+                exit(1);
+            }
+            resolved.push_back(std::move(p)); t5_p = resolved.back().c_str();
+        }
         fill(cond_p, "stable-audio-3-" + mv + "-conditioner-", ".gguf");        // F32
         fill(dit_p,  "stable-audio-3-" + mv + "-dit-",  "-" + ENC + ".gguf");
         fill(same_p, "stable-audio-3-" + mv + "-same-", "-" + ENC + ".gguf");
@@ -178,6 +188,7 @@ int main(int argc, char** argv) {
     const bool inpaint = (inpaint_start >= 0.0f || inpaint_end >= 0.0f);   // inpaint mode (needs --init source)
     if (!tok_p || !t5_p || !dit_p || !same_p) {
         fprintf(stderr, "usage: sa3-generate (--model medium|small-music|small-sfx [--encoding f16|f32|q4_k_m|q5_k_m|q5_k|q8_0] [--models-dir DIR]\n"
+                        "                     [--t5-encoding ENC  text encoder precision; default auto, prefers F16]\n"
                         "                     | --tok <f> --t5 <f> --cond <f> --dit <f> --same <f>)\n"
                         "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
                         "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--duration-padding SEC]\n"
