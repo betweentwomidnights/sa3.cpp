@@ -524,6 +524,8 @@ inline std::string train_config_usage(const char* argv0) {
        << "core options: --model medium|small-music|small-sfx --models-dir DIR --dataset DIR --out DIR\n"
        << "              --steps N (alias: --max-steps; default 10000)\n"
        << "              --resume adapter-step-N.gguf|trainer-state-step-N.gguf (N -> --steps total)\n"
+       << "              --encoding f16|f32|q4_k_m|q5_k_m|q5_k|q8_0 (default f16; quantized bases train)\n"
+       << "              --device cpu|<gpu> (default: SA3_DEVICE, else GPU if available)\n"
        << "adapter: --adapter-type lora|dora-rows|dora-cols|bora|*-xs --rank N --alpha F (default: = rank)\n"
        << "          --lora-scope full|core (full=228 weights, core=168 per-block projections)\n"
        << "          --lora-include a,b --lora-exclude a,b (substring filters, applied after scope)\n"

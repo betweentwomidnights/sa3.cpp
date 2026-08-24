@@ -26,6 +26,7 @@ sa3-train --dataset /path/to/dataset --steps 2000 \
 | `--rank N` | `16` | adapter capacity. `--alpha` follows it automatically, so raising rank does **not** silently weaken the adapter. |
 | `--duration SEC` | — | seconds of audio per training crop. Without it you get `--frames 512`, which is **47.6 s**. |
 | `--lora-scope full\|core` | `full` | `core` adapts only the 24 blocks' own projections (168 weights instead of 228): ~10% faster steps and ~11% smaller adapters, and in a matched 2000-step run the loss curve was within 0.0013 of `full` throughout. |
+| `--encoding ENC` | `f16` | base precision. Quantized bases (`q4_k_m`, `q8_0`, …) train on every backend and are both smaller and faster — on an M4 a `q4_k_m` medium base ran 2.77 s/step against 3.28 s/step for f16, on 962 MiB instead of 2773 MiB. |
 
 Two things that are easy to miss:
 
@@ -43,6 +44,9 @@ Training prints what it is actually doing at startup, which is worth a glance be
 
 `scale` is `alpha/rank` and should normally be `1`. Adapter strength is multiplied by it in both
 training and inference, so a `scale` well below 1 means the adapter is being attenuated.
+
+Training is also callable in-process through `libsa3` (`sa3_train`), including from hosts that
+cannot spawn `ffmpeg`; see [EMBEDDING.md](EMBEDDING.md#training).
 
 ## Build
 
