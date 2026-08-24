@@ -26,6 +26,7 @@ sa3-train --dataset /path/to/dataset --steps 2000 \
 | `--rank N` | `16` | adapter capacity. `--alpha` follows it automatically, so raising rank does **not** silently weaken the adapter. |
 | `--duration SEC` | — | seconds of audio per training crop. Without it you get `--frames 512`, which is **47.6 s**. |
 | `--lora-scope full\|core` | `full` | `core` adapts only the 24 blocks' own projections (168 weights instead of 228): ~10% faster steps and ~11% smaller adapters, and in a matched 2000-step run the loss curve was within 0.0013 of `full` throughout. |
+| `--encoding ENC` | `f16` | base precision. Quantized bases (`q4_k_m`, `q8_0`, …) train on every backend and are both smaller and faster — on an M4 a `q4_k_m` medium base ran 2.77 s/step against 3.28 s/step for f16, on 962 MiB instead of 2773 MiB. |
 
 Two things that are easy to miss:
 
@@ -33,7 +34,7 @@ Two things that are easy to miss:
   44.1 kHz, so 512 frames = 47.6 s, 256 = 23.8 s. `--duration` is the friendlier knob and wins when
   both are given. Shorter crops train faster and use less memory; the reference regime is ~47 s.
 - **MP3 datasets need `ffmpeg` on `PATH`.** Decoding shells out to it (see [Dataset](#dataset)).
-  WAV inputs do not.
+  WAV already at 44.1 kHz does not — it is read natively.
 
 Training prints what it is actually doing at startup, which is worth a glance before walking away:
 
@@ -43,6 +44,9 @@ Training prints what it is actually doing at startup, which is worth a glance be
 
 `scale` is `alpha/rank` and should normally be `1`. Adapter strength is multiplied by it in both
 training and inference, so a `scale` well below 1 means the adapter is being attenuated.
+
+Training is also callable in-process through `libsa3` (`sa3_train`), including from hosts that
+cannot spawn `ffmpeg`; see [EMBEDDING.md](EMBEDDING.md#training).
 
 ## Build
 
@@ -97,11 +101,16 @@ datasets/my-training-set/
 
 Training honors `train/filelist.txt`. Test and evaluation splits are loaded only for validation/evaluation and are rejected if any train item overlaps by basename, canonical path, or `audio_sha256`.
 
-**MP3 decoding requires `ffmpeg` on `PATH`.** `sa3-train` shells out to it (`ffmpeg -f f32le …`) to
-read compressed audio; there is no built-in MP3 decoder. Inference has no such dependency — it reads
-WAV directly — so a machine that generates fine can still fail to train. Check with `ffmpeg -version`
-before a long run; a missing binary surfaces as a decode failure per file rather than a clear
-"ffmpeg not found".
+**Compressed audio requires `ffmpeg` on `PATH`.** `sa3-train` shells out to it (`ffmpeg -f f32le …`)
+to read anything it cannot read itself; there is no built-in MP3 decoder. Check with
+`ffmpeg -version` before a long run; a missing binary surfaces as a decode failure per file rather
+than a clear "ffmpeg not found".
+
+A WAV that already matches the training layout (44.1 kHz, and either the target channel count or
+mono) is read natively, so a WAV dataset trains with no `ffmpeg` at all — the decode is bit-identical
+to the ffmpeg path. WAV at any other rate still goes through ffmpeg, deliberately: the only resampler
+in this tree is linear, which is fine for a2a conditioning but is not what the reference training
+data was resampled with.
 
 ## Train
 

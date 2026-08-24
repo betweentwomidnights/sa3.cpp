@@ -67,6 +67,70 @@ req.encode_chunk_size = 128; req.encode_overlap = 32;   // REQUIRED to encode lo
 sa3_generate_ex(ctx, &req, &audio, err, sizeof err);
 ```
 
+## training
+
+`sa3_train()` runs a whole LoRA/DoRA job in-process, through the same code the CLI uses
+([`src/train_job.h`](../src/train_job.h)). An adapter it writes is **byte-identical** to one
+`sa3-train` writes with the same config — verified against the CLI on every change.
+
+```c
+sa3_train_config cfg = {0};
+cfg.dataset_dir = "/path/to/dataset";      // laid out as docs/TRAINING.md describes
+cfg.output_dir  = "/path/to/run";
+cfg.variant     = "small-music";
+cfg.encoding    = "q4_k_m";                 // quantized bases train on every backend
+cfg.steps       = 2000;
+cfg.frames      = 128;                      // ~11.9 s crops; 512 is the reference regime
+cfg.seed        = 42;
+
+sa3_train_hooks hooks = {0};
+hooks.on_log        = on_log;               // one formatted line at a time
+hooks.on_step       = on_step;              // per-update loss / grad norm / lr
+hooks.should_cancel = should_cancel;        // non-zero to stop at the next sample
+hooks.user          = self;
+
+sa3_train_result res = {0};
+char err[1024];
+if (sa3_train(&cfg, &hooks, &res, err, sizeof err) != 0) { /* err is filled */ }
+// res.final_adapter is the .gguf you now pass to sa3_generate as a lora
+```
+
+- **it blocks** for the length of the run (hours). Call it on a worker thread; the callbacks are
+  invoked on that thread.
+- **cancel is cooperative** — `should_cancel` is checked at each sample boundary, and the run still
+  writes a checkpoint pair and a final adapter before returning, so `cfg.resume_path` picks it back
+  up exactly where it stopped. `res.cancelled` tells you which way it ended.
+- **`config_json`** takes a JSON file of any train-config key and is applied *before* the struct
+  fields, so the struct stays small without capping what a host can set.
+- **the result feeds inference directly** — point a `sa3_request`'s `lora_names` at
+  `res.final_adapter`.
+
+### training without a filesystem or ffmpeg
+
+Audio normally comes off disk: WAV already at 44.1 kHz is read natively, and anything else is
+decoded by shelling out to `ffmpeg`. A sandboxed host (iOS, a locked-down plugin) can do neither, so
+`hooks.load_audio` lets it hand over planar float PCM per item instead:
+
+```c
+static int load_audio(void* user, const char* audio_path, int sample_rate, int channels,
+                      const float** samples, int* n_samp) {
+    struct host* h = (struct host*)user;
+    if (!decode_with_the_platform(h, audio_path, sample_rate, channels)) return 0;  // 0 = you read it
+    *samples = h->planar;    // samples[ch * n_samp + s], valid until this call returns
+    *n_samp  = h->n_samp;
+    return 1;
+}
+```
+
+Returning `0` falls back to the file, so supplying audio for only part of a dataset works. The
+library copies what you hand it before the callback returns.
+
+The dataset directory itself is still read normally (manifests, captions), and checkpoints and
+`metrics.jsonl` are still written under `output_dir` — a host that wants training needs somewhere
+writable, just not a decoder.
+
+[`tools/sa3-libtrain.c`](../tools/sa3-libtrain.c) is the runnable pure-C example.
+
 ## what you build and ship
 
 `libsa3` is a normal build target, produced alongside the tools by the build scripts:

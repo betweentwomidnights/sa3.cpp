@@ -1,6 +1,7 @@
 // train_config.h - configuration parsing for native SA3 LoRA training.
 #pragma once
 
+#include "encoding.h"
 #include "yyjson.h"
 
 #include <cctype>
@@ -46,6 +47,9 @@ struct TrainConfig {
     float adam_eps = 1.0e-8f;
     int batch_size = 1;
     int cpu_threads = 0;  // 0 = SA3_THREADS, then ggml default; only affects CPU backends
+    // Backend selection, same vocabulary as inference: ""/unset -> SA3_DEVICE env then
+    // GPU-if-available; "cpu" forces the CPU backend.
+    std::string device;
     int frames = 512;
     float duration_sec = 0.0f;
     unsigned long long seed = 42;
@@ -246,6 +250,7 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
     else if (key == "cond" || key == "cond_path") c.cond_path = value;
     else if (key == "dit" || key == "dit_path") c.dit_path = value;
     else if (key == "same" || key == "same_path") c.same_path = value;
+    else if (key == "device") c.device = value;
     else if (key == "dataset" || key == "dataset-dir" || key == "dataset_dir") c.dataset_dir = value;
     else if (key == "lora-scope" || key == "lora_scope") c.lora_scope = value;
     else if (key == "lora-include" || key == "lora_include") c.lora_include = train_split_csv(value);
@@ -446,8 +451,8 @@ inline bool validate_train_config(const TrainConfig& c, std::string& err) {
         err = "unsupported model variant: " + c.model_variant;
         return false;
     }
-    if (c.encoding != "f16" && c.encoding != "F16" && c.encoding != "f32" && c.encoding != "F32") {
-        err = "unsupported encoding (expected f16|f32): " + c.encoding;
+    if (encoding_suffix(c.encoding).empty()) {
+        err = "unsupported encoding (expected f16|f32|q4_k_m|q5_k_m|q5_k|q8_0): " + c.encoding;
         return false;
     }
     if (c.train_split.empty() || c.test_split.empty() || c.evaluation_split.empty()) {
@@ -519,6 +524,8 @@ inline std::string train_config_usage(const char* argv0) {
        << "core options: --model medium|small-music|small-sfx --models-dir DIR --dataset DIR --out DIR\n"
        << "              --steps N (alias: --max-steps; default 10000)\n"
        << "              --resume adapter-step-N.gguf|trainer-state-step-N.gguf (N -> --steps total)\n"
+       << "              --encoding f16|f32|q4_k_m|q5_k_m|q5_k|q8_0 (default f16; quantized bases train)\n"
+       << "              --device cpu|<gpu> (default: SA3_DEVICE, else GPU if available)\n"
        << "adapter: --adapter-type lora|dora-rows|dora-cols|bora|*-xs --rank N --alpha F (default: = rank)\n"
        << "          --lora-scope full|core (full=228 weights, core=168 per-block projections)\n"
        << "          --lora-include a,b --lora-exclude a,b (substring filters, applied after scope)\n"

@@ -3,6 +3,7 @@
 #include "libsa3.h"
 #include "sa3_pipeline.h"
 #include "lora_convert.h"
+#include "train_job.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -199,7 +200,7 @@ SA3_API void sa3_unload(sa3_context* ctx) { if (ctx) ctx->pipe.reset(); }   // d
 
 SA3_API void sa3_free(sa3_context* ctx) { delete ctx; }
 
-SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 3"; }
+SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 4"; }
 
 SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path,
                              const char* out_gguf_path, char* err, int err_len) {
@@ -208,6 +209,128 @@ SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path
         std::string e;
         if (!sa3::convert_lora_safetensors(safetensors_path, json_path, out_gguf_path, e)) {
             set_err(err, err_len, e); return 2;
+        }
+        return 0;
+    } catch (const std::exception& e) { set_err(err, err_len, e.what()); return 10; }
+      catch (...)                     { set_err(err, err_len, "unknown error"); return 10; }
+}
+
+static void copy_field(char* dst, size_t cap, const std::string& src) {
+    if (!dst || cap == 0) return;
+    const size_t n = src.size() < cap - 1 ? src.size() : cap - 1;
+    std::memcpy(dst, src.data(), n);
+    dst[n] = '\0';
+}
+
+SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
+                      sa3_train_result* out, char* err, int err_len) {
+    if (!cfg) { set_err(err, err_len, "null argument"); return 1; }
+    if (out) std::memset(out, 0, sizeof(*out));
+    try {
+        sa3::TrainConfig tc;
+        if (const char* models = std::getenv("SA3_MODELS_DIR"); models && *models) tc.models_dir = models;
+
+        // config_json first, so the explicit fields below win over it.
+        if (cfg->config_json && *cfg->config_json) {
+            std::string jerr;
+            if (!sa3::train_apply_json_config(tc, cfg->config_json, jerr)) { set_err(err, err_len, jerr); return 2; }
+        }
+
+        auto str = [](const char* v, std::string& dst) { if (v && *v) dst = v; };
+        str(cfg->models_dir,     tc.models_dir);
+        str(cfg->variant,        tc.model_variant);
+        str(cfg->encoding,       tc.encoding);
+        str(cfg->dataset_dir,    tc.dataset_dir);
+        str(cfg->output_dir,     tc.output_dir);
+        str(cfg->latents_dir,    tc.latents_dir);
+        str(cfg->prompt_config,  tc.prompt_config_path);
+        str(cfg->resume_path,    tc.resume_path);
+        str(cfg->adapter_type,   tc.adapter_type);
+        str(cfg->lora_scope,     tc.lora_scope);
+
+        if (cfg->steps > 0)            tc.max_steps = cfg->steps;
+        if (cfg->rank > 0)             tc.rank = cfg->rank;
+        if (cfg->alpha > 0.0f)         tc.alpha = cfg->alpha;
+        if (cfg->learning_rate > 0.0f) tc.learning_rate = cfg->learning_rate;
+        if (cfg->frames > 0)           tc.frames = cfg->frames;
+        if (cfg->duration_sec > 0.0f)  tc.duration_sec = cfg->duration_sec;
+        if (cfg->batch_size > 0)       tc.batch_size = cfg->batch_size;
+        if (cfg->checkpoint_every > 0) tc.checkpoint_every = cfg->checkpoint_every;
+        if (cfg->checkpoint_every < 0) tc.checkpoint_every = 0;   // negative = no intermediate writes
+        if (cfg->cpu_threads > 0)      tc.cpu_threads = cfg->cpu_threads;
+        if (cfg->pre_encode)           tc.pre_encode = true;
+        if (cfg->seed != 0)            tc.seed = (unsigned long long)cfg->seed;
+
+        if (tc.dataset_dir.empty()) { set_err(err, err_len, "dataset_dir is required"); return 2; }
+        str(cfg->device, tc.device);
+        if (tc.cpu_threads == 0) tc.cpu_threads = sa3::cpu_threads_from_env();
+        sa3::train_finalize_defaults(tc);
+
+        sa3::TrainHooks th;
+        if (hooks) {
+            void* user = hooks->user;
+            if (hooks->on_log) {
+                const sa3_train_log_cb cb = hooks->on_log;
+                th.log = [cb, user](const std::string& line) { cb(user, line.c_str()); };
+            }
+            if (hooks->on_step) {
+                const sa3_train_step_cb cb = hooks->on_step;
+                th.on_step = [cb, user](const sa3::TrainStepReport& r) {
+                    sa3_train_step s;
+                    std::memset(&s, 0, sizeof(s));
+                    s.epoch = r.epoch;
+                    s.step = r.step;
+                    s.max_steps = r.max_steps;
+                    s.id = r.id.c_str();
+                    s.prompt = r.prompt.c_str();
+                    s.mask = r.mask.c_str();
+                    s.t = r.t;
+                    s.learning_rate = r.learning_rate;
+                    s.loss = r.loss;
+                    s.grad_norm = r.grad_norm;
+                    s.step_seconds = r.step_seconds;
+                    s.cfg_dropped = r.cfg_dropped ? 1 : 0;
+                    s.updated = r.updated ? 1 : 0;
+                    s.n_gen = r.n_gen;
+                    s.n_ctx = r.n_ctx;
+                    cb(user, &s);
+                };
+            }
+            if (hooks->should_cancel) {
+                const sa3_train_cancel_cb cb = hooks->should_cancel;
+                th.should_cancel = [cb, user]() { return cb(user) != 0; };
+            }
+            if (hooks->load_audio) {
+                const sa3_train_audio_cb cb = hooks->load_audio;
+                th.load_audio = [cb, user](const sa3::TrainAudioCaptionPair& pair, int sr, int ch,
+                                           sa3::TrainAudio& audio, std::string& lerr) {
+                    const float* samples = nullptr;
+                    int n_samp = 0;
+                    if (cb(user, pair.audio_path.c_str(), sr, ch, &samples, &n_samp) == 0) return false;
+                    if (!samples || n_samp <= 0) {
+                        lerr = "load_audio returned no samples for " + pair.audio_path;
+                        return false;
+                    }
+                    audio.samples.assign(samples, samples + (size_t)n_samp * (size_t)ch);
+                    audio.n_samples = n_samp;
+                    audio.n_channels = ch;
+                    audio.sample_rate = sr;
+                    return true;
+                };
+            }
+            if (hooks->command_line) th.command_line = hooks->command_line;
+        }
+
+        sa3::TrainResult result;
+        std::string terr;
+        if (!sa3::run_training(tc, th, result, terr)) { set_err(err, err_len, terr); return 3; }
+        if (out) {
+            out->steps = result.steps;
+            out->cancelled = result.cancelled ? 1 : 0;
+            out->mean_step_seconds = result.mean_step_seconds;
+            copy_field(out->final_adapter, sizeof(out->final_adapter), result.final_adapter);
+            copy_field(out->last_checkpoint, sizeof(out->last_checkpoint), result.last_adapter_checkpoint);
+            copy_field(out->preview_command, sizeof(out->preview_command), result.preview_command);
         }
         return 0;
     } catch (const std::exception& e) { set_err(err, err_len, e.what()); return 10; }

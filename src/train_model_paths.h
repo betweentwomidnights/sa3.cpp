@@ -25,7 +25,7 @@ inline bool resolve_train_model_paths(const TrainConfig& cfg, ModelPaths& paths,
     if (cfg.dit_path.empty() &&
         (cfg.model_variant == "medium" || cfg.model_variant == "small-music" ||
          cfg.model_variant == "small-sfx")) {
-        const std::string enc = (cfg.encoding == "f32" || cfg.encoding == "F32") ? "F32" : "F16";
+        const std::string enc = encoding_suffix(cfg.encoding);
         const std::string base_variant = cfg.model_variant + "-base";
         bool ambiguous = false;
         paths.dit = resolve_one(cfg.models_dir, "stable-audio-3-" + base_variant + "-dit-",

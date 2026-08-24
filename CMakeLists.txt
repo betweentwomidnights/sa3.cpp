@@ -278,6 +278,11 @@ add_executable(sa3-libtest tools/sa3-libtest.c)
 target_include_directories(sa3-libtest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sa3-libtest PRIVATE sa3_shared)
 
+# C ABI training smoke test / usage example for embedded hosts.
+add_executable(sa3-libtrain tools/sa3-libtrain.c)
+target_include_directories(sa3-libtrain PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(sa3-libtrain PRIVATE sa3_shared)
+
 # C ABI cooperative-cancel smoke test for embedded hosts.
 add_executable(sa3-libcancel tools/sa3-libcancel.c)
 target_include_directories(sa3-libcancel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
