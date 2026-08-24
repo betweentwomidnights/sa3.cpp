@@ -26,6 +26,7 @@ sa3-train --dataset /path/to/dataset --steps 2000 \
 | `--rank N` | `16` | adapter capacity. `--alpha` follows it automatically, so raising rank does **not** silently weaken the adapter. |
 | `--duration SEC` | — | seconds of audio per training crop. Without it you get `--frames 512`, which is **47.6 s**. |
 | `--lora-scope full\|core` | `full` | `core` adapts only the 24 blocks' own projections (168 weights instead of 228): ~10% faster steps and ~11% smaller adapters, and in a matched 2000-step run the loss curve was within 0.0013 of `full` throughout. |
+| `--t5-encoding ENC` | auto | text-encoder precision, resolved apart from `--encoding`. Auto prefers `F16`, which is equivalent to `F32` at half the size (1074 → 537 MiB) and takes small-music's training peak from 2.28 to 1.78 GiB. `q8_0` saves another 0.26 GiB for a small, audible-on-paper cost. |
 | `--encoding ENC` | `f16` | base precision. Quantized bases (`q4_k_m`, `q8_0`, …) train on every backend and are both smaller and faster — on an M4 a `q4_k_m` medium base ran 2.77 s/step against 3.28 s/step for f16, on 962 MiB instead of 2773 MiB. |
 
 Two things that are easy to miss:

@@ -47,6 +47,10 @@ typedef struct {
     sa3_config config;
     int cpu_threads;
     const char* device;
+    /* Text-encoder precision, resolved independently of config.encoding -- the useful combination is
+     * a quantized DiT with an F16 encoder. NULL/"" -> auto, which prefers F16 (equivalent to F32 for
+     * this encoder) and never picks a quantized tier on its own. */
+    const char* text_encoder_encoding;
 } sa3_config_ex;
 
 /* Optional progress callback. fraction is overall 0..1 (UI does *100); stage is
@@ -214,6 +218,7 @@ typedef struct {
     const char* models_dir;      /* NULL -> $SA3_MODELS_DIR, else "models" */
     const char* variant;         /* NULL -> "medium" ("medium" | "small-music" | "small-sfx") */
     const char* encoding;        /* NULL -> "f16"; quantized bases ("q4_k_m", "q8_0", ...) train too */
+    const char* text_encoder_encoding; /* NULL -> auto (prefers F16); resolved apart from `encoding` */
     const char* dataset_dir;     /* REQUIRED */
     const char* output_dir;      /* NULL -> train-runs/<dataset name> */
     const char* latents_dir;     /* optional pre-encoded latents; skips audio decode entirely */
