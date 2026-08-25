@@ -21,6 +21,7 @@ full contract is in [`src/libsa3.h`](../src/libsa3.h). The shape:
 sa3_config_ex cfg = {0};
 cfg.config.models_dir = absolute_models_dir;
 cfg.config.variant = "small-music";
+cfg.text_encoder_encoding = "f16";                        // NULL = auto (prefers F16); see DISTRIBUTION.md
 cfg.config.encoding = "f16";
 cfg.cpu_threads = 8;                                      // CPU backend only; 0 = SA3_THREADS/default
 sa3_context* ctx = sa3_init_ex(&cfg, err, sizeof err);     // load the models (blocks ~seconds)
@@ -79,6 +80,7 @@ cfg.dataset_dir = "/path/to/dataset";      // laid out as docs/TRAINING.md descr
 cfg.output_dir  = "/path/to/run";
 cfg.variant     = "small-music";
 cfg.encoding    = "q4_k_m";                 // quantized bases train on every backend
+cfg.text_encoder_encoding = "f16";          // NULL = auto; F16 halves the encoder for free
 cfg.steps       = 2000;
 cfg.frames      = 128;                      // ~11.9 s crops; 512 is the reference regime
 cfg.seed        = 42;

@@ -49,6 +49,10 @@ std::unique_ptr<sa3::Pipeline> g_pipe;    // loaded lazily on first generate; fr
 std::atomic<bool> g_loaded{false};        // lock-free view for /health (won't block during a gen)
 std::string g_variant   = "medium";
 std::string g_encoding  = "f16";
+// Text-encoder precision, resolved apart from g_encoding -- the combination worth having on a
+// small box is a quantized DiT with an F16 encoder. Empty => auto (prefers F16, and never a
+// quantized tier on its own). See docs/DISTRIBUTION.md.
+std::string g_t5_encoding;
 std::string g_models_dir;
 std::string g_adapters_dir;
 std::string g_prompts_dir;
@@ -555,7 +559,8 @@ void jobs_prune() {
 bool ensure_loaded(std::string& err) {
     if (g_pipe && g_pipe->loaded()) { g_loaded = true; return true; }
     sa3::ModelPaths mp;
-    if (!sa3::ModelPaths::resolve(g_models_dir, g_variant, g_encoding, mp, err)) return false;
+    if (!sa3::ModelPaths::resolve(g_models_dir, g_variant, g_encoding, g_t5_encoding, mp, err))
+        return false;
     try {
         g_pipe = std::make_unique<sa3::Pipeline>();
         g_pipe->load(mp, g_cpu_threads);
@@ -856,6 +861,7 @@ int main(int argc, char** argv) {
         else if (a == "--port")         port = atoi(next("8006"));
         else if (a == "--model")        g_variant = next("medium");
         else if (a == "--encoding")     g_encoding = next("f16");
+        else if (a == "--t5-encoding")  g_t5_encoding = next("");
         else if (a == "--models-dir")   g_models_dir = next("models");
         else if (a == "--adapters-dir") g_adapters_dir = next("");
         else if (a == "--prompts-dir")  g_prompts_dir = next("prompts");
@@ -924,7 +930,9 @@ int main(int argc, char** argv) {
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         const bool loaded = g_loaded.load();   // atomic: never blocks behind an in-flight generation
         std::string body = "{\"status\":\"ok\",\"model\":\"" + g_variant + "\",\"encoding\":\"" +
-                           g_encoding + "\",\"loaded\":" + (loaded ? "true" : "false") +
+                           g_encoding + "\",\"t5_encoding\":\"" +
+                           (g_t5_encoding.empty() ? "auto" : g_t5_encoding) +
+                           "\",\"loaded\":" + (loaded ? "true" : "false") +
                            ",\"loudness_defaults\":" + loudness_params_json(sa3::loudness_defaults_from_env()) + "}";
         res.set_content(body, "application/json");
     });
@@ -1237,8 +1245,10 @@ int main(int argc, char** argv) {
         res.set_content(body, "application/json");
     });
 
-    fprintf(stderr, "[sa3-server] http://%s:%d  model=%s/%s  models=%s  adapters=%s  source_loras=%s  prompts=%s  audio_in=%s  web=%s  (async /poll_status; frugal default)\n",
-            host.c_str(), port, g_variant.c_str(), g_encoding.c_str(), g_models_dir.c_str(), adir.c_str(), sldir.c_str(), pdir.c_str(), aidir.c_str(),
+    fprintf(stderr, "[sa3-server] http://%s:%d  model=%s/%s  t5=%s  models=%s  adapters=%s  source_loras=%s  prompts=%s  audio_in=%s  web=%s  (async /poll_status; frugal default)\n",
+            host.c_str(), port, g_variant.c_str(), g_encoding.c_str(),
+            g_t5_encoding.empty() ? "auto" : g_t5_encoding.c_str(),
+            g_models_dir.c_str(), adir.c_str(), sldir.c_str(), pdir.c_str(), aidir.c_str(),
             g_web_dir.empty() ? "(none)" : g_web_dir.c_str());
     if (!svr.listen(host.c_str(), port)) {
         fprintf(stderr, "[sa3-server] failed to bind %s:%d\n", host.c_str(), port);

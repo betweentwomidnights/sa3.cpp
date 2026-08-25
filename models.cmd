@@ -1,11 +1,13 @@
 @echo off
 setlocal enabledelayedexpansion
 rem Download the sa3.cpp GGUF model set from HuggingFace (public repos) with curl.exe - no Python.
-rem Usage: models.cmd [--variant medium^|small-music^|small-sfx] [--encoding f16^|f32^|q4_k_m^|q5_k_m^|q8_0] [--training-base] [--namespace <hf-user>] [--out DIR] [--dry-run]
+rem Usage: models.cmd [--variant medium^|small-music^|small-sfx] [--encoding f16^|f32^|q4_k_m^|q5_k_m^|q8_0] [--t5-encoding f16^|f32^|q8_0] [--training-base] [--namespace <hf-user>] [--out DIR] [--dry-run]
 rem   default: medium f16 into .\models
 
 set "VARIANT=medium"
 set "ENCODING=f16"
+rem The text encoder resolves apart from the DiT/SAME: F16 is equivalent to F32 at half the size.
+set "T5_ENCODING=f16"
 set "NAMESPACE=thepatch"
 set "OUT=models"
 set "TRAINING_BASE=0"
@@ -15,6 +17,7 @@ set "DRY_RUN=0"
 if "%~1"=="" goto parsed
 if /I "%~1"=="--variant"   ( set "VARIANT=%~2" & shift & shift & goto parse )
 if /I "%~1"=="--encoding"  ( set "ENCODING=%~2" & shift & shift & goto parse )
+if /I "%~1"=="--t5-encoding" ( set "T5_ENCODING=%~2" & shift & shift & goto parse )
 if /I "%~1"=="--namespace" ( set "NAMESPACE=%~2" & shift & shift & goto parse )
 if /I "%~1"=="--out"       ( set "OUT=%~2" & shift & shift & goto parse )
 if /I "%~1"=="--training-base" ( set "TRAINING_BASE=1" & shift & goto parse )
@@ -41,6 +44,14 @@ if /I "%ENCODING%"=="q8_0"   ( set "ENC=Q8_0"    & set "BASE_ENC=F16" & goto enc
 echo unknown encoding: %ENCODING% ^(f16^|f32^|q4_k_m^|q5_k_m^|q8_0^) & exit /b 1
 :encoding_ok
 if not defined BASE_ENC set "BASE_ENC=%ENC%"
+set "T5_ENC="
+if /I "%T5_ENCODING%"=="f16"  set "T5_ENC=F16"
+if /I "%T5_ENCODING%"=="f32"  set "T5_ENC=F32"
+if /I "%T5_ENCODING%"=="q8_0" set "T5_ENC=Q8_0"
+if not defined T5_ENC (
+    echo unknown --t5-encoding "%T5_ENCODING%" ^(expected f16^|f32^|q8_0^) 1>&2
+    exit /b 2
+)
 set "VAR_REPO=%NAMESPACE%/stable-audio-3-%VARIANT%-GGUF"
 set "BASE_REPO=%NAMESPACE%/stable-audio-3-%VARIANT%-base-GGUF"
 set "SHARED=%NAMESPACE%/t5gemma-b-b-ul2-GGUF"
@@ -57,7 +68,7 @@ call :dl "%VAR_REPO%" "%BASE%-%SAME%-v1.0-%ENC%.gguf"
 if errorlevel 1 exit /b 1
 call :dl "%VAR_REPO%" "%BASE%-conditioner-v1.0-F32.gguf"
 if errorlevel 1 exit /b 1
-call :dl "%SHARED%"   "t5gemma-b-b-ul2-encoder-0.3B-v1.0-F32.gguf"
+call :dl "%SHARED%"   "t5gemma-b-b-ul2-encoder-0.3B-v1.0-%T5_ENC%.gguf"
 if errorlevel 1 exit /b 1
 call :dl "%SHARED%"   "t5gemma-b-b-ul2-v1.0-vocab.gguf"
 if errorlevel 1 exit /b 1
@@ -69,7 +80,7 @@ if "%TRAINING_BASE%"=="1" (
 exit /b 0
 
 :help
-echo Usage: models.cmd [--variant medium^|small-music^|small-sfx] [--encoding f16^|f32^|q4_k_m^|q5_k_m^|q8_0] [--training-base] [--namespace HF_USER] [--out DIR] [--dry-run]
+echo Usage: models.cmd [--variant medium^|small-music^|small-sfx] [--encoding f16^|f32^|q4_k_m^|q5_k_m^|q8_0] [--t5-encoding f16^|f32^|q8_0] [--training-base] [--namespace HF_USER] [--out DIR] [--dry-run]
 exit /b 0
 
 :dl

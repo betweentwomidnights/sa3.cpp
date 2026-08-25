@@ -26,6 +26,7 @@ sa3-train --dataset /path/to/dataset --steps 2000 \
 | `--rank N` | `16` | adapter capacity. `--alpha` follows it automatically, so raising rank does **not** silently weaken the adapter. |
 | `--duration SEC` | — | seconds of audio per training crop. Without it you get `--frames 512`, which is **47.6 s**. |
 | `--lora-scope full\|core` | `full` | `core` adapts only the 24 blocks' own projections (168 weights instead of 228): ~10% faster steps and ~11% smaller adapters, and in a matched 2000-step run the loss curve was within 0.0013 of `full` throughout. |
+| `--t5-encoding ENC` | auto | text-encoder precision, resolved apart from `--encoding`. Auto prefers `F16`, which is equivalent to `F32` at half the size (1074 → 537 MiB) and takes small-music's training peak from 2.28 to 1.78 GiB. `q8_0` saves another 0.26 GiB for a small, audible-on-paper cost. **Pick it for memory, never for speed:** encoding the caption is `t5_cond` in `SA3_TRAIN_PROFILE=1`, and on CUDA/medium that is **9 ms of a 1070 ms step — 0.84%** — so `q8_0` moves the step by −1 ms, within noise of `f16` (see below). |
 | `--encoding ENC` | `f16` | base precision. Quantized bases (`q4_k_m`, `q8_0`, …) train on every backend and are both smaller and faster — on an M4 a `q4_k_m` medium base ran 2.77 s/step against 3.28 s/step for f16, on 962 MiB instead of 2773 MiB. |
 
 Two things that are easy to miss:
@@ -343,6 +344,29 @@ build-cuda/bin/sa3-generate \
   --seed 42 \
   --out train-runs/my-training-run/evaluation.wav
 ```
+
+## text-encoder precision does not move training time
+
+Measured on CUDA / medium-base F16 / 512 frames, `SA3_TRAIN_PROFILE=1`, medians over steps 11-50,
+run **ABBA** (f16, q8_0, q8_0, f16) rather than A-then-B:
+
+| block | encoder | `t5_cond` | `dit` | total |
+|---|---|---:|---:|---:|
+| 1 (early) | F16 | 9 ms | 979 ms | 1062 ms |
+| 2 | Q8_0 | 8 ms | 977 ms | 1064 ms |
+| 3 | Q8_0 | 8 ms | 988 ms | 1075 ms |
+| 4 (late) | F16 | 9 ms | 992 ms | 1080 ms |
+| **pooled** | **F16** | **9 ms** | 984 ms | **1069.5 ms** |
+| **pooled** | **Q8_0** | **8 ms** | 986 ms | **1070.0 ms** |
+
+Pooled, `q8_0` is **+0.05%** on total step time and **1 ms faster** on the encoder itself: the two
+are the same speed, and the encoder is under 1% of a step either way.
+
+> ⚠️ **the ordering is the whole point.** Total step time drifts upward across the session
+> (1062 → 1064 → 1075 → 1080 ms) as the GPU heats. Run A-then-B and that drift lands entirely on
+> the second arm, "showing" `q8_0` about 1.3% slower — a wrong sign produced by a real effect that
+> has nothing to do with the encoder. ABBA gives each arm one early and one late block so the drift
+> cancels. The same trap applies to any A/B on this machine, not just this one.
 
 ## Troubleshooting
 

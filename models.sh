@@ -2,6 +2,7 @@
 # Download the sa3.cpp GGUF model set from HuggingFace (public repos) with curl — no Python.
 #
 # Usage: ./models.sh [--variant medium|small-music|small-sfx] [--encoding f16|f32|q4_k_m|q5_k_m|q8_0]
+#                    [--t5-encoding f16|f32|q8_0]
 #                    [--training-base] [--namespace <hf-user>] [--out DIR] [--dry-run]
 #   default: medium f16 into ./models
 #
@@ -12,6 +13,8 @@ set -eu
 
 VARIANT="medium"
 ENCODING="f16"
+# The text encoder is resolved apart from the DiT/SAME: F16 is equivalent to F32 at half the size.
+T5_ENCODING="f16"
 NAMESPACE="thepatch"
 OUT="models"
 TRAINING_BASE=0
@@ -21,6 +24,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --variant)   VARIANT="$2"; shift ;;
     --encoding)  ENCODING="$2"; shift ;;
+    --t5-encoding) T5_ENCODING="$2"; shift ;;
     --namespace) NAMESPACE="$2"; shift ;;
     --out)       OUT="$2"; shift ;;
     --training-base) TRAINING_BASE=1 ;;
@@ -52,6 +56,12 @@ ENC=$(printf '%s' "$ENCODING" | tr '[:lower:]' '[:upper:]')   # F16 / F32
 # backend. Q5_K_M/Q8_0 bases are not published, so those requests pull an F16 base DiT instead. The
 # [fetch] lines below show which one was resolved.
 BASE_ENC="$ENC"
+case "$T5_ENCODING" in
+  f16|F16)   T5_ENC="F16" ;;
+  f32|F32)   T5_ENC="F32" ;;
+  q8_0|Q8_0) T5_ENC="Q8_0" ;;
+  *) echo "unknown --t5-encoding '$T5_ENCODING' (expected f16|f32|q8_0)" >&2; exit 2 ;;
+esac
 case "$ENC" in
   F16|F32|Q4_K_M) ;;
   Q5_K_M|Q8_0) BASE_ENC="F16" ;;
@@ -85,7 +95,7 @@ if [ "$TRAINING_BASE" -eq 1 ]; then
 fi
 dl "$VAR_REPO" "$BASE-$SAME-v1.0-$ENC.gguf"
 dl "$VAR_REPO" "$BASE-conditioner-v1.0-F32.gguf"
-dl "$SHARED"   "t5gemma-b-b-ul2-encoder-0.3B-v1.0-F32.gguf"
+dl "$SHARED"   "t5gemma-b-b-ul2-encoder-0.3B-v1.0-$T5_ENC.gguf"
 dl "$SHARED"   "t5gemma-b-b-ul2-v1.0-vocab.gguf"
 
 if [ "$TRAINING_BASE" -eq 1 ]; then

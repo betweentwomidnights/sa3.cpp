@@ -12,7 +12,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
-from model_artifacts import build_download_plan, dit_filename, dit_identity
+from model_artifacts import (TEXT_ENCODER_ENCODINGS, build_download_plan, dit_filename,
+                             dit_identity, text_encoder_filename)
 from stage_training_base_repos import notice_text
 
 
@@ -34,6 +35,31 @@ class ModelArtifactsTest(unittest.TestCase):
         self.assertEqual(plan[0][0], "thepatch/stable-audio-3-medium-GGUF")
         self.assertIn("stable-audio-3-medium-dit-1.5B-v1.0-F16.gguf", plan[0][1])
         self.assertEqual(plan[-1][0], "thepatch/t5gemma-b-b-ul2-GGUF")
+
+    def test_text_encoder_defaults_to_f16(self):
+        # F16 is equivalent to F32 for this encoder at half the size, so it is what a plain
+        # download gets; the shared repo's file list is the thing that decides it.
+        plan = build_download_plan("thepatch", "medium", "f16")
+        self.assertEqual(plan[-1][0], "thepatch/t5gemma-b-b-ul2-GGUF")
+        self.assertIn("t5gemma-b-b-ul2-encoder-0.3B-v1.0-F16.gguf", plan[-1][1])
+        self.assertIn("t5gemma-b-b-ul2-v1.0-vocab.gguf", plan[-1][1])
+
+    def test_text_encoder_encoding_is_independent_of_the_dit(self):
+        # The combination worth having on a small device: quantized DiT, F16 encoder.
+        plan = build_download_plan("thepatch", "medium", "q4_k_m", text_encoding="f16")
+        self.assertIn("stable-audio-3-medium-dit-1.5B-v1.0-Q4_K_M.gguf", plan[0][1])
+        self.assertIn("t5gemma-b-b-ul2-encoder-0.3B-v1.0-F16.gguf", plan[-1][1])
+
+    def test_every_published_text_encoder_encoding_resolves(self):
+        for enc in TEXT_ENCODER_ENCODINGS:
+            plan = build_download_plan("thepatch", "medium", "f16", text_encoding=enc)
+            self.assertIn(f"t5gemma-b-b-ul2-encoder-0.3B-v1.0-{enc}.gguf", plan[-1][1])
+
+    def test_q4_text_encoder_is_not_published(self):
+        # Excluded on measurement: slower than F32 for the encoder AND far worse prompt fidelity.
+        with self.assertRaises(ValueError) as ctx:
+            text_encoder_filename("q4_k_m")
+        self.assertIn("f16", str(ctx.exception))
 
     def test_training_plan_adds_base_dit(self):
         plan = build_download_plan("thepatch", "small-sfx", "f32", training_base=True)

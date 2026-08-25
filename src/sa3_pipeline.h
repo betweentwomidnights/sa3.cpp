@@ -285,6 +285,13 @@ struct ModelPaths {
     // + a message in `err` if a required file is missing (so the caller can surface a friendly hint).
     static bool resolve(const std::string& models_dir, const std::string& variant,
                         const std::string& encoding, ModelPaths& out, std::string& err);
+
+    // As above, but also picks the text encoder's encoding. `text_encoding` empty => auto
+    // (see text_encoder_auto_priority). The encoder is published separately from the DiT/SAME
+    // because the useful combination is a quantized DiT with an F16 encoder.
+    static bool resolve(const std::string& models_dir, const std::string& variant,
+                        const std::string& encoding, const std::string& text_encoding,
+                        ModelPaths& out, std::string& err);
 };
 
 // True if the DiT's projection weights are stored as a quantized type. Checked on a weight
@@ -298,8 +305,78 @@ inline bool dit_base_is_quantized(const GgufModel& dit) {
     return false;
 }
 
+// Which text-encoder encoding to take when the caller did not name one. F16 is measurably
+// equivalent to F32 for this encoder -- max |err| 1.8e-6 on the cross-attention conditioning, and
+// generated audio is often bit-identical -- so preferring it is a size win (1074 -> 537 MiB), not a
+// fidelity substitution. Quantized tiers ARE a real tradeoff and are never auto-selected; they are
+// used only when asked for by name, or when nothing else is present.
+inline const std::vector<std::string>& text_encoder_auto_priority() {
+    static const std::vector<std::string> v = {"F16", "F32"};
+    return v;
+}
+
+// Resolve the shared T5Gemma text encoder. Named `t5gemma-b-b-ul2-encoder-<size>-<ver>-<ENC>.gguf`,
+// but historically published only as F32 and matched by bare prefix -- so an installation may hold a
+// file whose name carries no encoding this build knows. The order here keeps every one of those
+// working:
+//   1. an explicit request resolves EXACTLY, like --encoding does, or fails saying what is present;
+//   2. otherwise take the first of text_encoder_auto_priority() that exists;
+//   3. otherwise fall back to the bare-prefix glob, which is what older single-file installs hit.
+// Step 3 still refuses an ambiguous match rather than picking whichever the directory yielded first.
+inline std::string resolve_text_encoder(const std::string& md, const std::string& text_encoding,
+                                        std::string& err) {
+    const std::string prefix = "t5gemma-b-b-ul2-encoder-";
+    auto present = [&](const std::string& enc) {
+        return resolve_one(md, prefix, "-" + enc + ".gguf");
+    };
+    auto available = [&]() {
+        std::string alt;
+        for (const std::string& e : encoding_labels())
+            if (!present(e).empty()) alt += (alt.empty() ? "" : ", ") + e;
+        return alt;
+    };
+
+    if (!text_encoding.empty()) {
+        const std::string ENC = encoding_suffix(text_encoding);
+        if (ENC.empty()) {
+            err += (err.empty() ? "" : "; ") +
+                   ("unknown text-encoder encoding '" + text_encoding + "'");
+            return "";
+        }
+        std::string p = present(ENC);
+        if (p.empty()) {
+            std::string msg = "no text encoder (" + prefix + "*-" + ENC + ".gguf)";
+            const std::string alt = available();
+            if (!alt.empty()) msg += " [available: " + alt + "]";
+            err += (err.empty() ? "" : "; ") + msg;
+        }
+        return p;
+    }
+
+    for (const std::string& enc : text_encoder_auto_priority()) {
+        std::string p = present(enc);
+        if (!p.empty()) return p;
+    }
+
+    bool ambiguous = false;
+    std::string p = resolve_one(md, prefix, ".gguf", &ambiguous);
+    if (p.empty())
+        err += (err.empty() ? "" : "; ") + ("no text encoder (" + prefix + "*.gguf)");
+    else if (ambiguous)
+        err += (err.empty() ? "" : "; ") +
+               ("multiple files match " + prefix + "*.gguf and none is a known encoding; "
+                "remove the ones you do not want");
+    return p;
+}
+
 inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
                                 const std::string& encoding, ModelPaths& out, std::string& err) {
+    return resolve(md, variant, encoding, "", out, err);
+}
+
+inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
+                                const std::string& encoding, const std::string& text_encoding,
+                                ModelPaths& out, std::string& err) {
     // The requested encoding is resolved EXACTLY: this project's whole point is numeric parity,
     // so silently substituting a different precision than the caller asked for is not acceptable.
     // A missing file is an error naming what was looked for and what else is present.
@@ -309,9 +386,14 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
         return false;
     }
     auto one = [&](const std::string& prefix, const std::string& suffix, const char* what) {
-        std::string p = resolve_one(md, prefix, suffix);
+        bool ambiguous = false;
+        std::string p = resolve_one(md, prefix, suffix, &ambiguous);
         if (p.empty())
             err += (err.empty() ? "" : "; ") + ("no " + std::string(what) + " (" + prefix + "*" + suffix + ")");
+        else if (ambiguous)
+            err += (err.empty() ? "" : "; ") +
+                   ("multiple files match " + prefix + "*" + suffix + " for the " + what +
+                    "; remove the ones you do not want");
         return p;
     };
     // Report which other encodings DO exist, so "no DiT (...-Q4_KM.gguf)" is actionable.
@@ -325,15 +407,20 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
         return alt;
     };
     out.tok  = one("t5gemma-b-b-ul2-v1.0-vocab",             ".gguf",            "tokenizer");
-    out.t5   = one("t5gemma-b-b-ul2-encoder-",               ".gguf",            "encoder");
+    out.t5   = resolve_text_encoder(md, text_encoding, err);
     out.cond = one("stable-audio-3-" + variant + "-conditioner-", ".gguf",       "conditioner");
     const std::string dit_pre  = "stable-audio-3-" + variant + "-dit-";
     const std::string same_pre = "stable-audio-3-" + variant + "-same-";
     out.dit  = one(dit_pre,  "-" + ENC + ".gguf",  "DiT");
     out.same = one(same_pre, "-" + ENC + ".gguf",  "SAME");
     if (!err.empty()) {
-        std::string alt = out.dit.empty() ? alternatives(dit_pre) : alternatives(same_pre);
-        if (!alt.empty()) err += " [available for this variant: " + alt + " — pass --encoding for one of those]";
+        // The --encoding hint belongs only to a DiT/SAME miss. The text encoder resolves on its own
+        // axis (--t5-encoding), so appending it to a text-encoder failure told the user to change the
+        // one flag that cannot fix it -- and named the DiT tiers as if they were encoder tiers.
+        if (out.dit.empty() || out.same.empty()) {
+            std::string alt = out.dit.empty() ? alternatives(dit_pre) : alternatives(same_pre);
+            if (!alt.empty()) err += " [available for this variant: " + alt + " — pass --encoding for one of those]";
+        }
         err += " in " + md + "/ (run: python tools/download_models.py --variant " + variant + ")";
     }
     return err.empty();

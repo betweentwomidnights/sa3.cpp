@@ -61,7 +61,7 @@ stable-audio-3-small-sfx-same-s-v1.0-{F32,F16}.gguf
 stable-audio-3-small-sfx-conditioner-v1.0-F32.gguf
 
 # shared text encoder + tokenizer  (repo: t5gemma-b-b-ul2-GGUF)
-t5gemma-b-b-ul2-encoder-0.3B-v1.0-F32.gguf
+t5gemma-b-b-ul2-encoder-0.3B-v1.0-{F16,F32,Q8_0}.gguf
 t5gemma-b-b-ul2-v1.0-vocab.gguf
 
 # adapters (live with the repo they target, or a loras repo)
@@ -113,7 +113,32 @@ also fetches the matching dedicated base-DiT repo used by `sa3-train`.
 
 published per variant, for **both** the DiT and the SAME: `F32`, `F16`, `Q8_0`, `Q5_K_M`, `Q4_K_M`.
 `--encoding` selects the pair (`sa3-generate` resolves DiT and SAME with the same suffix). the
-conditioner, text encoder and tokenizer stay `F32` — small and quality-critical, nothing to gain.
+conditioner and tokenizer stay `F32` — those two really are small (793 KiB and 14 MiB).
+
+**the text encoder is published `F16` (default), `F32` and `Q8_0`**, selected by `--t5-encoding`
+independently of `--encoding` — the combination worth having on a small device is a quantized DiT
+with an F16 encoder. an earlier revision of this section lumped the encoder in with the conditioner
+and tokenizer as "small and quality-critical, nothing to gain". it is not small: at F32 it is
+**1074 MiB**, the largest single file in the set and bigger than a small-music DiT.
+
+measured on small-music/Metal against an F32 control, swapping *only* the encoder:
+
+| encoder | size | conditioning cosine | generated-audio cosine | small-music train peak |
+|---|---:|---:|---:|---:|
+| F32 | 1074 MiB | — | — | 2.28 GiB |
+| **F16** | **537 MiB** | 1.000000000 | 0.999971 | **1.78 GiB** |
+| Q8_0 | 285 MiB | 0.999789 | 0.991496 | 1.52 GiB |
+| ~~Q4_K_M~~ | 206 MiB | 0.977908 | **0.797692** | 1.46 GiB |
+
+`Q4_K_M` is **not published** for the encoder, on evidence rather than caution: it is **11.8% slower
+than F32** here — the T5 forward is too small to amortize dequant, the opposite of the DiT result
+above — while dropping generated-audio cosine to 0.798, which is a different piece of music rather
+than a degraded one. `Q8_0` dominates it on every axis.
+
+> ⚠️ **do not validate an encoder with a loss curve.** `Q4_K_M` moved mean training loss by **0.02%**
+> over 100 matched steps while producing that 0.798. diffusion loss averages velocity error over
+> every latent position, so a shifted prompt embedding still predicts velocity well — just for a
+> subtly different prompt. use conditioning cosine (`SA3_DUMP_COND`) and generated audio.
 
 an earlier revision of this section said to keep the SAME at F16/F32 rather than quantize it. that
 was a precaution written before the tooling existed, and measurement superseded it: `sa3-quant-check`

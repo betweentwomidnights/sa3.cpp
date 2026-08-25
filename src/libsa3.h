@@ -47,6 +47,10 @@ typedef struct {
     sa3_config config;
     int cpu_threads;
     const char* device;
+    /* Text-encoder precision, resolved independently of config.encoding -- the useful combination is
+     * a quantized DiT with an F16 encoder. NULL/"" -> auto, which prefers F16 (equivalent to F32 for
+     * this encoder) and never picks a quantized tier on its own. */
+    const char* text_encoder_encoding;
 } sa3_config_ex;
 
 /* Optional progress callback. fraction is overall 0..1 (UI does *100); stage is
@@ -235,6 +239,14 @@ typedef struct {
     int     cpu_threads;         /* 0 -> SA3_THREADS/default; CPU backend only */
     int     pre_encode;          /* 1 = encode the dataset to latents once up front */
     int64_t seed;                /* 0 -> 42 */
+
+    /* Text-encoder precision, resolved apart from `encoding` -- the useful combination is a
+     * quantized DiT with an F16 encoder. NULL -> auto (prefers F16, never a quantized tier on
+     * its own). Logically it belongs next to `encoding`, but it sits here because NEW FIELDS GO
+     * AT THE END: a host compiled against an older libsa3 passes a shorter struct, and an
+     * appended field costs it only this one value, where an inserted one silently shifts every
+     * field after it. */
+    const char* text_encoder_encoding;
 } sa3_train_config;
 
 /* One optimizer update. Pointers are valid only for the duration of the callback. */
