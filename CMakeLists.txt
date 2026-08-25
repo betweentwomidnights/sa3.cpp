@@ -21,6 +21,23 @@ option(SA3_VULKAN "Build the GGML Vulkan backend"      OFF)
 option(SA3_METAL  "Build the GGML Metal backend"       OFF)
 option(SA3_HIP    "Build the GGML HIP/ROCm backend"    OFF)
 
+# iOS (and any host that only wants the library) has no use for the CLI tools -- they are
+# executables with argv and stdout, and an app bundle cannot run them anyway. Default it off when
+# cross-compiling to iOS so a library build does not fail on tools it was never going to ship.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(SA3_BUILD_TOOLS_DEFAULT OFF)
+else()
+    set(SA3_BUILD_TOOLS_DEFAULT ON)
+endif()
+option(SA3_BUILD_TOOLS "Build the CLI tools and tests" ${SA3_BUILD_TOOLS_DEFAULT})
+option(SA3_STATIC "Build libsa3 as a static library (for embedding in an app binary)" OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    # An iOS app links a static archive or an embedded framework; a bare .dylib is not signable
+    # on its own. Static keeps the whole thing inside the app binary.
+    set(SA3_STATIC ON CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+endif()
+
 if(SA3_CUDA)
     set(GGML_CUDA ON CACHE BOOL "" FORCE)
     # CUDA graphs need Ampere+ (CC >= 8.0). On older cards a stale GGML_CUDA_GRAPHS=ON
@@ -118,6 +135,7 @@ target_include_directories(sa3 INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sa3 INTERFACE ggml)
 
 # --- tools -----------------------------------------------------------------
+if(SA3_BUILD_TOOLS)
 add_executable(sa3-smoke tools/sa3-smoke.cpp)
 target_link_libraries(sa3-smoke PRIVATE sa3)
 
@@ -266,13 +284,21 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "non-gpu;training;lora")
 endif()
 
-# --- libsa3: C ABI shared library (embed sa3 in a host app; see src/libsa3.h) ---------------
+endif() # SA3_BUILD_TOOLS
+
+# --- libsa3: C ABI library (embed sa3 in a host app; see src/libsa3.h) ---------------------
 # Windows: sa3.dll + sa3.lib (import lib).  Unix/macOS: libsa3.so / libsa3.dylib.
-add_library(sa3_shared SHARED src/libsa3.cpp vendor/yyjson/yyjson.c)
+# SA3_STATIC (forced on for iOS) builds libsa3.a instead, to link straight into an app binary.
+if(SA3_STATIC)
+    add_library(sa3_shared STATIC src/libsa3.cpp vendor/yyjson/yyjson.c)
+else()
+    add_library(sa3_shared SHARED src/libsa3.cpp vendor/yyjson/yyjson.c)
+endif()
 set_target_properties(sa3_shared PROPERTIES OUTPUT_NAME sa3)
 target_link_libraries(sa3_shared PRIVATE sa3)
 target_include_directories(sa3_shared PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
 
+if(SA3_BUILD_TOOLS)
 # Pure-C smoke test / usage example; links the import lib (proves the C ABI + boundary).
 add_executable(sa3-libtest tools/sa3-libtest.c)
 target_include_directories(sa3-libtest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -287,3 +313,4 @@ target_link_libraries(sa3-libtrain PRIVATE sa3_shared)
 add_executable(sa3-libcancel tools/sa3-libcancel.c)
 target_include_directories(sa3-libcancel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sa3-libcancel PRIVATE sa3_shared)
+endif() # SA3_BUILD_TOOLS
