@@ -218,7 +218,6 @@ typedef struct {
     const char* models_dir;      /* NULL -> $SA3_MODELS_DIR, else "models" */
     const char* variant;         /* NULL -> "medium" ("medium" | "small-music" | "small-sfx") */
     const char* encoding;        /* NULL -> "f16"; quantized bases ("q4_k_m", "q8_0", ...) train too */
-    const char* text_encoder_encoding; /* NULL -> auto (prefers F16); resolved apart from `encoding` */
     const char* dataset_dir;     /* REQUIRED */
     const char* output_dir;      /* NULL -> train-runs/<dataset name> */
     const char* latents_dir;     /* optional pre-encoded latents; skips audio decode entirely */
@@ -240,6 +239,14 @@ typedef struct {
     int     cpu_threads;         /* 0 -> SA3_THREADS/default; CPU backend only */
     int     pre_encode;          /* 1 = encode the dataset to latents once up front */
     int64_t seed;                /* 0 -> 42 */
+
+    /* Text-encoder precision, resolved apart from `encoding` -- the useful combination is a
+     * quantized DiT with an F16 encoder. NULL -> auto (prefers F16, never a quantized tier on
+     * its own). Logically it belongs next to `encoding`, but it sits here because NEW FIELDS GO
+     * AT THE END: a host compiled against an older libsa3 passes a shorter struct, and an
+     * appended field costs it only this one value, where an inserted one silently shifts every
+     * field after it. */
+    const char* text_encoder_encoding;
 } sa3_train_config;
 
 /* One optimizer update. Pointers are valid only for the duration of the callback. */
