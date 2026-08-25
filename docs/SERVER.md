@@ -12,6 +12,9 @@ for progress and, on completion, the base64 audio. That makes it a drop-in for a
 ```bash
 ./build/bin/Release/sa3-server.exe --model medium --encoding f16 --port 8006
 # args: --host (default 127.0.0.1) --port (8006) --model <variant> --encoding f16|f32
+#       --t5-encoding f16|f32|q8_0 — text-encoder precision, resolved apart from --encoding;
+#         default auto (prefers F16). a quantized DiT with an F16 encoder is the combination
+#         worth having on a small box. see docs/DISTRIBUTION.md
 #       --models-dir DIR (or SA3_MODELS_DIR) --adapters-dir DIR (or SA3_ADAPTERS_DIR)
 #       --threads N (or SA3_THREADS, CPU backend only)
 #       --prompts-dir DIR (or SA3_PROMPTS_DIR)
@@ -34,7 +37,7 @@ it binds to `127.0.0.1` by default (local only). The model loads lazily on the f
 |---|---|---|
 | `GET`  | `/loras`    | `{success, loras:[{index,name,path}], adapters_dir, model_loaded}` |
 | `GET`  | `/prompts`  | prompt dice pools, optionally blended with `?lora=name` or `?lora=a,b` |
-| `GET`  | `/health`   | `{status, model, encoding, loaded}` (lock-free — never blocks behind a gen) |
+| `GET`  | `/health`   | `{status, model, encoding, t5_encoding, loaded}` (lock-free — never blocks behind a gen) |
 | `POST` | `/generate` | JSON request (below) → **`{success, session_id, seed}`** immediately; generation runs in the background |
 | `POST` | `/generate/loop` | same request plus `bpm`/prompt BPM and `bars` for exact-length loop generation |
 | `GET`  | `/poll_status/<session_id>` | `{success, generation_in_progress, progress, step, total_steps, status, queue_status, ...}`; on `status:"completed"` also `audio_data` (base64 wav) + `meta:{seed}` |

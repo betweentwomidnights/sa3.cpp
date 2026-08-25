@@ -414,8 +414,13 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
     out.dit  = one(dit_pre,  "-" + ENC + ".gguf",  "DiT");
     out.same = one(same_pre, "-" + ENC + ".gguf",  "SAME");
     if (!err.empty()) {
-        std::string alt = out.dit.empty() ? alternatives(dit_pre) : alternatives(same_pre);
-        if (!alt.empty()) err += " [available for this variant: " + alt + " — pass --encoding for one of those]";
+        // The --encoding hint belongs only to a DiT/SAME miss. The text encoder resolves on its own
+        // axis (--t5-encoding), so appending it to a text-encoder failure told the user to change the
+        // one flag that cannot fix it -- and named the DiT tiers as if they were encoder tiers.
+        if (out.dit.empty() || out.same.empty()) {
+            std::string alt = out.dit.empty() ? alternatives(dit_pre) : alternatives(same_pre);
+            if (!alt.empty()) err += " [available for this variant: " + alt + " — pass --encoding for one of those]";
+        }
         err += " in " + md + "/ (run: python tools/download_models.py --variant " + variant + ")";
     }
     return err.empty();

@@ -61,7 +61,7 @@ stable-audio-3-small-sfx-same-s-v1.0-{F32,F16}.gguf
 stable-audio-3-small-sfx-conditioner-v1.0-F32.gguf
 
 # shared text encoder + tokenizer  (repo: t5gemma-b-b-ul2-GGUF)
-t5gemma-b-b-ul2-encoder-0.3B-v1.0-F32.gguf
+t5gemma-b-b-ul2-encoder-0.3B-v1.0-{F16,F32,Q8_0}.gguf
 t5gemma-b-b-ul2-v1.0-vocab.gguf
 
 # adapters (live with the repo they target, or a loras repo)
