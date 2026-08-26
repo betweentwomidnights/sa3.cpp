@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 
 int main(int argc, char** argv) {
@@ -17,12 +18,16 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--json") && i + 1 < argc) json = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
     }
-    if (!in_base.empty()) {   // --in <basename> => <basename>.safetensors + <basename>.json
+    if (!in_base.empty()) {   // --in <basename> => <basename>.safetensors [+ <basename>.json]
         if (safetensors.empty()) safetensors = in_base + ".safetensors";
-        if (json.empty())        json        = in_base + ".json";
+        // The sidecar is optional now: autoencoder adapters carry their config in the
+        // safetensors' own __metadata__ and ship as a single file, so only pair one up if present.
+        if (json.empty() && std::ifstream(in_base + ".json").good()) json = in_base + ".json";
     }
-    if (safetensors.empty() || json.empty() || out.empty()) {
-        fprintf(stderr, "usage: sa3-lora-convert (--in <basename> | --safetensors <f> --json <f>) --out <gguf>\n");
+    if (safetensors.empty() || out.empty()) {
+        fprintf(stderr, "usage: sa3-lora-convert (--in <basename> | --safetensors <f> [--json <f>]) --out <gguf>\n"
+                        "  --json is the sidecar a DiT export needs; omit it for an adapter carrying its\n"
+                        "  own lora_config metadata (decoder/encoder adapters do).\n");
         return 2;
     }
 

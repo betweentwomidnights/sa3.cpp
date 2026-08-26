@@ -211,10 +211,13 @@ SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 4"; }
 
 SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path,
                              const char* out_gguf_path, char* err, int err_len) {
-    if (!safetensors_path || !json_path || !out_gguf_path) { set_err(err, err_len, "null argument"); return 1; }
+    if (!safetensors_path || !out_gguf_path) { set_err(err, err_len, "null argument"); return 1; }
     try {
         std::string e;
-        if (!sa3::convert_lora_safetensors(safetensors_path, json_path, out_gguf_path, e)) {
+        // NULL/"" json_path means "the config is in the safetensors' own __metadata__", which is
+        // where save_lora_safetensors puts it for autoencoder adapters -- they ship as one file.
+        if (!sa3::convert_lora_safetensors(safetensors_path, json_path ? json_path : "",
+                                           out_gguf_path, e)) {
             set_err(err, err_len, e); return 2;
         }
         return 0;

@@ -200,9 +200,15 @@ SA3_API void sa3_free(sa3_context* ctx);
 /* Static version string. */
 SA3_API const char* sa3_version(void);
 
-/* Convert an exported LoRA (safetensors + json from lora_ckpt_export.py; all tensors F32) to a sa3.cpp LoRA
- * gguf, with NO Python. Lets a host import a .safetensors LoRA in-process. Byte-identical to
- * tools/convert_lora.py. Returns 0 on success; non-zero + err message on failure. Does not need a context. */
+/* Convert an exported LoRA (safetensors) to a sa3.cpp LoRA gguf, with NO Python. Lets a host import a
+ * .safetensors adapter in-process. Returns 0 on success; non-zero + err message on failure. Does not
+ * need a context.
+ *
+ * json_path is the sidecar from lora_ckpt_export.py (DiT adapters). Pass NULL or "" for an adapter that
+ * carries its config in the safetensors' own __metadata__ instead -- which is what decoder/encoder
+ * adapters do, since save_lora_safetensors writes them as a single self-describing file. The `target`
+ * found there decides which network the adapter is named for, and lands in the gguf as lora.target so
+ * sa3_generate can route it without being told. */
 SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path,
                              const char* out_gguf_path, char* err, int err_len);
 

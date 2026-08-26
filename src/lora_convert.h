@@ -98,6 +98,43 @@ inline std::string lora_base_name(const std::string& module) {
     return "";
 }
 
+// Port of the autoencoder half of tools/convert.py rename(), restricted to what a LoRA can adapt.
+//
+// `module` is relative to the half it adapts ("layers.1",
+// "layers.3.transformers.0.ff.ff.0.proj"), because the upstream loader attaches the adapter to
+// model.<target> directly. Returns the base AE gguf weight stem without ".weight", or "" if this
+// is not a module it maps.
+//
+// Only nn.Linear layers can appear here. The one conv in either half is the weight_norm'd
+// `mapping`, which cannot carry a LoRA at all -- torch's deprecated weight_norm leaves `weight` a
+// pre-forward-hook product, so register_parametrization refuses it -- hence its absence below.
+inline std::string ae_lora_base_name(const std::string& module, const std::string& target) {
+    const bool dec = target == "decoder";
+    if (!dec && target != "encoder") return "";
+
+    // decoder.layers: 0=Transpose, 1=Linear(latent->dim), 2=Transpose, 3=ResamplingBlock
+    // encoder.layers: 0=ResamplingBlock, 1=Transpose, 2=Linear(dim->latent), 3=Transpose
+    if (dec && module == "layers.1") return "ae.in_proj";
+    if (!dec && module == "layers.2") return "ae.out_proj";
+
+    const std::string blocks = dec ? "layers.3.transformers." : "layers.0.transformers.";
+    if (module.rfind(blocks, 0) != 0) return "";
+    const std::string rest = module.substr(blocks.size());   // "<i>.<sub>"
+    const size_t dot = rest.find('.');
+    if (dot == std::string::npos) return "";
+    const std::string i = rest.substr(0, dot);
+    if (i.empty() || i.find_first_not_of("0123456789") != std::string::npos) return "";
+    std::string sub = rest.substr(dot + 1);
+
+    // convert.py's _blk(): the GLU feed-forward is flattened. Everything else
+    // (self_attn.to_qkv, self_attn.to_out) keeps its name.
+    if (sub == "ff.ff.0.proj")      sub = "ff.proj";
+    else if (sub == "ff.ff.2")      sub = "ff.out";
+    else if (sub != "self_attn.to_qkv" && sub != "self_attn.to_out") return "";
+
+    return (dec ? "ae.dec." : "ae.enc.") + i + "." + sub;
+}
+
 // Split "<module>.parametrizations.weight.0.<kind>" -> (module, kind); kind must be a known adapter part.
 inline bool lora_parse_key(const std::string& key, std::string& module, std::string& kind) {
     static const std::string MID = ".parametrizations.weight.0.";
@@ -117,23 +154,33 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
                                      const std::string& json_path,
                                      const std::string& out_gguf_path,
                                      std::string& err) {
-    // --- config json: adapter_type / rank / alpha ---
+    // --- config: adapter_type / rank / alpha / target ---
+    //
+    // Two provenances, because the two trainers write differently. A DiT export from
+    // lora_ckpt_export.py pairs the .safetensors with a .json sidecar. An autoencoder adapter is
+    // written by save_lora_safetensors, which puts the same fields -- plus `target` -- in the
+    // safetensors' own __metadata__ under "lora_config". Passing an empty json_path selects the
+    // latter, so a host with one file and no sidecar can still convert it.
     std::string adapter_type = "lora";
+    std::string target = "dit";
     uint32_t rank = 0;
     float alpha = 1.0f;
-    {
+    const bool from_metadata = json_path.empty();
+    auto read_cfg = [&](yyjson_val* root) {
+        if (yyjson_val* v = yyjson_obj_get(root, "adapter_type"); v && yyjson_is_str(v)) adapter_type = yyjson_get_str(v);
+        if (yyjson_val* v = yyjson_obj_get(root, "rank"); v && yyjson_is_num(v)) rank = (uint32_t)yyjson_get_num(v);
+        if (yyjson_val* v = yyjson_obj_get(root, "alpha"); v && yyjson_is_num(v)) alpha = (float)yyjson_get_num(v);
+        if (yyjson_val* v = yyjson_obj_get(root, "target"); v && yyjson_is_str(v)) target = yyjson_get_str(v);
+    };
+    if (!from_metadata) {
         std::ifstream f(json_path, std::ios::binary);
         if (!f) { err = "cannot open " + json_path; return false; }
         std::string js((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         yyjson_doc* doc = yyjson_read(js.data(), js.size(), 0);
         if (!doc) { err = "invalid json: " + json_path; return false; }
-        yyjson_val* root = yyjson_doc_get_root(doc);
-        if (yyjson_val* v = yyjson_obj_get(root, "adapter_type"); v && yyjson_is_str(v)) adapter_type = yyjson_get_str(v);
-        if (yyjson_val* v = yyjson_obj_get(root, "rank"); v && yyjson_is_num(v)) rank = (uint32_t)yyjson_get_num(v);
-        if (yyjson_val* v = yyjson_obj_get(root, "alpha"); v && yyjson_is_num(v)) alpha = (float)yyjson_get_num(v);
+        read_cfg(yyjson_doc_get_root(doc));
         yyjson_doc_free(doc);
     }
-    if (rank == 0) { err = "config missing/zero 'rank' in " + json_path; return false; }
 
     // --- safetensors: read whole file, parse the JSON header, then the F32 tensor blobs ---
     std::vector<uint8_t> buf;
@@ -159,6 +206,41 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
         yyjson_doc* doc = yyjson_read((char*)buf.data() + 8, (size_t)hlen, 0);
         if (!doc) { err = "invalid safetensors header json"; return false; }
         yyjson_val* root = yyjson_doc_get_root(doc);
+
+        // With no sidecar, the config lives in __metadata__["lora_config"] as a JSON *string*
+        // (save_lora_safetensors json-dumps it, because safetensors metadata is string->string).
+        yyjson_doc* cfgdoc = nullptr;
+        if (from_metadata) {
+            yyjson_val* md = yyjson_obj_get(root, "__metadata__");
+            yyjson_val* lc = md ? yyjson_obj_get(md, "lora_config") : nullptr;
+            if (!lc || !yyjson_is_str(lc)) {
+                err = safetensors_path + " has no __metadata__.lora_config, and no json sidecar "
+                      "was given. A DiT export needs its .json; an autoencoder adapter should "
+                      "carry this metadata already.";
+                yyjson_doc_free(doc); return false;
+            }
+            const char* cs = yyjson_get_str(lc);
+            cfgdoc = yyjson_read(cs, std::strlen(cs), 0);
+            if (!cfgdoc) {
+                err = "invalid lora_config json in " + safetensors_path;
+                yyjson_doc_free(doc); return false;
+            }
+            read_cfg(yyjson_doc_get_root(cfgdoc));
+        }
+        if (rank == 0) {
+            err = "config missing/zero 'rank' for " + safetensors_path;
+            if (cfgdoc) yyjson_doc_free(cfgdoc);
+            yyjson_doc_free(doc); return false;
+        }
+        if (target != "dit" && target != "decoder" && target != "encoder") {
+            err = safetensors_path + " declares target '" + target +
+                  "'; expected dit, decoder or encoder";
+            if (cfgdoc) yyjson_doc_free(cfgdoc);
+            yyjson_doc_free(doc); return false;
+        }
+        if (cfgdoc) yyjson_doc_free(cfgdoc);
+        const bool ae = target != "dit";
+
         // count distinct mapped modules for lora.n_targets (parity with convert_lora.py)
         std::unordered_map<std::string, int> mapped_modules;
         yyjson_obj_iter it; yyjson_obj_iter_init(root, &it);
@@ -168,7 +250,7 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
             if (kname == "__metadata__") continue;
             std::string module, kind;
             if (!lora_parse_key(kname, module, kind)) continue;   // unrecognized key -> skip (like the python)
-            const std::string base = lora_base_name(module);
+            const std::string base = ae ? ae_lora_base_name(module, target) : lora_base_name(module);
             if (base.empty()) continue;                            // non-DiT (conditioners.*) -> skip
             yyjson_val* t = yyjson_obj_iter_get_val(key);
             yyjson_val* vd = yyjson_obj_get(t, "dtype");
@@ -191,7 +273,11 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
         n_targets = (int)mapped_modules.size();
         yyjson_doc_free(doc);
     }
-    if (emits.empty()) { err = "no DiT LoRA tensors found in " + safetensors_path; return false; }
+    if (emits.empty()) {
+        err = "no " + std::string(target == "dit" ? "DiT" : target) +
+              " LoRA tensors found in " + safetensors_path;
+        return false;
+    }
 
     // --- build the gguf: KV + tensors (ggml ne = reversed safetensors shape) ---
     size_t data_bytes = 0;
@@ -202,8 +288,12 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
     if (!ctx) { err = "ggml_init failed"; return false; }
     gguf_context* g = gguf_init_empty();
     gguf_set_val_str(g, "general.architecture", "sa3-lora");
-    gguf_set_val_str(g, "general.name", ("sa3 " + adapter_type + " adapter").c_str());
+    gguf_set_val_str(g, "general.name",
+                     ("sa3 " + adapter_type + (target == "dit" ? "" : " " + target) + " adapter").c_str());
     gguf_set_val_str(g, "lora.adapter_type", adapter_type.c_str());
+    // Which net this adapts. Written unconditionally, including "dit", so a converted file is
+    // explicit about it rather than relying on the reader's default.
+    gguf_set_val_str(g, "lora.target", target.c_str());
     gguf_set_val_u32(g, "lora.rank", rank);
     gguf_set_val_f32(g, "lora.alpha", alpha);
     gguf_set_val_u32(g, "lora.n_targets", (uint32_t)n_targets);
