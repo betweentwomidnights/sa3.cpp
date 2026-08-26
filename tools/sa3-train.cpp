@@ -36,6 +36,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (result.cancelled) std::printf("\n[train] cancelled at step %d\n", result.steps);
-    std::printf("\n[train] try your adapter now:\n%s\n", result.preview_command.c_str());
+    // A cancel during pre-encode stops before any adapter exists, so there is nothing to preview.
+    // Cancelling mid-training still writes one, which is why this is a check and not an else.
+    if (result.preview_command.empty())
+        std::printf("\n[train] no adapter was written (cancelled before the first step)\n");
+    else
+        std::printf("\n[train] try your adapter now:\n%s\n", result.preview_command.c_str());
     return 0;
 }

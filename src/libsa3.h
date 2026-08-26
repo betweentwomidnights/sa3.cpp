@@ -289,8 +289,18 @@ typedef struct {
 typedef void (*sa3_train_log_cb)(void* user, const char* line);
 typedef void (*sa3_train_step_cb)(void* user, const sa3_train_step* step);
 
-/* Return non-zero to stop at the next sample boundary. The run still writes a checkpoint and a
- * final adapter before returning, so a cancelled run is resumable rather than lost. */
+/* Return non-zero to stop. Polled at two granularities, and they differ in what you get back:
+ *
+ *   during pre-encode  once per FILE. Nothing has been trained yet, so the run stops with
+ *                      cancelled=1, steps=0 and NO adapter -- final_adapter/preview_command come
+ *                      back empty. Pre-encode is often the longest stretch of a run (every file
+ *                      is decoded and encoded full-length), so this is where a cancel is most
+ *                      likely to land.
+ *   during training    at the next sample boundary. The run still writes a checkpoint and a final
+ *                      adapter first, so it is resumable via resume_path rather than lost.
+ *
+ * Check `cancelled` and then whether final_adapter is empty; do not assume a cancelled run
+ * produced something to load. */
 typedef int (*sa3_train_cancel_cb)(void* user);
 
 /* Supply decoded audio for one dataset item instead of having the library read audio_path.
@@ -313,9 +323,9 @@ typedef struct {
     int    steps;                    /* last completed update */
     int    cancelled;
     double mean_step_seconds;
-    char   final_adapter[1024];      /* adapter-final.gguf */
+    char   final_adapter[1024];      /* adapter-final.gguf; "" if cancelled during pre-encode */
     char   last_checkpoint[1024];    /* adapter-step-N.gguf, "" if none was written */
-    char   preview_command[2048];    /* ready-to-run sa3-generate line */
+    char   preview_command[2048];    /* ready-to-run sa3-generate line; "" when there is no adapter */
 } sa3_train_result;
 
 /* Run a training job to completion. Returns 0 on success (out filled), non-zero on failure with a

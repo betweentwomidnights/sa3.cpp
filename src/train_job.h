@@ -354,11 +354,20 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             train_job_logf(hooks, "[train] prompt config: %s\n", cfg.prompt_config_path.c_str());
         train_job_logf(hooks, "[train] base DiT: %s\n", paths.dit.c_str());
 
-        ggml_backend_t backend = sa3::make_backend(cfg.cpu_threads,
-                                                   cfg.device.empty() ? nullptr : cfg.device.c_str());
+        // Owned so that every way out of this function releases it. The models below are RAII
+        // (GgufModel::~GgufModel calls free()), but the backend is a raw handle that only the
+        // success path freed -- so any throw, and now any cancel, leaked it. That is invisible to
+        // the CLI, which exits immediately after, and not at all invisible to an embedded host
+        // that calls sa3_train() again.
+        struct BackendHandle {
+            ggml_backend_t h = nullptr;
+            ~BackendHandle() { if (h) ggml_backend_free(h); }
+            operator ggml_backend_t() const { return h; }
+        } backend_owner{ sa3::make_backend(cfg.cpu_threads,
+                                           cfg.device.empty() ? nullptr : cfg.device.c_str()) };
+        ggml_backend_t backend = backend_owner;
         if (!train_backend_supports_backward(backend)) {
             const std::string name = ggml_backend_name(backend) ? ggml_backend_name(backend) : "(unknown)";
-            ggml_backend_free(backend);
             err = "backend '" + name + "' cannot run the LoRA backward pass (OUT_PROD): its GPU is "
                   "below Apple7 / lacks simdgroup matrix support. Train with --device cpu, or use a "
                   "device with an A14 or newer GPU. Inference is unaffected";
@@ -475,6 +484,17 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                              lat_cache.size(), cfg.latents_dir.c_str());
             } else {
                 for (const auto& pair : train_pairs) {
+                    // Checked per FILE, because that is the granularity available: one iteration
+                    // decodes a whole track and encodes it full-length, which on a phone is
+                    // seconds to minutes. Without this the host's cancel was simply not observed
+                    // until the first training step, so cancelling during pre-encode looked like
+                    // a hang -- and on a large corpus it is the longest stretch of the run.
+                    if (hooks.should_cancel && hooks.should_cancel()) {
+                        out.cancelled = true;
+                        train_job_logf(hooks, "[pre-encode] cancelled after %zu file(s)\n",
+                                       lat_cache.size());
+                        return true;
+                    }
                     const std::string stem = std::filesystem::path(pair.audio_path).stem().string();
                     if (lat_cache.count(stem)) continue;
                     sa3::TrainAudio decoded;
