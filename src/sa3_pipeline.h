@@ -651,6 +651,33 @@ public:
     const DitConfig&  dit_config()  const { return dc_; }
 
 private:
+    // Bake this request's autoencoder adapters into the live AE_, if they are not already in it.
+    //
+    // Called after EVERY AE load rather than once per request, because AE_ does not survive a
+    // request the way DIT_ does: a frugal run frees it after the init encode and loads a clean one
+    // again for the decode. Reloading is also how a changed adapter set gets a clean base, since
+    // apply_loras merges in place and cannot be undone.
+    void ensure_ae_loras(GgufModel& ae) {
+        if (ae_applied_ == ae_loras_) return;
+        if (!ae_applied_.empty()) {          // wrong set baked in -> reload a clean base
+            ae.free();
+            ae = load_gguf(paths_.same.c_str(), backend_);
+            ae_applied_.clear();
+        }
+        if (ae_loras_.empty()) return;
+        std::vector<LoraAdapter> adapters;
+        for (auto& ls : ae_loras_)
+            adapters.push_back(load_lora(ls.first.c_str(), ls.second, ae.backend));
+        // Encoder- and decoder-targeted adapters touch disjoint tensors (ae.enc.* vs ae.dec.*),
+        // so one pass covers both and the order between the two halves cannot matter.
+        apply_loras(ae, adapters);
+        ae_applied_ = ae_loras_;
+        printf("lora: applied %zu autoencoder adapter(s) [merged]:\n", adapters.size());
+        for (size_t i = 0; i < adapters.size(); i++)
+            printf("  [%zu] %s  target=%s  strength=%.2f\n", i, ae_loras_[i].first.c_str(),
+                   adapters[i].target.c_str(), ae_loras_[i].second);
+    }
+
     bool loaded_ = false;
     bool nets_resident_ = false;       // are the heavy nets currently loaded? (false after a frugal gen)
     ModelPaths paths_;                 // kept so frugal mode can reload T5/DiT freed mid-request
@@ -662,6 +689,19 @@ private:
     bool dit_merged_ = false;                  // true => dit_loras_ were baked into DIT_ in place
     std::vector<LoraAdapter> dit_adapters_;    // kept resident for the functional path (graph reads A/B)
     FunctionalLora dit_functional_;            // graph-time adapters; empty unless the functional path is used
+    // Autoencoder adapters (lora.target = "decoder" | "encoder"). Always MERGED: same_encode /
+    // same_decode fold W straight into mul_mat and nothing hands them adapter tensors, so there is
+    // no functional path here the way dit_lin is one for the DiT. That suits the AE anyway -- it is
+    // loaded and freed repeatedly within a request, and a merged adapter costs no resident memory
+    // and no per-step work.
+    //
+    // `ae_applied_` records what is baked into the CURRENTLY RESIDENT AE_. It is deliberately not
+    // the same thing as the request's adapter list: AE_ is freed and reloaded partway through a
+    // frugal request (after the init encode, before the decode), and a reloaded base is clean, so
+    // this has to be cleared on free and re-checked after every load rather than tracked per
+    // request the way dit_loras_ is.
+    std::vector<std::pair<std::string,float>> ae_loras_;    // what this request asked for
+    std::vector<std::pair<std::string,float>> ae_applied_;  // what is baked into the live AE_
     T5GemmaConfig tc_{};
     DitConfig     dc_{};
     SameConfig    sc_{};
@@ -980,9 +1020,23 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     }
 
     // ---------- audio2audio: encode init audio -> latent z_init [latent, T] ----------
+    // ---------- route this request's adapters ----------
+    // One --lora list covers both nets; each file says which it adapts via lora.target, so the
+    // caller keeps one list and cannot aim a file at the wrong net. Read from the header alone,
+    // and done HERE rather than beside the DiT's apply: an encoder adapter has to be in place for
+    // the init encode below, which happens well before the DiT is even loaded.
+    std::vector<std::pair<std::string,float>> dit_loras_want;
+    {
+        std::vector<std::pair<std::string,float>> ae_want;
+        for (auto& ls : params.loras)
+            (sa3::lora_target_of(ls.first.c_str()) == "dit" ? dit_loras_want : ae_want).push_back(ls);
+        ae_loras_ = std::move(ae_want);
+    }
+
     std::vector<float> z_init;
     if (has_init) {
         if (!AE.ctx) AE = load_gguf(paths_.same.c_str(), backend_);
+        ensure_ae_loras(AE);
         z_init.resize(N);
         struct EncodeGraph {
             ggml_context* ctx = nullptr;
@@ -1127,7 +1181,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // a 4 GB card OOMs. The release_all_for_frugal_cancel paths and next-gen
     // reloads handle cancellation + subsequent requests respectively.
     if (!keep_models) {
-        if (has_init && AE.ctx) AE.free();             // init encode done
+        if (has_init && AE.ctx) { AE.free(); ae_applied_.clear(); }   // init encode done
         TE.free();
         if (CD_) CD_->free();
     }
@@ -1138,13 +1192,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (!DIT.ctx) DIT = load_gguf(paths_.dit.c_str(), backend_);
     throw_if_cancelled(params.should_cancel);
 
-    // ---------- LoRA/DoRA adapters (chained in order) ----------
     // Applied here, AFTER the DiT is resident (loaded just above), so the in-place weight
     // override lands on real tensors. apply_loras is IN-PLACE over the DiT base, so changing
     // adapters/strength needs a clean base: reload + re-apply only when this request's set
     // differs from what's already baked in (resident back-to-back requests with the SAME
     // adapters skip the work; a change pays a reload).
-    if (dit_loras_ != params.loras) {
+    if (dit_loras_ != dit_loras_want) {
         throw_if_cancelled(params.should_cancel);
         if (dit_merged_) {                   // prior request BAKED adapters in -> reload a clean base
             DIT.free();
@@ -1154,8 +1207,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         dit_functional_.free();              // functional adapters leave the base untouched
         dit_adapters_.clear();
         dit_loras_.clear();
-        if (!params.loras.empty()) {
-            for (auto& ls : params.loras) dit_adapters_.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
+        if (!dit_loras_want.empty()) {
+            for (auto& ls : dit_loras_want) dit_adapters_.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
             // A quantized base can only take the functional path: merging would have to read W
             // out and write W_eff back, and neither has a route for k-quant types. On an f16/f32
             // base the merge is still the default (it costs nothing per step); SA3_FUNCTIONAL_LORA
@@ -1176,12 +1229,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                 dit_merged_ = true;
                 dit_adapters_.clear();       // merged into W; nothing to keep resident
             }
-            printf("lora: applied %zu adapter(s) [%s]:\n", params.loras.size(),
+            printf("lora: applied %zu DiT adapter(s) [%s]:\n", dit_loras_want.size(),
                    dit_functional_.active ? "functional" : "merged");
-            for (size_t i = 0; i < params.loras.size(); i++)
-                printf("  [%zu] %s  strength=%.2f\n", i, params.loras[i].first.c_str(), params.loras[i].second);
+            for (size_t i = 0; i < dit_loras_want.size(); i++)
+                printf("  [%zu] %s  strength=%.2f\n", i, dit_loras_want[i].first.c_str(), dit_loras_want[i].second);
         }
-        dit_loras_ = params.loras;
+        dit_loras_ = dit_loras_want;
         if (params.should_cancel && params.should_cancel())
             throw_cancelled_after_frugal_cleanup();
     }
@@ -1283,6 +1336,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // SAME's ~1.6 GB. For keep_models=true, AE is already resident from the init-encode
     // phase or the prior generate() call.
     if (!AE.ctx) AE = load_gguf(paths_.same.c_str(), backend_);
+    ensure_ae_loras(AE);
     throw_if_cancelled(params.should_cancel);
 
     LoudnessMeta loudness_meta = make_loudness_meta(params.loudness);

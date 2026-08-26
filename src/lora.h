@@ -32,16 +32,49 @@ namespace sa3 {
 struct LoraAdapter {
     GgufModel   gguf;
     std::string type;       // "lora" | "dora-rows" | ...
+    // Which network this adapts: "dit" (default), "decoder" or "encoder". Carried by the
+    // checkpoint rather than chosen by a flag, so one --lora accepts any of them and a file
+    // cannot be pointed at the wrong net by mistake. Absent means "dit", which is every adapter
+    // published before the field existed.
+    std::string target = "dit";
     int         rank = 0;
     float       alpha = 0.0f;
     float       strength = 1.0f;
 };
+
+// True if this adapter belongs on the autoencoder rather than the DiT.
+inline bool lora_targets_autoencoder(const LoraAdapter& a) {
+    return a.target == "decoder" || a.target == "encoder";
+}
+
+// Read just `lora.target` from an adapter file: header and KV store only, no tensor data and no
+// backend allocation. Routing has to happen before either base is chosen, and loading every
+// adapter twice to find out where it goes is a waste an embedded host pays for.
+inline std::string lora_target_of(const char* path) {
+    ggml_context* ctx = nullptr;
+    gguf_init_params gp = { /*no_alloc=*/true, /*ctx=*/&ctx };
+    gguf_context* g = gguf_init_from_file(path, gp);
+    if (!g) throw std::runtime_error("[lora] failed to open " + std::string(path));
+    const int i = gguf_find_key(g, "lora.target");
+    std::string t = i < 0 ? "dit" : gguf_get_val_str(g, i);
+    gguf_free(g);
+    if (ctx) ggml_free(ctx);
+    if (t != "dit" && t != "decoder" && t != "encoder")
+        throw std::runtime_error("[lora] " + std::string(path) + " declares lora.target '" + t +
+                                 "'; expected dit, decoder or encoder");
+    return t;
+}
 
 inline LoraAdapter load_lora(const char* path, float strength = 1.0f, ggml_backend_t backend = nullptr) {
     LoraAdapter a;
     a.gguf = load_gguf(path, backend);   // load onto the base's backend so the GPU apply graph can read it
     int ti = gguf_find_key(a.gguf.gguf, "lora.adapter_type");
     a.type     = ti < 0 ? "lora" : gguf_get_val_str(a.gguf.gguf, ti);
+    int gi = gguf_find_key(a.gguf.gguf, "lora.target");
+    a.target   = gi < 0 ? "dit" : gguf_get_val_str(a.gguf.gguf, gi);
+    if (a.target != "dit" && a.target != "decoder" && a.target != "encoder")
+        throw std::runtime_error("[lora] " + std::string(path) + " declares lora.target '" +
+                                 a.target + "'; expected dit, decoder or encoder");
     a.rank     = (int)a.gguf.u32("lora.rank");
     a.alpha    = a.gguf.f32("lora.alpha");
     a.strength = strength;
