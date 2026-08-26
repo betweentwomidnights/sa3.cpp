@@ -29,3 +29,36 @@ keep the `.txt` files you trained with in the same folder as your adapter and do
 [iplug2 demo](https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo)) pick them up as a prompt pool; the
 http server reads the `.json` pools in [`../prompts`](../prompts). (`libsa3` itself just generates — prompt
 pools are the app's job.) 
+
+## bundled autoencoder adapters
+
+Two SAME-S **decoder** adapters are checked in here, against the blanket
+`*.safetensors` ignore — they are 1.36 MB each, where that rule exists for the
+80 MB+ DiT exports sitting beside them, and having them in the branch means the
+decoder-LoRA path can be exercised on any machine without fetching anything.
+
+| file | base | rank | step |
+|---|---|---|---|
+| `same-s_declora_s4_step2000.safetensors` | SAME-S | 8 | 2000 |
+| `same-s_declora_s4_step4000.safetensors` | SAME-S | 8 | 4000 |
+
+They are **provisional** — two checkpoints from one run, kept while it is still
+being decided whether they earn their place. SAME-S is not SAME-L: its artifact
+sits in a different band and wants its own recipe, so do not read a SAME-L
+result onto these.
+
+No `.json` sidecar, and none is needed. `save_lora_safetensors` writes
+`rank`/`alpha`/`adapter_type`/`target` into the file's own `__metadata__`, so
+each converts on its own:
+
+```bash
+sa3-lora-convert --safetensors loras/same-s_declora_s4_step2000.safetensors \
+                 --out models/lora-declora-s4-2000-f32.gguf
+sa3-generate --model small-music --lora models/lora-declora-s4-2000-f32.gguf --prompt "..."
+```
+
+`--lora` needs no flag to place them: the `target: "decoder"` carried in the
+checkpoint routes them onto the autoencoder. The published SAME-L counterpart
+lives at [thepatch/same-l-decoder-lora](https://huggingface.co/thepatch/same-l-decoder-lora)
+and is **not** interchangeable — loading it against SAME-S is refused on tensor
+width rather than silently corrupting the model.
