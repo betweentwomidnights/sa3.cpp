@@ -49,7 +49,12 @@ def main():
     ap = argparse.ArgumentParser(description="Download sa3.cpp GGUF models from HuggingFace.")
     ap.add_argument("--variant", default="medium", choices=list(VARIANTS))
     ap.add_argument("--encoding", default="f16", choices=[e.lower() for e in ENCODINGS],
-                    help="weight encoding for DiT + SAME (default f16, the production path)")
+                    help="weight encoding for the DiT (default f16, the production path)")
+    ap.add_argument("--ae-encoding", dest="ae_encoding", default=None,
+                    choices=[e.lower() for e in ENCODINGS],
+                    help="autoencoder encoding, on its own axis from --encoding "
+                         "(default f32; it used to follow --encoding, so a quantized DiT "
+                         "silently fetched a quantized SAME)")
     ap.add_argument("--t5-encoding", default=TEXT_ENCODER_DEFAULT.lower(),
                     choices=[e.lower() for e in TEXT_ENCODER_ENCODINGS],
                     help="text encoder encoding (default f16, equivalent to f32 at half the size)")
@@ -62,7 +67,7 @@ def main():
     args = ap.parse_args()
 
     plan = build_download_plan(args.namespace, args.variant, args.encoding, args.training_base,
-                               text_encoding=args.t5_encoding)
+                               text_encoding=args.t5_encoding, ae_encoding=args.ae_encoding)
 
     if args.dry_run:
         for repo, files in plan:

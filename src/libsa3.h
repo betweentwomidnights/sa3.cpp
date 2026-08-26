@@ -32,7 +32,11 @@ typedef struct sa3_context sa3_context;
  *   models_dir   -> $SA3_MODELS_DIR, else "models"
  *   adapters_dir -> models_dir
  *   variant      -> "medium"   ("medium" | "small-music" | "small-sfx")
- *   encoding     -> "f16"      ("f16" | "f32")                                                    */
+ *   encoding     -> "f16"      ("f16" | "f32" | "q4_k_m" | "q5_k_m" | "q5_k" | "q8_0")
+ *
+ * `encoding` selects the DiT. It used to select the autoencoder too, which is why quantizing the
+ * DiT quietly quantized SAME as well; the autoencoder now resolves on its own axis, defaulting to
+ * F32 -- see sa3_config_ex::autoencoder_encoding.                                                 */
 typedef struct {
     const char* models_dir;
     const char* adapters_dir;
@@ -51,6 +55,14 @@ typedef struct {
      * a quantized DiT with an F16 encoder. NULL/"" -> auto, which prefers F16 (equivalent to F32 for
      * this encoder) and never picks a quantized tier on its own. */
     const char* text_encoder_encoding;
+    /* Autoencoder precision, likewise resolved apart from config.encoding. SAME used to ride on that
+     * field, so encoding="q4_k_m" took the autoencoder to Q4_K/Q6_K with it -- and from here there
+     * was no way to ask otherwise, since this struct carries no per-slot paths. The autoencoder is
+     * the last net the audio crosses, and continuation/transform cross it twice per iteration.
+     * NULL/"" -> auto, which prefers F32, then F16, and takes a quantized tier only when nothing
+     * else is present (warning when it does). Quantized autoencoders remain available: name one
+     * here to get it. NEW FIELDS GO AT THE END -- existing callers keep their layout. */
+    const char* autoencoder_encoding;
 } sa3_config_ex;
 
 /* Optional progress callback. fraction is overall 0..1 (UI does *100); stage is
@@ -247,6 +259,12 @@ typedef struct {
      * appended field costs it only this one value, where an inserted one silently shifts every
      * field after it. */
     const char* text_encoder_encoding;
+    /* Autoencoder precision, resolved apart from `encoding` as well. It matters more here than at
+     * inference: pre_encode runs the dataset through SAME once, and those latents are the targets
+     * the adapter learns from -- a quantized autoencoder bakes its loss into every one of them,
+     * where no amount of training gets it back. NULL -> auto (prefers F32, then F16, quantized
+     * only when nothing else is present). Appended for the reason given just above. */
+    const char* autoencoder_encoding;
 } sa3_train_config;
 
 /* One optimizer update. Pointers are valid only for the duration of the callback. */

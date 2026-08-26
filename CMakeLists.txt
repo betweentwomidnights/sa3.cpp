@@ -229,6 +229,9 @@ target_link_libraries(sa3-dit-lin-functional-test PRIVATE sa3)
 add_executable(sa3-lora-compose-test tests/lora_compose_test.cpp)
 target_link_libraries(sa3-lora-compose-test PRIVATE sa3)
 
+add_executable(sa3-model-paths-ae-test tests/model_paths_ae_test.cpp)
+target_link_libraries(sa3-model-paths-ae-test PRIVATE sa3)
+
 add_executable(sa3-lora-quant-merge-test tests/lora_quant_merge_test.cpp)
 target_link_libraries(sa3-lora-quant-merge-test PRIVATE sa3)
 
@@ -253,6 +256,7 @@ if(BUILD_TESTING)
     add_test(NAME sa3-train-inpaint-test COMMAND sa3-train-inpaint-test)
     add_test(NAME sa3-dit-lin-functional-test COMMAND sa3-dit-lin-functional-test)
     add_test(NAME sa3-lora-compose-test COMMAND sa3-lora-compose-test)
+    add_test(NAME sa3-model-paths-ae-test COMMAND sa3-model-paths-ae-test)
     add_test(NAME sa3-lora-quant-merge-test COMMAND sa3-lora-quant-merge-test)
     add_test(NAME sa3-set-wide-row-test COMMAND sa3-set-wide-row-test)
     if(Python3_Interpreter_FOUND)

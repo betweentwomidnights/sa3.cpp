@@ -70,14 +70,35 @@ class ModelArtifactsTest(unittest.TestCase):
             ["stable-audio-3-small-sfx-base-dit-0.5B-v1.0-F32.gguf"],
         )
 
-    def test_quantized_encodings_resolve_dit_and_same(self):
+    def test_quantized_encoding_resolves_the_dit_but_not_the_same(self):
+        # `encoding` used to pick the DiT AND the autoencoder, so asking for a quantized DiT
+        # fetched a quantized SAME too -- and since nothing else landed on disk, the resolver then
+        # had nothing better to prefer. SAME is the last net the audio crosses (and audio2audio
+        # crosses it twice per iteration) and the cheap one to keep -- 413 MB at F32 for SAME-S
+        # against 72 MB at Q4_K_M -- so it defaults to F32 on its own axis now.
         for enc, suffix in (("q4_k_m", "Q4_K_M"), ("q5_k_m", "Q5_K_M"), ("q8_0", "Q8_0")):
             plan = build_download_plan("thepatch", "medium", enc)
             files = plan[0][1]
             self.assertIn(f"stable-audio-3-medium-dit-1.5B-v1.0-{suffix}.gguf", files)
-            self.assertIn(f"stable-audio-3-medium-same-l-v1.0-{suffix}.gguf", files)
+            self.assertIn("stable-audio-3-medium-same-l-v1.0-F32.gguf", files)
+            self.assertNotIn(f"stable-audio-3-medium-same-l-v1.0-{suffix}.gguf", files)
             # the conditioner is quality-critical and tiny: always F32, never quantized
             self.assertIn("stable-audio-3-medium-conditioner-v1.0-F32.gguf", files)
+
+    def test_ae_encoding_is_honoured_when_asked_for(self):
+        # Quantized autoencoders stay available. What changed is that they have to be REQUESTED
+        # rather than arriving as a side effect of the DiT's tier.
+        plan = build_download_plan("thepatch", "medium", "q4_k_m", ae_encoding="q4_k_m")
+        self.assertIn("stable-audio-3-medium-same-l-v1.0-Q4_K_M.gguf", plan[0][1])
+        self.assertIn("stable-audio-3-medium-dit-1.5B-v1.0-Q4_K_M.gguf", plan[0][1])
+
+        plan = build_download_plan("thepatch", "medium", "f16", ae_encoding="f16")
+        self.assertIn("stable-audio-3-medium-same-l-v1.0-F16.gguf", plan[0][1])
+
+    def test_bad_ae_encoding_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_download_plan("thepatch", "medium", "f16", ae_encoding="nonsense")
+        self.assertIn("ae_encoding", str(ctx.exception))
 
     def test_q4_request_gets_a_q4_training_base(self):
         # Training on a quantized base works on every backend, so a Q4_K_M request resolves to a

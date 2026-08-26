@@ -292,6 +292,22 @@ struct ModelPaths {
     static bool resolve(const std::string& models_dir, const std::string& variant,
                         const std::string& encoding, const std::string& text_encoding,
                         ModelPaths& out, std::string& err);
+
+    // As above, and resolves the autoencoder on ITS own axis too. `ae_encoding` empty => auto
+    // (see autoencoder_auto_priority).
+    //
+    // SAME used to ride on `encoding` alongside the DiT, so --encoding q4_k_m silently took the
+    // autoencoder to Q4_K/Q6_K with it. That is the one net you least want quantized: it is the
+    // last thing the audio passes through, so whatever it adds reaches the output unmasked, and
+    // on the audio2audio paths the signal crosses it twice per iteration. It is also the cheap
+    // one to keep -- SAME-S is 413 MB at F32 against 72 MB at Q4_K_M, beside a DiT that dominates
+    // the footprint either way.
+    //
+    // Quantized autoencoders stay available. They just have to be ASKED for now, rather than
+    // arriving as a side effect of the DiT's tier.
+    static bool resolve(const std::string& models_dir, const std::string& variant,
+                        const std::string& encoding, const std::string& text_encoding,
+                        const std::string& ae_encoding, ModelPaths& out, std::string& err);
 };
 
 // True if the DiT's projection weights are stored as a quantized type. Checked on a weight
@@ -313,6 +329,86 @@ inline bool dit_base_is_quantized(const GgufModel& dit) {
 inline const std::vector<std::string>& text_encoder_auto_priority() {
     static const std::vector<std::string> v = {"F16", "F32"};
     return v;
+}
+
+// Which autoencoder encoding to take when the caller did not name one. F32 leads because it is
+// the reference precision this project is checked against, and because SAME is where precision
+// is worth the bytes: it is the last net the audio crosses, so anything it adds lands in the
+// output unmasked, and continuation/transform push the signal through it twice per iteration.
+//
+// Unlike the text encoder, F16 here is a real (if small) substitution rather than a free size
+// win, so it is second rather than first -- but it is still auto-selected, because 1626 MiB is a
+// lot to insist on for SAME-L when F16 is a good deal closer to F32 than any quantized tier is.
+// Quantized tiers are never auto-selected; see resolve_autoencoder.
+inline const std::vector<std::string>& autoencoder_auto_priority() {
+    static const std::vector<std::string> v = {"F32", "F16"};
+    return v;
+}
+
+// Resolve the autoencoder, on its own axis from the DiT.
+//
+//   1. an explicit request resolves EXACTLY, like --encoding does, including a quantized tier;
+//   2. otherwise take the first of autoencoder_auto_priority() that exists;
+//   3. otherwise fall back to whatever encoding the DiT resolved at, and SAY SO.
+//
+// Step 3 keeps every existing install working -- `download_models.py --encoding q4_k_m` fetched a
+// quantized SAME and nothing else, so refusing here would break that set outright. What changes is
+// that it is no longer silent: the one case this whole axis exists to surface is a quantized
+// autoencoder nobody asked for, so it warns and names the flag that pins it.
+inline std::string resolve_autoencoder(const std::string& md, const std::string& variant,
+                                       const std::string& ae_encoding,
+                                       const std::string& dit_enc_suffix, std::string& err) {
+    const std::string prefix = "stable-audio-3-" + variant + "-same-";
+    auto present = [&](const std::string& enc) {
+        return resolve_one(md, prefix, "-" + enc + ".gguf");
+    };
+    auto available = [&]() {
+        std::string alt;
+        for (const std::string& e : encoding_labels())
+            if (!present(e).empty()) alt += (alt.empty() ? "" : ", ") + e;
+        return alt;
+    };
+
+    if (!ae_encoding.empty()) {
+        const std::string ENC = encoding_suffix(ae_encoding);
+        if (ENC.empty()) {
+            err += (err.empty() ? "" : "; ") +
+                   ("unknown autoencoder encoding '" + ae_encoding +
+                    "' (expected f16|f32|q4_k_m|q5_k_m|q5_k|q8_0)");
+            return "";
+        }
+        std::string p = present(ENC);
+        if (p.empty()) {
+            std::string msg = "no autoencoder (" + prefix + "*-" + ENC + ".gguf)";
+            const std::string alt = available();
+            if (!alt.empty()) msg += " [available: " + alt + "]";
+            err += (err.empty() ? "" : "; ") + msg;
+        }
+        return p;
+    }
+
+    for (const std::string& enc : autoencoder_auto_priority()) {
+        std::string p = present(enc);
+        if (!p.empty()) return p;
+    }
+
+    std::string p = present(dit_enc_suffix);
+    if (!p.empty()) {
+        std::fprintf(stderr,
+                     "warning: no F32/F16 autoencoder in %s/, falling back to the DiT's %s tier. "
+                     "A quantized autoencoder is the last net the audio crosses and audio2audio "
+                     "crosses it twice per iteration; fetch one with "
+                     "`python tools/download_models.py --variant %s --ae-encoding f32` "
+                     "or pin this one explicitly to silence this.\n",
+                     md.c_str(), dit_enc_suffix.c_str(), variant.c_str());
+        return p;
+    }
+
+    std::string msg = "no autoencoder (" + prefix + "*.gguf)";
+    const std::string alt = available();
+    if (!alt.empty()) msg += " [available: " + alt + "]";
+    err += (err.empty() ? "" : "; ") + msg;
+    return "";
 }
 
 // Resolve the shared T5Gemma text encoder. Named `t5gemma-b-b-ul2-encoder-<size>-<ver>-<ENC>.gguf`,
@@ -371,12 +467,18 @@ inline std::string resolve_text_encoder(const std::string& md, const std::string
 
 inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
                                 const std::string& encoding, ModelPaths& out, std::string& err) {
-    return resolve(md, variant, encoding, "", out, err);
+    return resolve(md, variant, encoding, "", "", out, err);
 }
 
 inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
                                 const std::string& encoding, const std::string& text_encoding,
                                 ModelPaths& out, std::string& err) {
+    return resolve(md, variant, encoding, text_encoding, "", out, err);
+}
+
+inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
+                                const std::string& encoding, const std::string& text_encoding,
+                                const std::string& ae_encoding, ModelPaths& out, std::string& err) {
     // The requested encoding is resolved EXACTLY: this project's whole point is numeric parity,
     // so silently substituting a different precision than the caller asked for is not acceptable.
     // A missing file is an error naming what was looked for and what else is present.
@@ -410,15 +512,14 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
     out.t5   = resolve_text_encoder(md, text_encoding, err);
     out.cond = one("stable-audio-3-" + variant + "-conditioner-", ".gguf",       "conditioner");
     const std::string dit_pre  = "stable-audio-3-" + variant + "-dit-";
-    const std::string same_pre = "stable-audio-3-" + variant + "-same-";
     out.dit  = one(dit_pre,  "-" + ENC + ".gguf",  "DiT");
-    out.same = one(same_pre, "-" + ENC + ".gguf",  "SAME");
+    out.same = resolve_autoencoder(md, variant, ae_encoding, ENC, err);
     if (!err.empty()) {
-        // The --encoding hint belongs only to a DiT/SAME miss. The text encoder resolves on its own
-        // axis (--t5-encoding), so appending it to a text-encoder failure told the user to change the
-        // one flag that cannot fix it -- and named the DiT tiers as if they were encoder tiers.
-        if (out.dit.empty() || out.same.empty()) {
-            std::string alt = out.dit.empty() ? alternatives(dit_pre) : alternatives(same_pre);
+        // The --encoding hint belongs only to a DiT miss now. The text encoder and the autoencoder
+        // each resolve on their own axis (--t5-encoding, --ae-encoding), so pointing either of
+        // those failures at --encoding would name the one flag that cannot fix it.
+        if (out.dit.empty()) {
+            std::string alt = alternatives(dit_pre);
             if (!alt.empty()) err += " [available for this variant: " + alt + " — pass --encoding for one of those]";
         }
         err += " in " + md + "/ (run: python tools/download_models.py --variant " + variant + ")";
