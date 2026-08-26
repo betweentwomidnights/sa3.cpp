@@ -185,6 +185,22 @@ inline bool train_job_load_pairs(const TrainConfig& cfg, const std::string& spli
     return true;
 }
 
+// Does this backend actually support the LoRA backward pass? The Metal out_prod kernels stage
+// their tiles through simdgroup matrices with no scalar fallback, so a GPU below Apple7 (A13 and
+// older, and the iOS simulator, which reports Apple2) cannot run them. sa3 computes graphs on one
+// backend directly rather than through ggml_backend_sched, so nothing reroutes an unsupported op to
+// the CPU -- it would dispatch and trap. Ask before training instead of finding out mid-step.
+inline bool train_backend_supports_backward(ggml_backend_t backend) {
+    struct ggml_init_params ip = { 16*1024, nullptr, /*no_alloc=*/true };
+    ggml_context* ctx = ggml_init(ip);
+    if (!ctx) return true;   // cannot probe; let the run proceed rather than block on the probe
+    ggml_tensor* a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 32);
+    ggml_tensor* b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 48, 32);
+    const bool ok = ggml_backend_supports_op(backend, ggml_out_prod(ctx, a, b));
+    ggml_free(ctx);
+    return ok;
+}
+
 // Run a training job to completion. `cfg` must already have been through train_finalize_defaults().
 // Returns false with `err` set on any failure; no exception escapes.
 inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
@@ -340,6 +356,14 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
 
         ggml_backend_t backend = sa3::make_backend(cfg.cpu_threads,
                                                    cfg.device.empty() ? nullptr : cfg.device.c_str());
+        if (!train_backend_supports_backward(backend)) {
+            const std::string name = ggml_backend_name(backend) ? ggml_backend_name(backend) : "(unknown)";
+            ggml_backend_free(backend);
+            err = "backend '" + name + "' cannot run the LoRA backward pass (OUT_PROD): its GPU is "
+                  "below Apple7 / lacks simdgroup matrix support. Train with --device cpu, or use a "
+                  "device with an A14 or newer GPU. Inference is unaffected";
+            return false;
+        }
         sa3::Tokenizer tok = sa3::Tokenizer::load(paths.tok.c_str());
         sa3::GgufModel te = sa3::load_gguf(paths.t5.c_str(), backend);
         sa3::GgufModel dit = sa3::load_gguf(paths.dit.c_str(), backend);

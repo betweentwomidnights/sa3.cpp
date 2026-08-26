@@ -8,6 +8,9 @@ build-cpu-variants/
 build-cuda/
 build-vulkan/
 build-hip/
+build-ios-sim/
+build-ios-sim-x64/
+build-ios-dev/
 build-metal/
 build-metal-noblas/
 build-all/
