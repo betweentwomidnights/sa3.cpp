@@ -112,8 +112,19 @@ also fetches the matching dedicated base-DiT repo used by `sa3-train`.
 ## quant matrix
 
 published per variant, for **both** the DiT and the SAME: `F32`, `F16`, `Q8_0`, `Q5_K_M`, `Q4_K_M`.
-`--encoding` selects the pair (`sa3-generate` resolves DiT and SAME with the same suffix). the
-conditioner and tokenizer stay `F32` — those two really are small (793 KiB and 14 MiB).
+the conditioner and tokenizer stay `F32` — those two really are small (793 KiB and 14 MiB).
+
+**`--encoding` selects the DiT. the autoencoder resolves on its own `--ae-encoding`, default
+`F32`.** it used to ride on `--encoding`, so asking for a quantized DiT quietly fetched a quantized
+SAME as well — and since nothing else then landed on disk, the resolver had nothing better to
+prefer. SAME is the last net the audio passes through, so whatever it adds reaches the output
+unmasked, and `init_audio`/continuation/transform push the signal through it twice per iteration.
+it is also the cheap one to keep: SAME-S is **413 MiB** at `F32` against 72 MiB at `Q4_K_M`, beside
+a DiT that dominates the footprint either way.
+
+quantized autoencoders are still published and still downloadable — they just have to be asked for
+now. resolution prefers `F32`, then `F16`, and falls back to the DiT's own tier only when neither is
+present (warning when it does), so a set fetched by an older `--encoding q4_k_m` keeps working.
 
 **the text encoder is published `F16` (default), `F32` and `Q8_0`**, selected by `--t5-encoding`
 independently of `--encoding` — the combination worth having on a small device is a quantized DiT
