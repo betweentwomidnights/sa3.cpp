@@ -987,7 +987,10 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
         sa3::free_train_dit_ckpt(ck);
         sa3::free_train_dit_graph(graph);
         cond.free(); ae.free(); dit.free(); te.free();
-        ggml_backend_free(backend);
+        // No ggml_backend_free here: backend_owner owns the handle and frees it on the way out.
+        // Freeing it twice took down every successful run at teardown -- after the final adapter
+        // was already on disk, so it read as "crashed before saving" (CUDA: "invalid resource
+        // handle" in ~ggml_backend_cuda_context, exit 127).
         out.preview_command = preview.str();
         return true;
     } catch (const std::exception& e) {
