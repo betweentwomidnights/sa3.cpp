@@ -53,7 +53,12 @@ inline bool encode_train_caption_conditioning(Tokenizer& tok, GgufModel& te, con
     ggml_cgraph* gf = ggml_new_graph_custom(ctx, 8192, false);
     ggml_build_forward_expand(gf, h);
     ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(te.backend));
-    ggml_gallocr_alloc_graph(alloc, gf);
+    if (!alloc || !ggml_gallocr_alloc_graph(alloc, gf)) {
+        err = "failed to allocate the T5 conditioning graph (out of device memory)";
+        if (alloc) ggml_gallocr_free(alloc);
+        ggml_free(ctx);
+        return false;
+    }
 
     std::vector<float> mb((size_t)max_len * max_len);
     for (int q = 0; q < max_len; ++q) {
@@ -62,7 +67,11 @@ inline bool encode_train_caption_conditioning(Tokenizer& tok, GgufModel& te, con
     ggml_backend_tensor_set(ids_t, ids.data(), 0, ids.size() * sizeof(int32_t));
     ggml_backend_tensor_set(pos_t, pos.data(), 0, pos.size() * sizeof(int32_t));
     ggml_backend_tensor_set(mask_t, mb.data(), 0, mb.size() * sizeof(float));
-    ggml_backend_graph_compute(te.backend, gf);
+    if (!graph_compute_checked(te.backend, gf, "T5 caption conditioning", err)) {
+        ggml_gallocr_free(alloc);
+        ggml_free(ctx);
+        return false;
+    }
     ggml_backend_tensor_get(h, hidden.data(), 0, hidden.size() * sizeof(float));
     ggml_gallocr_free(alloc);
     ggml_free(ctx);

@@ -71,13 +71,22 @@ inline bool encode_train_audio_to_latents(GgufModel& ae, const SameConfig& c, co
     ggml_cgraph* gf = ggml_new_graph_custom(ctx, 32768, false);
     ggml_build_forward_expand(gf, z);
     ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ae.backend));
-    ggml_gallocr_alloc_graph(alloc, gf);
+    if (!alloc || !ggml_gallocr_alloc_graph(alloc, gf)) {
+        err = "failed to allocate the SAME encode graph (out of device memory)";
+        if (alloc) ggml_gallocr_free(alloc);
+        ggml_free(ctx);
+        return false;
+    }
 
     ggml_backend_tensor_set(in, audio.samples.data(), 0, audio.samples.size() * sizeof(float));
     train_set_positions(pos, N);
     train_set_same_mask(mask, c, N);
     if (c.chunk) train_set_positions(pos2, N2);
-    ggml_backend_graph_compute(ae.backend, gf);
+    if (!graph_compute_checked(ae.backend, gf, "SAME encode", err)) {
+        ggml_gallocr_free(alloc);
+        ggml_free(ctx);
+        return false;
+    }
 
     out.latent = c.latent;
     out.frames = T;

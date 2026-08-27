@@ -243,7 +243,7 @@ inline bool run_train_dit_accumulate(ggml_backend_t backend, TrainDitGraph& grap
     ggml_graph_reset(graph.graph);
     if (getenv("SA3_TRAIN_PROFILE")) {
         auto t0 = std::chrono::steady_clock::now();
-        ggml_backend_graph_compute(backend, graph.graph);
+        if (!graph_compute_checked(backend, graph.graph, "DiT training step", err)) return false;
         ggml_backend_tensor_get(graph.loss, &loss_out, 0, sizeof(float));  // forces compute sync
         auto t1 = std::chrono::steady_clock::now();
         bool ok = train_accumulate_adamw_gradients(graph, lora, accum, err);
@@ -253,7 +253,7 @@ inline bool run_train_dit_accumulate(ggml_backend_t backend, TrainDitGraph& grap
                      std::chrono::duration<double, std::milli>(t2 - t1).count(), lora.params.size());
         return ok;
     }
-    ggml_backend_graph_compute(backend, graph.graph);
+    if (!graph_compute_checked(backend, graph.graph, "DiT training step", err)) return false;
     ggml_backend_tensor_get(graph.loss, &loss_out, 0, sizeof(float));
     return train_accumulate_adamw_gradients(graph, lora, accum, err);
 }
@@ -364,10 +364,10 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
     accum.mag_c.resize(lora.params.size());
 
     // F: forward, storing block boundaries + context/gcond into persistent tensors
-    ggml_backend_graph_compute(backend, ck.fgraph);
+    if (!graph_compute_checked(backend, ck.fgraph, "DiT checkpointed forward", err)) return false;
     // T: tail + real loss; emits dL/dx_depth into the first ping-pong carrier
     ggml_graph_reset(ck.tgraph);
-    ggml_backend_graph_compute(backend, ck.tgraph);
+    if (!graph_compute_checked(backend, ck.tgraph, "DiT tail backward", err)) return false;
     ggml_backend_tensor_get(ck.loss, &loss_out, 0, sizeof(float));  // also forces compute sync
     if (profile) {
         const auto now = std::chrono::steady_clock::now();
@@ -402,7 +402,9 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
                          total, ck.ballocs.size(), dc.depth);
         }
         ggml_graph_reset(B.graph);
-        ggml_backend_graph_compute(backend, B.graph);
+        if (!graph_compute_checked(backend, B.graph,
+                                   ("DiT block " + std::to_string(l) + " backward").c_str(), err))
+            return false;
         if (!train_accum_read_subset(B.graph, ck, B.param_idx, accum, err)) return false;
         tmp.resize(gctx_sum.size());
         ggml_backend_tensor_get(B.grad_ctx, tmp.data(), 0, tmp.size() * sizeof(float));
@@ -423,7 +425,7 @@ inline bool run_train_dit_accumulate_ckpt(ggml_backend_t backend, TrainDitCkpt& 
     // Skipped when no adapter lives on a head weight (e.g. --lora-scope core); see train_ckpt.h.
     if (ck.hgraph) {
         ggml_graph_reset(ck.hgraph);
-        ggml_backend_graph_compute(backend, ck.hgraph);
+        if (!graph_compute_checked(backend, ck.hgraph, "DiT head backward", err)) return false;
         if (!train_accum_read_subset(ck.hgraph, ck, ck.head_param_idx, accum, err)) return false;
     }
     if (profile) {
@@ -470,7 +472,7 @@ inline bool run_eval_dit_loss(ggml_backend_t backend, TrainDitGraph& graph, cons
     ggml_backend_tensor_set(graph.pos, pos.data(), 0, pos.size() * sizeof(int32_t));
     ggml_backend_tensor_set(graph.ones, &one, 0, sizeof(float));
     ggml_graph_reset(graph.graph);
-    ggml_backend_graph_compute(backend, graph.graph);
+    if (!graph_compute_checked(backend, graph.graph, "DiT forward", err)) return false;
     ggml_backend_tensor_get(graph.loss, &loss_out, 0, sizeof(float));
     return true;
 }
