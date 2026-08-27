@@ -476,6 +476,23 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
         const bool use_latents = cfg.pre_encode || !cfg.latents_dir.empty();
         const int crop_frames = target_samples / (sc.patch_size * sc.output_seg);
         sa3::TrainLatentCache lat_cache;
+
+        // Native pre-encode needs the autoencoder and nothing else, but T5 / the DiT / the
+        // conditioner were loaded above for their configs and the LoRA target enumeration, and
+        // holding all four through a full-corpus encode costs ~1.8 GB before the first latent on
+        // medium-q4. That does not fit a 4 GB device. Drop them for the duration and reload after
+        // -- the same one-model-at-a-time discipline Pipeline::load already uses for inference.
+        //
+        // Safe because nothing that survives points into them: TrainLoraTarget carries names and
+        // dims only, TrainLoraParam keeps host std::vector<float> copies, and every config was
+        // already extracted by value. load_gguf(path, backend) leaves owns_backend false, so the
+        // shared backend outlives the free.
+        const bool native_pre_encode = use_latents && cfg.latents_dir.empty();
+        if (native_pre_encode) {
+            te.free();
+            dit.free();
+            cond.free();
+        }
         if (use_latents) {
             if (!cfg.latents_dir.empty()) {
                 if (!sa3::train_load_latent_dir(cfg.latents_dir, sc.latent, lat_cache, err))
@@ -519,6 +536,12 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                                              "); shorten --frames or drop the file");
             }
             ae.free();  // the autoencoder is no longer needed; frees ~1.7 GB of VRAM
+            if (native_pre_encode) {   // bring back what the training loop needs
+                te   = sa3::load_gguf(paths.t5.c_str(),  backend);
+                dit  = sa3::load_gguf(paths.dit.c_str(), backend);
+                cond = paths.cond.empty() ? sa3::load_gguf(paths.t5.c_str(), backend)
+                                          : sa3::load_gguf(paths.cond.c_str(), backend);
+            }
         }
         sa3::TrainDitGraph graph;
         sa3::TrainDitCkpt ck;
