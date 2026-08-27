@@ -376,12 +376,18 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
         sa3::Tokenizer tok = sa3::Tokenizer::load(paths.tok.c_str());
         sa3::GgufModel te = sa3::load_gguf(paths.t5.c_str(), backend);
         sa3::GgufModel dit = sa3::load_gguf(paths.dit.c_str(), backend);
-        sa3::GgufModel ae = sa3::load_gguf(paths.same.c_str(), backend);
+        // Declared here for teardown order, but deliberately NOT loaded here. Nothing between
+        // this point and pre-encode touches the autoencoder -- not the configs, not the target
+        // enumeration, not init_train_lora_state -- and on medium it is 570 MB quantized and
+        // 3.4 GB at the F32 tier auto-resolution prefers. Loading it alongside T5 and the DiT
+        // made STARTUP the high-water mark of the whole run (~1.82 GB on medium-q4, above the
+        // training loop itself below 512 frames). b85a74a dropped the sustained peak during
+        // pre-encode; this drops the transient that used to precede it.
+        sa3::GgufModel ae;
         sa3::GgufModel cond = paths.cond.empty() ? sa3::load_gguf(paths.t5.c_str(), backend)
                                                  : sa3::load_gguf(paths.cond.c_str(), backend);
         sa3::T5GemmaConfig tc = sa3::T5GemmaConfig::from(te);
         sa3::DitConfig dc = sa3::DitConfig::from(dit);
-        sa3::SameConfig sc = sa3::SameConfig::from(ae);
         sa3::TrainLoraScope lora_scope;
         lora_scope.name    = cfg.lora_scope;
         lora_scope.include = cfg.lora_include;
@@ -467,15 +473,10 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             train_job_logf(hooks, "[resume] step %d from %s\n", loop.step, resume_state_path.c_str());
         }
 
-        const int target_samples = cfg.duration_sec > 0.0f ? (int)(cfg.duration_sec * 44100.0f + 0.5f)
-                                                           : cfg.frames * sc.patch_size * sc.output_seg;
-
         // Pre-encoded latents (the reference training method, train_latents.h): every file is
         // encoded ONCE full-length here — or loaded from a gary4local pre-encode output — and the
         // per-step path random-crops in latent space. The autoencoder is freed afterwards.
         const bool use_latents = cfg.pre_encode || !cfg.latents_dir.empty();
-        const int crop_frames = target_samples / (sc.patch_size * sc.output_seg);
-        sa3::TrainLatentCache lat_cache;
 
         // Native pre-encode needs the autoencoder and nothing else, but T5 / the DiT / the
         // conditioner were loaded above for their configs and the LoRA target enumeration, and
@@ -493,6 +494,15 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             dit.free();
             cond.free();
         }
+        // Now, and not before: with those three released the autoencoder is the only model
+        // resident while it works. A --latents-dir run still loads it for its config alone,
+        // and a --pre-encode false run keeps it for the per-step encode below.
+        ae = sa3::load_gguf(paths.same.c_str(), backend);
+        const sa3::SameConfig sc = sa3::SameConfig::from(ae);
+        const int target_samples = cfg.duration_sec > 0.0f ? (int)(cfg.duration_sec * 44100.0f + 0.5f)
+                                                           : cfg.frames * sc.patch_size * sc.output_seg;
+        const int crop_frames = target_samples / (sc.patch_size * sc.output_seg);
+        sa3::TrainLatentCache lat_cache;
         if (use_latents) {
             if (!cfg.latents_dir.empty()) {
                 if (!sa3::train_load_latent_dir(cfg.latents_dir, sc.latent, lat_cache, err))
