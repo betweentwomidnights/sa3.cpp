@@ -171,6 +171,21 @@ inline bool lora_graph_ok(const std::vector<LoraAdapter>& adapters) {
     return true;
 }
 
+// ...and only if the base is not quantized. The graph path reads W through ggml_cast and writes
+// W_eff back through ggml_cpy, and neither has a k-quant route: see the note above the functional
+// path below. The CPU backend implements f32 -> k-quant copies, so the graph path happens to
+// survive there and this looked fine on CUDA/CPU; Metal implements CPY from F32 only to
+// F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q5_0/Q5_1/IQ4_NL/I32, so a Q4_K base aborts the graph with
+// "unsupported op 'CPY'". apply_loras_host re-packs with the type's own quantizer and is the
+// path meant for this, so choose on the base's dtype rather than the adapter type alone.
+inline bool lora_base_needs_host(const GgufModel& base, const std::vector<std::string>& targets) {
+    for (const std::string& wname : targets) {
+        auto it = base.tensors.find(wname);
+        if (it != base.tensors.end() && ggml_is_quantized(it->second->type)) return true;
+    }
+    return false;
+}
+
 // Build one ggml graph that recomputes every W_eff and run it on base.backend (GPU when CUDA).
 //   delta = B@A ; V = W + (alpha/rank)*strength*delta ;
 //   dora-rows: W_eff = magnitude[:,None] * V / ||V||_row  (= magnitude * rms_norm(V)/sqrt(in)).
@@ -346,8 +361,9 @@ inline LoraStack apply_loras(GgufModel& base, std::vector<LoraAdapter>& adapters
             break;
         }
     }
-    return lora_graph_ok(adapters) ? apply_loras_graph(base, adapters, targets)
-                                   : apply_loras_host(base, adapters, targets);
+    const bool host = !lora_graph_ok(adapters) || lora_base_needs_host(base, targets);
+    return host ? apply_loras_host(base, adapters, targets)
+                : apply_loras_graph(base, adapters, targets);
 }
 
 // ---------------------------------------------------------------------------------------
