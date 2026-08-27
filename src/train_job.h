@@ -293,6 +293,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             snap << "checkpoint_backward=" << (cfg.ckpt_backward ? "true" : "false") << "\n";
             snap << "pre_encode=" << (cfg.pre_encode ? "true" : "false") << "\n";
             snap << "latents_dir=" << (cfg.latents_dir.empty() ? "(none)" : cfg.latents_dir) << "\n";
+            snap << "evict_text_encoder=" << (cfg.evict_text_encoder ? "true" : "false") << "\n";
             snap << "target_latent_rms=" << cfg.target_latent_rms << "\n";
             snap << "rank=" << cfg.rank << "\n";
             snap << "lora_scope=" << cfg.lora_scope << "\n";
@@ -388,6 +389,8 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                                                  : sa3::load_gguf(paths.cond.c_str(), backend);
         sa3::T5GemmaConfig tc = sa3::T5GemmaConfig::from(te);
         sa3::DitConfig dc = sa3::DitConfig::from(dit);
+        // Read while T5 is up, so it survives the encoder being evicted below.
+        const int t5_max_len = (int)te.u32("t5g.max_length");
         sa3::TrainLoraScope lora_scope;
         lora_scope.name    = cfg.lora_scope;
         lora_scope.include = cfg.lora_include;
@@ -601,6 +604,32 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             throw std::runtime_error(err);
         std::vector<size_t> order(train_pairs.size());
         for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        // ---- text-encoder eviction (cfg.evict_text_encoder) -------------------------------
+        // T5 is 8-18 ms of a ~700 ms medium step and holds 285 MB (Q8_0) for the entire run.
+        // With pre-encoded latents every future sample's seconds conditioning is already known,
+        // so a window of UPCOMING captions can be encoded in one pass and the encoder dropped
+        // until that window runs out -- the same one-model-at-a-time trick the pre-encode reorder
+        // uses, applied to the loop instead of to startup.
+        //
+        // The window is drawn with a COPY of prompt_rng and the real stream is still advanced one
+        // caption per step below, so capture_progress serialises exactly the state it always did
+        // and resume needs no format change. The recomputed caption is checked against the
+        // pre-drawn one, so a desync is an error rather than silently wrong training data.
+        //
+        // The window never crosses an epoch boundary (order is reshuffled there), which bounds a
+        // small corpus to one reload per epoch and a large one to a fixed byte budget.
+        struct TrainCondWindowEntry { std::string caption; sa3::TrainConditioning cond; };
+        std::vector<TrainCondWindowEntry> cond_window;
+        size_t cond_window_begin = 0;
+        bool te_resident = true;
+        const bool evict_te = cfg.evict_text_encoder && use_latents;
+        const size_t cond_entry_bytes = (size_t)tc.dim * (size_t)(t5_max_len + 2) * sizeof(float);
+        const size_t cond_window_cap =
+            std::max<size_t>(1, (size_t)(48u * 1024u * 1024u) / std::max<size_t>(1, cond_entry_bytes));
+        if (evict_te)
+            train_job_logf(hooks, "[train] text-encoder eviction on: window %zu caption(s), %.1f MiB\n",
+                           cond_window_cap, (double)(cond_window_cap * cond_entry_bytes) / (1024.0 * 1024.0));
+
         int epoch = 0;
         size_t first_oi = 0;
         bool restored_epoch_order = false;
@@ -668,6 +697,12 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             } else if (multi_epoch) {
                 std::shuffle(order.begin(), order.end(), shuffle_rng);
             }
+            // A new epoch reshuffles `order`, so every cached caption now belongs to the wrong
+            // sample. Dropping the window here is what forces the refill: the bounds test below
+            // cannot see the rollover on its own when the window spans the whole epoch, which is
+            // the ordinary case for a corpus smaller than the window cap (oi restarts at 0, still
+            // inside [begin, begin+size)).
+            cond_window.clear();
             for (size_t oi = oi_begin; oi < order.size() && !stop; ++oi) {
                 if (hooks.should_cancel && hooks.should_cancel()) {
                     out.cancelled = true;
@@ -677,6 +712,32 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 const auto& pair = train_pairs[order[oi]];
                 cursor_epoch = epoch;
                 cursor_next_sample = oi + 1;
+                // Refill the conditioning window when this sample falls outside it. The `oi <
+                // begin` half also catches the epoch rollover, where oi restarts at 0 against a
+                // window left over from the tail of the previous epoch.
+                if (evict_te && (oi < cond_window_begin || oi >= cond_window_begin + cond_window.size())) {
+                    if (!te_resident) {
+                        te = sa3::load_gguf(paths.t5.c_str(), backend);
+                        te_resident = true;
+                    }
+                    const size_t win_end = std::min(order.size(), oi + cond_window_cap);
+                    std::mt19937_64 lookahead = prompt_rng;   // the real stream advances per step
+                    cond_window.clear();
+                    cond_window_begin = oi;
+                    for (size_t wi = oi; wi < win_end; ++wi) {
+                        const auto& wpair = train_pairs[order[wi]];
+                        TrainCondWindowEntry entry;
+                        entry.caption = train_job_build_prompt(prompt_cfg, wpair, lookahead);
+                        const double wsecs = lat_cache.at(
+                            std::filesystem::path(wpair.audio_path).stem().string()).seconds_total;
+                        if (!sa3::encode_train_caption_conditioning(tok, te, cond, tc, entry.caption,
+                                                                    (float)wsecs, entry.cond, err))
+                            throw std::runtime_error(err);
+                        cond_window.push_back(std::move(entry));
+                    }
+                    te.free();          // ~285 MB back until this window runs out
+                    te_resident = false;
+                }
                 // Per-phase profiling (SA3_TRAIN_PROFILE=1): decode/AE-encode/T5-cond/DiT/AdamW ms.
                 const bool prof = getenv("SA3_TRAIN_PROFILE") != nullptr;
                 auto tnow = [] { return std::chrono::steady_clock::now(); };
@@ -721,8 +782,18 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 auto p2 = tnow();
                 const std::string caption = train_job_build_prompt(prompt_cfg, pair, prompt_rng);
                 sa3::TrainConditioning conditioning;
-                if (!sa3::encode_train_caption_conditioning(tok, te, cond, tc, caption, (float)seconds_total, conditioning, err))
+                if (evict_te) {
+                    // Copied, not aliased: cfg-dropout zeroes cross in place below, and the
+                    // window entry has to stay intact for a later epoch. ~790 KB against a
+                    // ~700 ms step.
+                    const TrainCondWindowEntry& w = cond_window.at(oi - cond_window_begin);
+                    if (w.caption != caption)
+                        throw std::runtime_error("conditioning window desynchronised from the prompt stream");
+                    conditioning = w.cond;
+                } else if (!sa3::encode_train_caption_conditioning(tok, te, cond, tc, caption,
+                                                                   (float)seconds_total, conditioning, err)) {
                     throw std::runtime_error(err);
+                }
                 // Debug hook mirroring sa3_pipeline's SA3_DUMP_COND: dump the step's conditioning so
                 // the training-side encoder can be diffed against the inference pipeline's.
                 if (const char* dc_dir = getenv("SA3_DUMP_COND")) {

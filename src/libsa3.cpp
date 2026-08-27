@@ -271,6 +271,7 @@ SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
         if (cfg->checkpoint_every < 0) tc.checkpoint_every = 0;   // negative = no intermediate writes
         if (cfg->cpu_threads > 0)      tc.cpu_threads = cfg->cpu_threads;
         if (cfg->pre_encode)           tc.pre_encode = true;
+        if (cfg->evict_text_encoder)   tc.evict_text_encoder = true;
         if (cfg->seed != 0)            tc.seed = (unsigned long long)cfg->seed;
 
         if (tc.dataset_dir.empty()) { set_err(err, err_len, "dataset_dir is required"); return 2; }

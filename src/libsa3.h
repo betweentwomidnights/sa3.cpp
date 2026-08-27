@@ -271,6 +271,11 @@ typedef struct {
      * where no amount of training gets it back. NULL -> auto (prefers F32, then F16, quantized
      * only when nothing else is present). Appended for the reason given just above. */
     const char* autoencoder_encoding;
+    /* 1 = drop the text encoder between batches of captions, trading one encoder reload per
+     * window for ~285 MB (Q8_0) of resident memory across the whole run. Requires pre_encode
+     * (or latents_dir); ignored otherwise. Meant for memory-bound hosts -- a phone training
+     * medium -- and off by default everywhere else. Appended for the reason given above. */
+    int     evict_text_encoder;
 } sa3_train_config;
 
 /* One optimizer update. Pointers are valid only for the duration of the callback. */

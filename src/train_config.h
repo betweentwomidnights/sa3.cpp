@@ -98,6 +98,13 @@ struct TrainConfig {
     // Per-track latent-RMS loudness fix during native pre-encode (pre_encode.py
     // --per-track-target-latent-rms). 0 = off. The ratatat reference runs used 0.9.
     float target_latent_rms = 0.0f;
+    // Drop the text encoder between batches of captions. T5 is 8-18 ms of a ~700 ms medium step
+    // but holds 285 MB (Q8_0) for the entire run, so on a memory-bound device it is the worst
+    // resident-bytes-per-step-second in the loop. Needs pre-encoded latents, because it works by
+    // encoding a window of UPCOMING captions in one pass -- which requires their seconds
+    // conditioning to be known ahead. Costs one encoder reload per window, so it is off by
+    // default: a desktop has no reason to pay it. See run_training for the window itself.
+    bool evict_text_encoder = false;
     // Inpaint loss branch (underfit loss.py compute_masked_loss). true = the sa3-medium model
     // config / all reference ratatat runs: loss over the GENERATE region only, mask_loss_weight
     // ignored. false = weighted-pooled mean over gen+context.
@@ -325,6 +332,9 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
     else if (key == "latents-dir" || key == "latents_dir") c.latents_dir = value;
     else if (key == "target-latent-rms" || key == "target_latent_rms" || key == "per-track-target-latent-rms")
         return set_f(c.target_latent_rms);
+    else if (key == "evict-text-encoder" || key == "evict_text_encoder") {
+        if (!train_parse_bool(value, c.evict_text_encoder)) { err = "invalid boolean for --" + key + ": " + value; return false; }
+    }
     else if (key == "random-crop" || key == "random_crop") {
         if (!train_parse_bool(value, c.random_crop)) { err = "invalid boolean for --" + key + ": " + value; return false; }
     }
@@ -556,7 +566,9 @@ inline std::string train_config_usage(const char* argv0) {
        << "memory: --checkpoint-backward BOOL (default true; per-block backward, fits VRAM)\n"
        << "latents: --pre-encode BOOL (default true; encode files once, crop in latent space)\n"
        << "          --latents-dir DIR (train on a gary4local pre-encode output; overrides --pre-encode)\n"
-       << "          --target-latent-rms F (loudness fix during native pre-encode; ratatat runs used 0.9)\n";
+       << "          --target-latent-rms F (loudness fix during native pre-encode; ratatat runs used 0.9)\n"
+       << "memory: --evict-text-encoder BOOL (default false; drop T5 between caption batches,\n"
+       << "          ~285 MB back at Q8_0, one reload per window; needs pre-encoded latents)\n";
     return ss.str();
 }
 
