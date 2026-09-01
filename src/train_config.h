@@ -98,6 +98,11 @@ struct TrainConfig {
     // Per-track latent-RMS loudness fix during native pre-encode (pre_encode.py
     // --per-track-target-latent-rms). 0 = off. The ratatat reference runs used 0.9.
     float target_latent_rms = 0.0f;
+    // Persist native pre-encode output so a later run reuses it instead of re-encoding. Latents
+    // depend on the autoencoder and target_latent_rms only, so a sweep over rank/lr/frames/steps/
+    // seed hits the cache every time. Empty cache_dir => <dataset>/latents/<variant>-<ae enc>/.
+    bool latents_cache = true;
+    std::string latents_cache_dir;
     // Drop the text encoder between batches of captions. T5 is 8-18 ms of a ~700 ms medium step
     // but holds 285 MB (Q8_0) for the entire run, so on a memory-bound device it is the worst
     // resident-bytes-per-step-second in the loop. Needs pre-encoded latents, because it works by
@@ -332,6 +337,10 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
     else if (key == "latents-dir" || key == "latents_dir") c.latents_dir = value;
     else if (key == "target-latent-rms" || key == "target_latent_rms" || key == "per-track-target-latent-rms")
         return set_f(c.target_latent_rms);
+    else if (key == "latents-cache" || key == "latents_cache") {
+        if (!train_parse_bool(value, c.latents_cache)) { err = "invalid boolean for --" + key + ": " + value; return false; }
+    }
+    else if (key == "latents-cache-dir" || key == "latents_cache_dir") c.latents_cache_dir = value;
     else if (key == "evict-text-encoder" || key == "evict_text_encoder") {
         if (!train_parse_bool(value, c.evict_text_encoder)) { err = "invalid boolean for --" + key + ": " + value; return false; }
     }
@@ -566,6 +575,8 @@ inline std::string train_config_usage(const char* argv0) {
        << "memory: --checkpoint-backward BOOL (default true; per-block backward, fits VRAM)\n"
        << "latents: --pre-encode BOOL (default true; encode files once, crop in latent space)\n"
        << "          --latents-dir DIR (train on a gary4local pre-encode output; overrides --pre-encode)\n"
+       << "          --latents-cache BOOL (default true; keep pre-encode output and reuse it next run)\n"
+       << "          --latents-cache-dir DIR (default <dataset>/latents/<variant>-<ae encoding>)\n"
        << "          --target-latent-rms F (loudness fix during native pre-encode; ratatat runs used 0.9)\n"
        << "memory: --evict-text-encoder BOOL (default false; drop T5 between caption batches,\n"
        << "          ~285 MB back at Q8_0, one reload per window; needs pre-encoded latents)\n";

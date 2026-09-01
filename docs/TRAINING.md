@@ -27,6 +27,7 @@ sa3-train --dataset /path/to/dataset --steps 2000 \
 | `--duration SEC` | — | seconds of audio per training crop. Without it you get `--frames 512`, which is **47.6 s**. |
 | `--lora-scope full\|core` | `full` | `core` adapts only the 24 blocks' own projections (168 weights instead of 228): ~10% faster steps and ~11% smaller adapters, and in a matched 2000-step run the loss curve was within 0.0013 of `full` throughout. |
 | `--t5-encoding ENC` | auto | text-encoder precision, resolved apart from `--encoding`. Auto prefers `F16`, which is equivalent to `F32` at half the size (1074 → 537 MiB) and takes small-music's training peak from 2.28 to 1.78 GiB. `q8_0` saves another 0.26 GiB for a small, audible-on-paper cost. **Pick it for memory, never for speed:** encoding the caption is `t5_cond` in `SA3_TRAIN_PROFILE=1`, and on CUDA/medium that is **9 ms of a 1070 ms step — 0.84%** — so `q8_0` moves the step by −1 ms, within noise of `f16` (see below). |
+| `--latents-cache BOOL` | `true` | keep the pre-encode output and reuse it next run. Latents depend on the autoencoder and `--target-latent-rms` and on nothing the DiT or the adapter does, so a sweep over rank / lr / frames / steps / seed hits the cache every time. On the 10-track ratatat set a second run starts in **12 s instead of 285 s**, with bit-identical losses. Written to `<dataset>/latents/<variant>-<ae encoding>[-rms<target>]/`, or `--latents-cache-dir DIR` for a host whose dataset directory is read-only. A cache that cannot be written is reported once and the run continues. |
 | `--evict-text-encoder BOOL` | `false` | drop the text encoder between batches of captions instead of holding it for the whole run. It encodes a window of upcoming captions in one pass (63 of them, 47.6 MiB) and frees T5 until that window runs out, giving back **285 MiB at `q8_0`** for one encoder reload per window. The same reasoning as `--t5-encoding` taken to its conclusion: T5 is under 2% of a step but 15-19% of resident memory, so on a memory-bound host it is the first thing that should leave. **Quantizing past `q8_0` is not the alternative** — `q4_k_m` saves 79 MiB and was measured to cost audible quality. Needs pre-encoded latents (the default) and is silently inert without them. Off by default: a desktop has no reason to pay the reload. |
 | `--encoding ENC` | `f16` | base precision. Quantized bases (`q4_k_m`, `q8_0`, …) train on every backend and are both smaller and faster — on an M4 a `q4_k_m` medium base ran 2.77 s/step against 3.28 s/step for f16, on 962 MiB instead of 2773 MiB. |
 
@@ -37,6 +38,23 @@ Two things that are easy to miss:
   both are given. Shorter crops train faster and use less memory; the reference regime is ~47 s.
 - **MP3 datasets need `ffmpeg` on `PATH`.** Decoding shells out to it (see [Dataset](#dataset)).
   WAV already at 44.1 kHz does not — it is read natively.
+
+### Reusing latents
+
+The cache is written in the same `.npy` + `.json` convention `--latents-dir` reads, so it goes
+both ways: a directory this wrote can be handed to `--latents-dir`, and a pre-encode from
+gary4local, underfit, or the official PyTorch trainer can be trained on directly. The arrays are
+`[latent, frames]` C-order float32 with a `padding_mask` in the sidecar.
+
+The two flags are not interchangeable, and the difference is the point:
+
+- `--latents-dir` is **explicit**: it trains on exactly what you point it at, no questions asked.
+  That is what a parity run against a PyTorch reference needs.
+- `--latents-cache` is **checked**: an entry is only reused when the autoencoder, the loudness
+  target, and a fingerprint of the decoded audio all still agree. Anything else re-encodes.
+
+So a foreign pre-encode never satisfies a cache lookup by accident — it has no key in its sidecar
+and is skipped. Feeding one to the trainer is something you ask for by name.
 
 Training prints what it is actually doing at startup, which is worth a glance before walking away:
 
