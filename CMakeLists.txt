@@ -253,6 +253,10 @@ target_link_libraries(sa3-model-paths-ae-test PRIVATE sa3)
 add_executable(sa3-lora-quant-merge-test tests/lora_quant_merge_test.cpp)
 target_link_libraries(sa3-lora-quant-merge-test PRIVATE sa3)
 
+add_executable(sa3-latents-cache-test tests/latents_cache_test.cpp vendor/yyjson/yyjson.c)
+target_link_libraries(sa3-latents-cache-test PRIVATE sa3)
+target_include_directories(sa3-latents-cache-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
 add_executable(sa3-set-wide-row-test tests/set_wide_row_test.cpp)
 target_link_libraries(sa3-set-wide-row-test PRIVATE sa3)
 
@@ -276,6 +280,7 @@ if(BUILD_TESTING)
     add_test(NAME sa3-lora-compose-test COMMAND sa3-lora-compose-test)
     add_test(NAME sa3-model-paths-ae-test COMMAND sa3-model-paths-ae-test)
     add_test(NAME sa3-lora-quant-merge-test COMMAND sa3-lora-quant-merge-test)
+    add_test(NAME sa3-latents-cache-test COMMAND sa3-latents-cache-test)
     add_test(NAME sa3-set-wide-row-test COMMAND sa3-set-wide-row-test)
     if(Python3_Interpreter_FOUND)
         add_test(NAME sa3-model-artifacts-test
@@ -288,7 +293,7 @@ if(BUILD_TESTING)
         sa3-train-diffusion-test sa3-train-lora-test sa3-train-dit-compile-test
         sa3-train-optimizer-test sa3-train-loop-compile-test sa3-train-checkpoint-test
         sa3-train-prompt-test sa3-train-inpaint-test
-        sa3-dit-lin-functional-test
+        sa3-dit-lin-functional-test sa3-latents-cache-test
         PROPERTIES LABELS "non-gpu;training;lora")
 endif()
 

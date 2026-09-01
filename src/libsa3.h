@@ -230,8 +230,8 @@ SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path
  */
 
 /* Zero-initialize, then set what you need; 0/NULL means the CLI default shown.
- * Anything not exposed here can be set through config_json, which is applied FIRST and then
- * overridden by whichever fields below are non-zero. */
+ * Anything not exposed here can be set through config_path -- a JSON file of any train config
+ * key, applied FIRST and then overridden by whichever fields below are non-zero. */
 typedef struct {
     const char* models_dir;      /* NULL -> $SA3_MODELS_DIR, else "models" */
     const char* variant;         /* NULL -> "medium" ("medium" | "small-music" | "small-sfx") */
@@ -239,11 +239,12 @@ typedef struct {
     const char* dataset_dir;     /* REQUIRED */
     const char* output_dir;      /* NULL -> train-runs/<dataset name> */
     const char* latents_dir;     /* optional pre-encoded latents; skips audio decode entirely */
-    const char* prompt_config;   /* optional dataset.json for prompt tag-composition */
+    const char* prompt_config_path; /* optional path to a dataset.json for prompt tag-composition */
     const char* resume_path;     /* optional adapter-step-N.gguf or trainer-state-step-N.gguf */
     const char* adapter_type;    /* NULL -> "dora-rows" */
     const char* lora_scope;      /* NULL -> "full" ("full" | "core") */
-    const char* config_json;     /* optional JSON of any train config key, applied before the above */
+    const char* config_path;     /* optional PATH to a JSON file of any train config key (the CLI's
+                                  * --config), applied before the above. Not JSON itself. */
     const char* device;          /* NULL/"" -> SA3_DEVICE then GPU-if-available; "cpu" forces CPU */
 
     int     steps;               /* 0 -> 10000 total optimizer updates */
@@ -276,6 +277,14 @@ typedef struct {
      * (or latents_dir); ignored otherwise. Meant for memory-bound hosts -- a phone training
      * medium -- and off by default everywhere else. Appended for the reason given above. */
     int     evict_text_encoder;
+    /* Reuse pre-encoded latents across runs. 0 -> on, the CLI default; negative disables, the same
+     * convention checkpoint_every uses, so a zero-initialized config keeps the default either way.
+     * Appended for the reason given above. */
+    int         latents_cache;
+    /* Where those latents live. NULL -> <dataset_dir>/latents/<variant>-<ae encoding>[-rms<target>].
+     * Set it to somewhere writable when dataset_dir is not: a host that cannot write the default
+     * still trains, but re-encodes the corpus on every run. Appended, as above. */
+    const char* latents_cache_dir;
 } sa3_train_config;
 
 /* One optimizer update. Pointers are valid only for the duration of the callback. */

@@ -35,6 +35,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <random>
 #include <sstream>
@@ -176,6 +177,21 @@ inline std::string train_job_build_prompt(const PromptConfig& pcfg, const TrainA
     return prompt_compose(pcfg, md, prompt_rng);
 }
 
+// Cache identity for one pre-encode. Keyed on the DECODED audio rather than the source file:
+// that is what the encoder actually consumes, so it is identical whether the audio arrived from
+// the filesystem or from a host's load_audio hook, and it also catches a decoder that starts
+// producing different samples for the same file.
+inline std::string train_job_latent_fingerprint(const TrainAudio& audio) {
+    uint64_t h = UINT64_C(14695981039346656037);
+    h = train_resume_fnv1a(h, &audio.sample_rate, sizeof(audio.sample_rate));
+    h = train_resume_fnv1a(h, &audio.n_channels, sizeof(audio.n_channels));
+    h = train_resume_fnv1a(h, &audio.n_samples, sizeof(audio.n_samples));
+    h = train_resume_fnv1a(h, audio.samples.data(), audio.samples.size() * sizeof(float));
+    std::ostringstream out;
+    out << std::hex << std::setw(16) << std::setfill('0') << h;
+    return out.str();
+}
+
 inline bool train_job_load_pairs(const TrainConfig& cfg, const std::string& split,
                                  TrainSplitManifest& manifest,
                                  std::vector<TrainAudioCaptionPair>& pairs, std::string& err) {
@@ -294,6 +310,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             snap << "pre_encode=" << (cfg.pre_encode ? "true" : "false") << "\n";
             snap << "latents_dir=" << (cfg.latents_dir.empty() ? "(none)" : cfg.latents_dir) << "\n";
             snap << "evict_text_encoder=" << (cfg.evict_text_encoder ? "true" : "false") << "\n";
+            snap << "latents_cache=" << (cfg.latents_cache ? "true" : "false") << "\n";
             snap << "target_latent_rms=" << cfg.target_latent_rms << "\n";
             snap << "rank=" << cfg.rank << "\n";
             snap << "lora_scope=" << cfg.lora_scope << "\n";
@@ -513,6 +530,30 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 train_job_logf(hooks, "[pre-encode] loaded %zu latent files from %s\n",
                              lat_cache.size(), cfg.latents_dir.c_str());
             } else {
+                // Where a reusable pre-encode lands. Latents depend on the autoencoder and the
+                // loudness target and nothing else, so a sweep over rank/lr/frames/steps/seed
+                // reuses them. A host without a writable dataset dir passes its own path.
+                std::string cache_dir;
+                if (cfg.latents_cache) {
+                    const std::string ae_file = std::filesystem::path(paths.same).stem().string();
+                    const size_t dash = ae_file.rfind('-');
+                    const std::string ae_enc =
+                        dash == std::string::npos ? "unknown" : ae_file.substr(dash + 1);
+                    // Every dimension that invalidates gets its own directory, so switching one
+                    // does not evict the other's work: the key in the sidecar is the guard, the
+                    // layout is what keeps two valid caches from overwriting each other.
+                    std::string leaf = cfg.model_variant + "-" + ae_enc;
+                    if (cfg.target_latent_rms > 0.0f)
+                        leaf += "-rms" + train_job_format("%g", (double)cfg.target_latent_rms);
+                    cache_dir = cfg.latents_cache_dir.empty()
+                        ? (std::filesystem::path(cfg.dataset_dir) / "latents" / leaf).string()
+                        : cfg.latents_cache_dir;
+                }
+                sa3::TrainLatentKey cache_key;
+                cache_key.autoencoder = std::filesystem::path(paths.same).filename().string();
+                cache_key.target_latent_rms = cfg.target_latent_rms;
+                int cache_hits = 0, cache_writes = 0;
+                bool cache_write_failed = false;
                 for (const auto& pair : train_pairs) {
                     // Checked per FILE, because that is the granularity available: one iteration
                     // decodes a whole track and encodes it full-length, which on a phone is
@@ -530,13 +571,41 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                     sa3::TrainAudio decoded;
                     if (!train_job_load_audio(hooks, pair, 44100, sc.out_channels / sc.patch_size, decoded, err))
                         throw std::runtime_error(err);
+                    // Decoding is what a hit still costs; it runs ~1-2% of the encode it skips.
+                    std::string cache_name;
                     sa3::TrainLatentEntry e;
+                    if (!cache_dir.empty()) {
+                        cache_name = sa3::train_latent_cache_name(stem);
+                        cache_key.source_fingerprint = train_job_latent_fingerprint(decoded);
+                        if (sa3::train_read_latent_entry(cache_dir, cache_name, sc.latent,
+                                                         cache_key, e)) {
+                            cache_hits++;
+                            train_job_logf(hooks, "[pre-encode] %s: reused %d frames\n",
+                                           stem.c_str(), e.n_valid);
+                            lat_cache[stem] = std::move(e);
+                            continue;
+                        }
+                    }
                     if (!sa3::train_pre_encode_file(ae, sc, decoded, cfg.target_latent_rms, e, err))
                         throw std::runtime_error(err);
                     train_job_logf(hooks, "[pre-encode] %s: %.1fs -> %d frames, gain %.4f, rms %.4f -> %.4f (%d rounds)\n",
                                  stem.c_str(), e.seconds_total, e.n_valid, e.gain, e.rms_pre, e.rms_achieved, e.norm_rounds);
+                    if (!cache_name.empty()) {
+                        // A cache that cannot be written is not a failed run: say so once and
+                        // carry on encoding, which is what would have happened anyway.
+                        std::string w_err;
+                        if (sa3::train_write_latent_entry(cache_dir, cache_name, e, cache_key, w_err)) {
+                            cache_writes++;
+                        } else if (!cache_write_failed) {
+                            cache_write_failed = true;
+                            train_job_logf(hooks, "[pre-encode] not caching (%s)\n", w_err.c_str());
+                        }
+                    }
                     lat_cache[stem] = std::move(e);
                 }
+                if (!cache_dir.empty() && (cache_hits || cache_writes))
+                    train_job_logf(hooks, "[pre-encode] cache: %d reused, %d written -> %s\n",
+                                   cache_hits, cache_writes, cache_dir.c_str());
             }
             for (const auto& pair : train_pairs) {
                 const std::string stem = std::filesystem::path(pair.audio_path).stem().string();

@@ -44,6 +44,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -205,6 +206,150 @@ inline bool train_load_npy_f32_2d(const std::string& path, int64_t& d0, int64_t&
     data.resize((size_t)a * (size_t)b);
     f.read((char*)data.data(), (std::streamsize)(data.size() * sizeof(float)));
     if (!f) { err = "truncated .npy data: " + path; return false; }
+    return true;
+}
+
+// npy v1.0, little-endian f32, C-order 2D. Pairs with train_load_npy_f32_2d.
+inline bool train_write_npy_f32_2d(const std::string& path, int64_t d0, int64_t d1,
+                                   const float* data, std::string& err) {
+    std::ostringstream dict;
+    dict << "{'descr': '<f4', 'fortran_order': False, 'shape': (" << d0 << ", " << d1 << "), }";
+    std::string hdr = dict.str();
+    while ((10 + hdr.size() + 1) % 64 != 0) hdr.push_back(' ');   // align the data that follows
+    hdr.push_back('\n');
+
+    std::ofstream f(path, std::ios::binary);
+    if (!f) { err = "cannot write " + path; return false; }
+    const uint16_t hlen = (uint16_t)hdr.size();
+    f.write("\x93NUMPY\x01\x00", 8);
+    f.write((const char*)&hlen, 2);
+    f.write(hdr.data(), (std::streamsize)hdr.size());
+    f.write((const char*)data, (std::streamsize)((size_t)d0 * (size_t)d1 * sizeof(float)));
+    if (!f) { err = "failed while writing " + path; return false; }
+    return true;
+}
+
+// What a cached entry must agree with to be reused. Latents depend on the autoencoder and the
+// loudness target and on nothing the DiT or the adapter does, so a sweep over rank / lr / frames
+// / steps / seed reuses them. The autoencoder is also in the directory name, but it is repeated
+// here so an explicitly shared --latents-cache-dir cannot serve one autoencoder's latents for
+// another.
+struct TrainLatentKey {
+    int version = 1;
+    std::string autoencoder;          // resolved SAME gguf filename
+    std::string source_fingerprint;   // of the DECODED audio, see train_job_latent_fingerprint
+    float target_latent_rms = 0.0f;
+};
+
+// Filenames stay <stem>.npy / <stem>.json, matching gary4local, so a cache directory can be
+// handed to --latents-dir and a gary4local output can be dropped into a cache directory. The key
+// travels inside the sidecar instead of the name.
+inline std::string train_latent_cache_name(const std::string& stem) {
+    std::string safe = stem;
+    for (char& c : safe)
+        if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' ||
+            c == '<' || c == '>' || c == '|') c = '_';
+    return safe;
+}
+
+// [latent, n_valid] as npy in gary4local's [C, T] C-order, plus a sidecar using its field names.
+// padding_mask is all ones because z is already trimmed to n_valid.
+inline bool train_write_latent_entry(const std::string& dir, const std::string& name,
+                                     const TrainLatentEntry& e, const TrainLatentKey& key,
+                                     std::string& err) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) { err = "cannot create " + dir + ": " + ec.message(); return false; }
+
+    std::vector<float> ct((size_t)e.latent * (size_t)e.n_valid);
+    for (int t = 0; t < e.n_valid; ++t)
+        for (int c = 0; c < e.latent; ++c)
+            ct[(size_t)c * e.n_valid + t] = e.z[(size_t)t * e.latent + c];
+
+    const fs::path np = fs::path(dir) / (name + ".npy");
+    const fs::path jp = fs::path(dir) / (name + ".json");
+    const fs::path np_tmp = fs::path(dir) / (name + ".npy.part");
+    const fs::path jp_tmp = fs::path(dir) / (name + ".json.part");
+    if (!train_write_npy_f32_2d(np_tmp.string(), e.latent, e.n_valid, ct.data(), err)) return false;
+    {
+        std::ofstream j(jp_tmp);
+        if (!j) { err = "cannot write " + jp_tmp.string(); return false; }
+        j << "{\n  \"cache_version\": " << key.version
+          << ",\n  \"autoencoder\": \"" << key.autoencoder << "\""
+          << ",\n  \"source_fingerprint\": \"" << key.source_fingerprint << "\""
+          << ",\n  \"target_latent_rms\": " << key.target_latent_rms
+          << ",\n  \"seconds_total\": " << e.seconds_total
+          << ",\n  \"audio_gain_applied\": " << e.gain
+          << ",\n  \"latent_rms_pre_norm\": " << e.rms_pre
+          << ",\n  \"latent_rms_achieved\": " << e.rms_achieved
+          << ",\n  \"norm_rounds\": " << e.norm_rounds
+          << ",\n  \"padding_mask\": [";
+        for (int i = 0; i < e.n_valid; ++i) j << (i ? "," : "") << "1";
+        j << "]\n}\n";
+        if (!j) { err = "failed while writing " + jp_tmp.string(); return false; }
+    }
+    // npy first: an interrupted write must never leave a sidecar naming a truncated array
+    fs::rename(np_tmp, np, ec);
+    if (ec) { err = "cannot place " + np.string() + ": " + ec.message(); return false; }
+    fs::rename(jp_tmp, jp, ec);
+    if (ec) { err = "cannot place " + jp.string() + ": " + ec.message(); return false; }
+    return true;
+}
+
+// False for any reason at all -- missing, unreadable, wrong width, key disagreement -- because
+// every one of them means "encode it again", which is correct and merely slow. A gary4local
+// sidecar has no key fields and so never matches, which is the intended answer: --latents-dir is
+// how you train on those, deliberately and by name.
+inline bool train_read_latent_entry(const std::string& dir, const std::string& name,
+                                    int expect_latent, const TrainLatentKey& want,
+                                    TrainLatentEntry& out) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path np = fs::path(dir) / (name + ".npy");
+    const fs::path jp = fs::path(dir) / (name + ".json");
+    if (!fs::exists(np, ec) || !fs::exists(jp, ec)) return false;
+
+    std::ifstream jf(jp);
+    std::string js((std::istreambuf_iterator<char>(jf)), std::istreambuf_iterator<char>());
+    yyjson_doc* doc = yyjson_read(js.data(), js.size(), 0);
+    if (!doc) return false;
+    yyjson_val* root = yyjson_doc_get_root(doc);
+    auto str = [&](const char* k) {
+        yyjson_val* v = yyjson_obj_get(root, k);
+        return v && yyjson_is_str(v) ? std::string(yyjson_get_str(v)) : std::string();
+    };
+    yyjson_val* v = yyjson_obj_get(root, "cache_version");
+    const bool key_ok = v && (int)yyjson_get_int(v) == want.version &&
+                        str("autoencoder") == want.autoencoder &&
+                        str("source_fingerprint") == want.source_fingerprint &&
+                        (v = yyjson_obj_get(root, "target_latent_rms")) != nullptr &&
+                        (float)yyjson_get_num(v) == want.target_latent_rms;
+    TrainLatentEntry e;
+    if (key_ok) {
+        v = yyjson_obj_get(root, "seconds_total");
+        e.seconds_total = v ? yyjson_get_num(v) : 0.0;
+        if ((v = yyjson_obj_get(root, "audio_gain_applied"))) e.gain = (float)yyjson_get_num(v);
+        if ((v = yyjson_obj_get(root, "latent_rms_pre_norm"))) e.rms_pre = (float)yyjson_get_num(v);
+        if ((v = yyjson_obj_get(root, "latent_rms_achieved"))) e.rms_achieved = (float)yyjson_get_num(v);
+        if ((v = yyjson_obj_get(root, "norm_rounds"))) e.norm_rounds = (int)yyjson_get_int(v);
+    }
+    yyjson_doc_free(doc);
+    if (!key_ok) return false;
+
+    int64_t C = 0, T = 0;
+    std::vector<float> raw;
+    std::string ignored;
+    if (!train_load_npy_f32_2d(np.string(), C, T, raw, ignored)) return false;
+    if (expect_latent > 0 && C != expect_latent) return false;
+
+    e.latent = (int)C;
+    e.n_valid = (int)T;
+    e.z.resize((size_t)C * (size_t)T);
+    for (int64_t t = 0; t < T; ++t)
+        for (int64_t c = 0; c < C; ++c)
+            e.z[(size_t)t * C + c] = raw[(size_t)c * T + t];
+    out = std::move(e);
     return true;
 }
 
