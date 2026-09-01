@@ -2,7 +2,11 @@
  * This is the call sequence an embedded host (iOS app, plugin) would use to train an adapter
  * in-process, including the callbacks it drives the run with.
  *
- *   usage: sa3-libtrain <dataset-dir> <out-dir> [steps] [variant] [latents-dir]
+ *   usage: sa3-libtrain <dataset-dir> <out-dir> [steps] [variant] [latents-dir] [latents-cache-dir]
+ *
+ * latents-cache-dir is the one a sandboxed host usually has to set: the pre-encode cache defaults
+ * to a directory under dataset_dir, which an app that cannot write there needs to redirect. Pass
+ * "-" to turn the cache off instead.
  *
  * The adapter it writes is byte-identical to one produced by `sa3-train` with the same config.
  */
@@ -38,7 +42,9 @@ static int should_cancel(void* user) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <dataset-dir> <out-dir> [steps] [variant] [latents-dir]\n", argv[0]);
+        fprintf(stderr,
+                "usage: %s <dataset-dir> <out-dir> [steps] [variant] [latents-dir] [latents-cache-dir]\n",
+                argv[0]);
         return 2;
     }
 
@@ -49,6 +55,10 @@ int main(int argc, char** argv) {
     cfg.steps            = argc > 3 ? atoi(argv[3]) : 4;
     cfg.variant          = argc > 4 ? argv[4] : "small-music";
     cfg.latents_dir      = argc > 5 ? argv[5] : NULL;
+    if (argc > 6) {
+        if (strcmp(argv[6], "-") == 0) cfg.latents_cache = -1;   /* negative disables, like checkpoint_every */
+        else                           cfg.latents_cache_dir = argv[6];
+    }
     cfg.frames           = 128;
     cfg.checkpoint_every = -1;              /* no intermediate checkpoints for a smoke test */
     cfg.seed             = 42;
