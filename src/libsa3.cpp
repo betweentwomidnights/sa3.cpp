@@ -240,10 +240,10 @@ SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
         sa3::TrainConfig tc;
         if (const char* models = std::getenv("SA3_MODELS_DIR"); models && *models) tc.models_dir = models;
 
-        // config_json first, so the explicit fields below win over it.
-        if (cfg->config_json && *cfg->config_json) {
+        // the config file first, so the explicit fields below win over it
+        if (cfg->config_path && *cfg->config_path) {
             std::string jerr;
-            if (!sa3::train_apply_json_config(tc, cfg->config_json, jerr)) { set_err(err, err_len, jerr); return 2; }
+            if (!sa3::train_apply_json_config(tc, cfg->config_path, jerr)) { set_err(err, err_len, jerr); return 2; }
         }
 
         auto str = [](const char* v, std::string& dst) { if (v && *v) dst = v; };
@@ -255,10 +255,11 @@ SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
         str(cfg->dataset_dir,    tc.dataset_dir);
         str(cfg->output_dir,     tc.output_dir);
         str(cfg->latents_dir,    tc.latents_dir);
-        str(cfg->prompt_config,  tc.prompt_config_path);
+        str(cfg->prompt_config_path, tc.prompt_config_path);
         str(cfg->resume_path,    tc.resume_path);
         str(cfg->adapter_type,   tc.adapter_type);
         str(cfg->lora_scope,     tc.lora_scope);
+        str(cfg->latents_cache_dir, tc.latents_cache_dir);
 
         if (cfg->steps > 0)            tc.max_steps = cfg->steps;
         if (cfg->rank > 0)             tc.rank = cfg->rank;
@@ -272,6 +273,7 @@ SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
         if (cfg->cpu_threads > 0)      tc.cpu_threads = cfg->cpu_threads;
         if (cfg->pre_encode)           tc.pre_encode = true;
         if (cfg->evict_text_encoder)   tc.evict_text_encoder = true;
+        if (cfg->latents_cache < 0)    tc.latents_cache = false;
         if (cfg->seed != 0)            tc.seed = (unsigned long long)cfg->seed;
 
         if (tc.dataset_dir.empty()) { set_err(err, err_len, "dataset_dir is required"); return 2; }

@@ -354,6 +354,7 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
     return true;
 }
 
+// `path` is a JSON FILE, not JSON text -- the CLI spells this --config, the C ABI config_path.
 inline bool train_apply_json_config(TrainConfig& c, const std::string& path, std::string& err) {
     const std::string js = train_read_file(path, err);
     if (!err.empty()) return false;
@@ -561,6 +562,7 @@ inline std::string train_config_usage(const char* argv0) {
        << "              --t5-encoding ENC (text encoder precision; default auto, prefers F16)\n"
        << "              --ae-encoding ENC (autoencoder precision; default auto, prefers F32)\n"
        << "              --device cpu|<gpu> (default: SA3_DEVICE, else GPU if available)\n"
+       << "              --config FILE.json (a JSON file of any option below; flags override it)\n"
        << "adapter: --adapter-type lora|dora-rows|dora-cols|bora|*-xs --rank N --alpha F (default: = rank)\n"
        << "          --lora-scope full|core (full=228 weights, core=168 per-block projections)\n"
        << "          --lora-include a,b --lora-exclude a,b (substring filters, applied after scope)\n"
