@@ -281,7 +281,7 @@ inline bool train_write_latent_entry(const std::string& dir, const std::string& 
           << ",\n  \"target_latent_rms\": " << key.target_latent_rms
           << ",\n  \"seconds_total\": " << e.seconds_total
           << ",\n  \"audio_gain_applied\": " << e.gain
-          << ",\n  \"latent_rms_pre\": " << e.rms_pre
+          << ",\n  \"latent_rms_pre_norm\": " << e.rms_pre
           << ",\n  \"latent_rms_achieved\": " << e.rms_achieved
           << ",\n  \"norm_rounds\": " << e.norm_rounds
           << ",\n  \"padding_mask\": [";
@@ -330,7 +330,7 @@ inline bool train_read_latent_entry(const std::string& dir, const std::string& n
         v = yyjson_obj_get(root, "seconds_total");
         e.seconds_total = v ? yyjson_get_num(v) : 0.0;
         if ((v = yyjson_obj_get(root, "audio_gain_applied"))) e.gain = (float)yyjson_get_num(v);
-        if ((v = yyjson_obj_get(root, "latent_rms_pre"))) e.rms_pre = (float)yyjson_get_num(v);
+        if ((v = yyjson_obj_get(root, "latent_rms_pre_norm"))) e.rms_pre = (float)yyjson_get_num(v);
         if ((v = yyjson_obj_get(root, "latent_rms_achieved"))) e.rms_achieved = (float)yyjson_get_num(v);
         if ((v = yyjson_obj_get(root, "norm_rounds"))) e.norm_rounds = (int)yyjson_get_int(v);
     }
