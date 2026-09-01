@@ -30,35 +30,26 @@ keep the `.txt` files you trained with in the same folder as your adapter and do
 http server reads the `.json` pools in [`../prompts`](../prompts). (`libsa3` itself just generates — prompt
 pools are the app's job.) 
 
-## bundled autoencoder adapters
+## autoencoder adapters
 
-Two SAME-S **decoder** adapters are checked in here, against the blanket
-`*.safetensors` ignore — they are 1.36 MB each, where that rule exists for the
-80 MB+ DiT exports sitting beside them, and having them in the branch means the
-decoder-LoRA path can be exercised on any machine without fetching anything.
-
-| file | base | rank | step |
-|---|---|---|---|
-| `same-s_declora_s4_step2000.safetensors` | SAME-S | 8 | 2000 |
-| `same-s_declora_s4_step4000.safetensors` | SAME-S | 8 | 4000 |
-
-They are **provisional** — two checkpoints from one run, kept while it is still
-being decided whether they earn their place. SAME-S is not SAME-L: its artifact
-sits in a different band and wants its own recipe, so do not read a SAME-L
-result onto these.
-
-No `.json` sidecar, and none is needed. `save_lora_safetensors` writes
-`rank`/`alpha`/`adapter_type`/`target` into the file's own `__metadata__`, so
-each converts on its own:
+An adapter whose checkpoint declares `target: "decoder"` (or `"encoder"`) is routed onto the
+autoencoder instead of the DiT. `--lora` needs no extra flag to place it: `save_lora_safetensors`
+writes `rank`/`alpha`/`adapter_type`/`target` into the file's own `__metadata__`, so an export
+converts and loads on its own.
 
 ```bash
-sa3-lora-convert --safetensors loras/same-s_declora_s4_step2000.safetensors \
-                 --out models/lora-declora-s4-2000-f32.gguf
-sa3-generate --model small-music --lora models/lora-declora-s4-2000-f32.gguf --prompt "..."
+sa3-lora-convert --safetensors <export>.safetensors --out models/lora-<name>-f32.gguf
+sa3-generate --model medium --lora models/lora-<name>-f32.gguf --prompt "..."
 ```
 
-`--lora` needs no flag to place them: the `target: "decoder"` carried in the
-checkpoint routes them onto the autoencoder. The published SAME-L counterpart
-lives at [thepatch/same-l-decoder-lora](https://huggingface.co/thepatch/same-l-decoder-lora)
-and is **not** interchangeable — loading it against SAME-S is refused on tensor
-width rather than silently corrupting the model.
+The SAME-L decoder adapter is published, with the write-up of what it does and how it was
+trained, at [thepatch/same-l-decoder-lora](https://huggingface.co/thepatch/same-l-decoder-lora).
+
+SAME-S and SAME-L adapters are **not** interchangeable — their artifacts sit in different bands
+and each wants its own recipe. Loading one against the other is refused on tensor width rather
+than silently corrupting the model, so a mismatch is an error and not a quiet quality loss.
+
+A quantized autoencoder carrying an adapter merges through the host re-quantize path rather than
+the graph path: the graph path reads `W` through `ggml_cast` and writes back through `ggml_cpy`,
+and Metal has no f32 -> k-quant copy, so a Q4_K SAME-L used to abort with `unsupported op 'CPY'`.
+See `lora_base_needs_host` in `src/lora.h`.
