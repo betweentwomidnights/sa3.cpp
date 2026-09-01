@@ -2,19 +2,26 @@
 # Download the sa3.cpp GGUF model set from HuggingFace (public repos) with curl — no Python.
 #
 # Usage: ./models.sh [--variant medium|small-music|small-sfx] [--encoding f16|f32|q4_k_m|q5_k_m|q8_0]
-#                    [--t5-encoding f16|f32|q8_0]
+#                    [--t5-encoding f16|f32|q8_0] [--ae-encoding f16|f32|q4_k_m|q5_k_m|q8_0]
 #                    [--training-base] [--namespace <hf-user>] [--out DIR] [--dry-run]
-#   default: medium f16 into ./models
+#   default: medium f16 DiT, f32 autoencoder, into ./models
 #
-# Grabs one variant's DiT + SAME at the chosen encoding, its (always-F32) conditioner, plus the shared
-# T5Gemma encoder + tokenizer. --training-base also grabs the matching base DiT used by sa3-train.
+# Grabs one variant's DiT at the chosen encoding, its autoencoder (SAME) at --ae-encoding, the
+# (always-F32) conditioner, plus the shared T5Gemma encoder + tokenizer. --training-base also grabs
+# the matching base DiT used by sa3-train.
 # Cross-platform via git-bash on Windows (or use models.cmd).
 set -eu
 
 VARIANT="medium"
 ENCODING="f16"
-# The text encoder is resolved apart from the DiT/SAME: F16 is equivalent to F32 at half the size.
+# The text encoder is resolved apart from the DiT: F16 is equivalent to F32 at half the size.
 T5_ENCODING="f16"
+# So is the autoencoder, and it defaults to F32. SAME used to ride on --encoding, so asking for a
+# quantized DiT quietly fetched a quantized SAME too -- the last net the audio crosses, and the one
+# continuation/transform cross twice per iteration. It is also the cheap one to keep: SAME-S is
+# 413 MB at F32 against 72 MB at Q4_K_M, beside a DiT that dominates the footprint either way.
+# Quantized autoencoders are still published -- ask for one with --ae-encoding.
+AE_ENCODING="f32"
 NAMESPACE="thepatch"
 OUT="models"
 TRAINING_BASE=0
@@ -25,6 +32,7 @@ while [ $# -gt 0 ]; do
     --variant)   VARIANT="$2"; shift ;;
     --encoding)  ENCODING="$2"; shift ;;
     --t5-encoding) T5_ENCODING="$2"; shift ;;
+    --ae-encoding) AE_ENCODING="$2"; shift ;;
     --namespace) NAMESPACE="$2"; shift ;;
     --out)       OUT="$2"; shift ;;
     --training-base) TRAINING_BASE=1 ;;
@@ -67,6 +75,14 @@ case "$ENC" in
   Q5_K_M|Q8_0) BASE_ENC="F16" ;;
   *) echo "unknown encoding: $ENCODING (f16|f32|q4_k_m|q5_k_m|q8_0)" >&2; exit 1 ;;
 esac
+case "$AE_ENCODING" in
+  f16|F16)     AE_ENC="F16" ;;
+  f32|F32)     AE_ENC="F32" ;;
+  q4_k_m|Q4_K_M) AE_ENC="Q4_K_M" ;;
+  q5_k_m|Q5_K_M) AE_ENC="Q5_K_M" ;;
+  q8_0|Q8_0)   AE_ENC="Q8_0" ;;
+  *) echo "unknown --ae-encoding '$AE_ENCODING' (expected f16|f32|q4_k_m|q5_k_m|q8_0)" >&2; exit 2 ;;
+esac
 VAR_REPO="$NAMESPACE/stable-audio-3-$VARIANT-GGUF"
 BASE_REPO="$NAMESPACE/stable-audio-3-$VARIANT-base-GGUF"
 SHARED="$NAMESPACE/t5gemma-b-b-ul2-GGUF"
@@ -93,13 +109,13 @@ dl "$VAR_REPO" "$BASE-dit-$DIT_SIZE-v1.0-$ENC.gguf"
 if [ "$TRAINING_BASE" -eq 1 ]; then
   dl "$BASE_REPO" "$BASE-base-dit-$DIT_SIZE-v1.0-$BASE_ENC.gguf"
 fi
-dl "$VAR_REPO" "$BASE-$SAME-v1.0-$ENC.gguf"
+dl "$VAR_REPO" "$BASE-$SAME-v1.0-$AE_ENC.gguf"
 dl "$VAR_REPO" "$BASE-conditioner-v1.0-F32.gguf"
 dl "$SHARED"   "t5gemma-b-b-ul2-encoder-0.3B-v1.0-$T5_ENC.gguf"
 dl "$SHARED"   "t5gemma-b-b-ul2-v1.0-vocab.gguf"
 
 if [ "$TRAINING_BASE" -eq 1 ]; then
-  echo "[done] $VARIANT ($ENCODING) + training base -> $OUT"
+  echo "[done] $VARIANT (DiT $ENC, SAME $AE_ENC) + training base -> $OUT"
 else
-  echo "[done] $VARIANT ($ENCODING) -> $OUT"
+  echo "[done] $VARIANT (DiT $ENC, SAME $AE_ENC) -> $OUT"
 fi

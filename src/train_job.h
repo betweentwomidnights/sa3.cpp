@@ -293,6 +293,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             snap << "checkpoint_backward=" << (cfg.ckpt_backward ? "true" : "false") << "\n";
             snap << "pre_encode=" << (cfg.pre_encode ? "true" : "false") << "\n";
             snap << "latents_dir=" << (cfg.latents_dir.empty() ? "(none)" : cfg.latents_dir) << "\n";
+            snap << "evict_text_encoder=" << (cfg.evict_text_encoder ? "true" : "false") << "\n";
             snap << "target_latent_rms=" << cfg.target_latent_rms << "\n";
             snap << "rank=" << cfg.rank << "\n";
             snap << "lora_scope=" << cfg.lora_scope << "\n";
@@ -354,11 +355,20 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             train_job_logf(hooks, "[train] prompt config: %s\n", cfg.prompt_config_path.c_str());
         train_job_logf(hooks, "[train] base DiT: %s\n", paths.dit.c_str());
 
-        ggml_backend_t backend = sa3::make_backend(cfg.cpu_threads,
-                                                   cfg.device.empty() ? nullptr : cfg.device.c_str());
+        // Owned so that every way out of this function releases it. The models below are RAII
+        // (GgufModel::~GgufModel calls free()), but the backend is a raw handle that only the
+        // success path freed -- so any throw, and now any cancel, leaked it. That is invisible to
+        // the CLI, which exits immediately after, and not at all invisible to an embedded host
+        // that calls sa3_train() again.
+        struct BackendHandle {
+            ggml_backend_t h = nullptr;
+            ~BackendHandle() { if (h) ggml_backend_free(h); }
+            operator ggml_backend_t() const { return h; }
+        } backend_owner{ sa3::make_backend(cfg.cpu_threads,
+                                           cfg.device.empty() ? nullptr : cfg.device.c_str()) };
+        ggml_backend_t backend = backend_owner;
         if (!train_backend_supports_backward(backend)) {
             const std::string name = ggml_backend_name(backend) ? ggml_backend_name(backend) : "(unknown)";
-            ggml_backend_free(backend);
             err = "backend '" + name + "' cannot run the LoRA backward pass (OUT_PROD): its GPU is "
                   "below Apple7 / lacks simdgroup matrix support. Train with --device cpu, or use a "
                   "device with an A14 or newer GPU. Inference is unaffected";
@@ -367,12 +377,20 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
         sa3::Tokenizer tok = sa3::Tokenizer::load(paths.tok.c_str());
         sa3::GgufModel te = sa3::load_gguf(paths.t5.c_str(), backend);
         sa3::GgufModel dit = sa3::load_gguf(paths.dit.c_str(), backend);
-        sa3::GgufModel ae = sa3::load_gguf(paths.same.c_str(), backend);
+        // Declared here for teardown order, but deliberately NOT loaded here. Nothing between
+        // this point and pre-encode touches the autoencoder -- not the configs, not the target
+        // enumeration, not init_train_lora_state -- and on medium it is 570 MB quantized and
+        // 3.4 GB at the F32 tier auto-resolution prefers. Loading it alongside T5 and the DiT
+        // made STARTUP the high-water mark of the whole run (~1.82 GB on medium-q4, above the
+        // training loop itself below 512 frames). b85a74a dropped the sustained peak during
+        // pre-encode; this drops the transient that used to precede it.
+        sa3::GgufModel ae;
         sa3::GgufModel cond = paths.cond.empty() ? sa3::load_gguf(paths.t5.c_str(), backend)
                                                  : sa3::load_gguf(paths.cond.c_str(), backend);
         sa3::T5GemmaConfig tc = sa3::T5GemmaConfig::from(te);
         sa3::DitConfig dc = sa3::DitConfig::from(dit);
-        sa3::SameConfig sc = sa3::SameConfig::from(ae);
+        // Read while T5 is up, so it survives the encoder being evicted below.
+        const int t5_max_len = (int)te.u32("t5g.max_length");
         sa3::TrainLoraScope lora_scope;
         lora_scope.name    = cfg.lora_scope;
         lora_scope.include = cfg.lora_include;
@@ -458,13 +476,34 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             train_job_logf(hooks, "[resume] step %d from %s\n", loop.step, resume_state_path.c_str());
         }
 
-        const int target_samples = cfg.duration_sec > 0.0f ? (int)(cfg.duration_sec * 44100.0f + 0.5f)
-                                                           : cfg.frames * sc.patch_size * sc.output_seg;
-
         // Pre-encoded latents (the reference training method, train_latents.h): every file is
         // encoded ONCE full-length here — or loaded from a gary4local pre-encode output — and the
         // per-step path random-crops in latent space. The autoencoder is freed afterwards.
         const bool use_latents = cfg.pre_encode || !cfg.latents_dir.empty();
+
+        // Native pre-encode needs the autoencoder and nothing else, but T5 / the DiT / the
+        // conditioner were loaded above for their configs and the LoRA target enumeration, and
+        // holding all four through a full-corpus encode costs ~1.8 GB before the first latent on
+        // medium-q4. That does not fit a 4 GB device. Drop them for the duration and reload after
+        // -- the same one-model-at-a-time discipline Pipeline::load already uses for inference.
+        //
+        // Safe because nothing that survives points into them: TrainLoraTarget carries names and
+        // dims only, TrainLoraParam keeps host std::vector<float> copies, and every config was
+        // already extracted by value. load_gguf(path, backend) leaves owns_backend false, so the
+        // shared backend outlives the free.
+        const bool native_pre_encode = use_latents && cfg.latents_dir.empty();
+        if (native_pre_encode) {
+            te.free();
+            dit.free();
+            cond.free();
+        }
+        // Now, and not before: with those three released the autoencoder is the only model
+        // resident while it works. A --latents-dir run still loads it for its config alone,
+        // and a --pre-encode false run keeps it for the per-step encode below.
+        ae = sa3::load_gguf(paths.same.c_str(), backend);
+        const sa3::SameConfig sc = sa3::SameConfig::from(ae);
+        const int target_samples = cfg.duration_sec > 0.0f ? (int)(cfg.duration_sec * 44100.0f + 0.5f)
+                                                           : cfg.frames * sc.patch_size * sc.output_seg;
         const int crop_frames = target_samples / (sc.patch_size * sc.output_seg);
         sa3::TrainLatentCache lat_cache;
         if (use_latents) {
@@ -475,6 +514,17 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                              lat_cache.size(), cfg.latents_dir.c_str());
             } else {
                 for (const auto& pair : train_pairs) {
+                    // Checked per FILE, because that is the granularity available: one iteration
+                    // decodes a whole track and encodes it full-length, which on a phone is
+                    // seconds to minutes. Without this the host's cancel was simply not observed
+                    // until the first training step, so cancelling during pre-encode looked like
+                    // a hang -- and on a large corpus it is the longest stretch of the run.
+                    if (hooks.should_cancel && hooks.should_cancel()) {
+                        out.cancelled = true;
+                        train_job_logf(hooks, "[pre-encode] cancelled after %zu file(s)\n",
+                                       lat_cache.size());
+                        return true;
+                    }
                     const std::string stem = std::filesystem::path(pair.audio_path).stem().string();
                     if (lat_cache.count(stem)) continue;
                     sa3::TrainAudio decoded;
@@ -499,6 +549,12 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                                              "); shorten --frames or drop the file");
             }
             ae.free();  // the autoencoder is no longer needed; frees ~1.7 GB of VRAM
+            if (native_pre_encode) {   // bring back what the training loop needs
+                te   = sa3::load_gguf(paths.t5.c_str(),  backend);
+                dit  = sa3::load_gguf(paths.dit.c_str(), backend);
+                cond = paths.cond.empty() ? sa3::load_gguf(paths.t5.c_str(), backend)
+                                          : sa3::load_gguf(paths.cond.c_str(), backend);
+            }
         }
         sa3::TrainDitGraph graph;
         sa3::TrainDitCkpt ck;
@@ -548,6 +604,32 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             throw std::runtime_error(err);
         std::vector<size_t> order(train_pairs.size());
         for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        // ---- text-encoder eviction (cfg.evict_text_encoder) -------------------------------
+        // T5 is 8-18 ms of a ~700 ms medium step and holds 285 MB (Q8_0) for the entire run.
+        // With pre-encoded latents every future sample's seconds conditioning is already known,
+        // so a window of UPCOMING captions can be encoded in one pass and the encoder dropped
+        // until that window runs out -- the same one-model-at-a-time trick the pre-encode reorder
+        // uses, applied to the loop instead of to startup.
+        //
+        // The window is drawn with a COPY of prompt_rng and the real stream is still advanced one
+        // caption per step below, so capture_progress serialises exactly the state it always did
+        // and resume needs no format change. The recomputed caption is checked against the
+        // pre-drawn one, so a desync is an error rather than silently wrong training data.
+        //
+        // The window never crosses an epoch boundary (order is reshuffled there), which bounds a
+        // small corpus to one reload per epoch and a large one to a fixed byte budget.
+        struct TrainCondWindowEntry { std::string caption; sa3::TrainConditioning cond; };
+        std::vector<TrainCondWindowEntry> cond_window;
+        size_t cond_window_begin = 0;
+        bool te_resident = true;
+        const bool evict_te = cfg.evict_text_encoder && use_latents;
+        const size_t cond_entry_bytes = (size_t)tc.dim * (size_t)(t5_max_len + 2) * sizeof(float);
+        const size_t cond_window_cap =
+            std::max<size_t>(1, (size_t)(48u * 1024u * 1024u) / std::max<size_t>(1, cond_entry_bytes));
+        if (evict_te)
+            train_job_logf(hooks, "[train] text-encoder eviction on: window %zu caption(s), %.1f MiB\n",
+                           cond_window_cap, (double)(cond_window_cap * cond_entry_bytes) / (1024.0 * 1024.0));
+
         int epoch = 0;
         size_t first_oi = 0;
         bool restored_epoch_order = false;
@@ -615,6 +697,12 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             } else if (multi_epoch) {
                 std::shuffle(order.begin(), order.end(), shuffle_rng);
             }
+            // A new epoch reshuffles `order`, so every cached caption now belongs to the wrong
+            // sample. Dropping the window here is what forces the refill: the bounds test below
+            // cannot see the rollover on its own when the window spans the whole epoch, which is
+            // the ordinary case for a corpus smaller than the window cap (oi restarts at 0, still
+            // inside [begin, begin+size)).
+            cond_window.clear();
             for (size_t oi = oi_begin; oi < order.size() && !stop; ++oi) {
                 if (hooks.should_cancel && hooks.should_cancel()) {
                     out.cancelled = true;
@@ -624,6 +712,32 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 const auto& pair = train_pairs[order[oi]];
                 cursor_epoch = epoch;
                 cursor_next_sample = oi + 1;
+                // Refill the conditioning window when this sample falls outside it. The `oi <
+                // begin` half also catches the epoch rollover, where oi restarts at 0 against a
+                // window left over from the tail of the previous epoch.
+                if (evict_te && (oi < cond_window_begin || oi >= cond_window_begin + cond_window.size())) {
+                    if (!te_resident) {
+                        te = sa3::load_gguf(paths.t5.c_str(), backend);
+                        te_resident = true;
+                    }
+                    const size_t win_end = std::min(order.size(), oi + cond_window_cap);
+                    std::mt19937_64 lookahead = prompt_rng;   // the real stream advances per step
+                    cond_window.clear();
+                    cond_window_begin = oi;
+                    for (size_t wi = oi; wi < win_end; ++wi) {
+                        const auto& wpair = train_pairs[order[wi]];
+                        TrainCondWindowEntry entry;
+                        entry.caption = train_job_build_prompt(prompt_cfg, wpair, lookahead);
+                        const double wsecs = lat_cache.at(
+                            std::filesystem::path(wpair.audio_path).stem().string()).seconds_total;
+                        if (!sa3::encode_train_caption_conditioning(tok, te, cond, tc, entry.caption,
+                                                                    (float)wsecs, entry.cond, err))
+                            throw std::runtime_error(err);
+                        cond_window.push_back(std::move(entry));
+                    }
+                    te.free();          // ~285 MB back until this window runs out
+                    te_resident = false;
+                }
                 // Per-phase profiling (SA3_TRAIN_PROFILE=1): decode/AE-encode/T5-cond/DiT/AdamW ms.
                 const bool prof = getenv("SA3_TRAIN_PROFILE") != nullptr;
                 auto tnow = [] { return std::chrono::steady_clock::now(); };
@@ -668,8 +782,18 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 auto p2 = tnow();
                 const std::string caption = train_job_build_prompt(prompt_cfg, pair, prompt_rng);
                 sa3::TrainConditioning conditioning;
-                if (!sa3::encode_train_caption_conditioning(tok, te, cond, tc, caption, (float)seconds_total, conditioning, err))
+                if (evict_te) {
+                    // Copied, not aliased: cfg-dropout zeroes cross in place below, and the
+                    // window entry has to stay intact for a later epoch. ~790 KB against a
+                    // ~700 ms step.
+                    const TrainCondWindowEntry& w = cond_window.at(oi - cond_window_begin);
+                    if (w.caption != caption)
+                        throw std::runtime_error("conditioning window desynchronised from the prompt stream");
+                    conditioning = w.cond;
+                } else if (!sa3::encode_train_caption_conditioning(tok, te, cond, tc, caption,
+                                                                   (float)seconds_total, conditioning, err)) {
                     throw std::runtime_error(err);
+                }
                 // Debug hook mirroring sa3_pipeline's SA3_DUMP_COND: dump the step's conditioning so
                 // the training-side encoder can be diffed against the inference pipeline's.
                 if (const char* dc_dir = getenv("SA3_DUMP_COND")) {
@@ -944,7 +1068,10 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
         sa3::free_train_dit_ckpt(ck);
         sa3::free_train_dit_graph(graph);
         cond.free(); ae.free(); dit.free(); te.free();
-        ggml_backend_free(backend);
+        // No ggml_backend_free here: backend_owner owns the handle and frees it on the way out.
+        // Freeing it twice took down every successful run at teardown -- after the final adapter
+        // was already on disk, so it read as "crashed before saving" (CUDA: "invalid resource
+        // handle" in ~ggml_backend_cuda_context, exit 127).
         out.preview_command = preview.str();
         return true;
     } catch (const std::exception& e) {

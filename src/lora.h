@@ -32,16 +32,49 @@ namespace sa3 {
 struct LoraAdapter {
     GgufModel   gguf;
     std::string type;       // "lora" | "dora-rows" | ...
+    // Which network this adapts: "dit" (default), "decoder" or "encoder". Carried by the
+    // checkpoint rather than chosen by a flag, so one --lora accepts any of them and a file
+    // cannot be pointed at the wrong net by mistake. Absent means "dit", which is every adapter
+    // published before the field existed.
+    std::string target = "dit";
     int         rank = 0;
     float       alpha = 0.0f;
     float       strength = 1.0f;
 };
+
+// True if this adapter belongs on the autoencoder rather than the DiT.
+inline bool lora_targets_autoencoder(const LoraAdapter& a) {
+    return a.target == "decoder" || a.target == "encoder";
+}
+
+// Read just `lora.target` from an adapter file: header and KV store only, no tensor data and no
+// backend allocation. Routing has to happen before either base is chosen, and loading every
+// adapter twice to find out where it goes is a waste an embedded host pays for.
+inline std::string lora_target_of(const char* path) {
+    ggml_context* ctx = nullptr;
+    gguf_init_params gp = { /*no_alloc=*/true, /*ctx=*/&ctx };
+    gguf_context* g = gguf_init_from_file(path, gp);
+    if (!g) throw std::runtime_error("[lora] failed to open " + std::string(path));
+    const int i = gguf_find_key(g, "lora.target");
+    std::string t = i < 0 ? "dit" : gguf_get_val_str(g, i);
+    gguf_free(g);
+    if (ctx) ggml_free(ctx);
+    if (t != "dit" && t != "decoder" && t != "encoder")
+        throw std::runtime_error("[lora] " + std::string(path) + " declares lora.target '" + t +
+                                 "'; expected dit, decoder or encoder");
+    return t;
+}
 
 inline LoraAdapter load_lora(const char* path, float strength = 1.0f, ggml_backend_t backend = nullptr) {
     LoraAdapter a;
     a.gguf = load_gguf(path, backend);   // load onto the base's backend so the GPU apply graph can read it
     int ti = gguf_find_key(a.gguf.gguf, "lora.adapter_type");
     a.type     = ti < 0 ? "lora" : gguf_get_val_str(a.gguf.gguf, ti);
+    int gi = gguf_find_key(a.gguf.gguf, "lora.target");
+    a.target   = gi < 0 ? "dit" : gguf_get_val_str(a.gguf.gguf, gi);
+    if (a.target != "dit" && a.target != "decoder" && a.target != "encoder")
+        throw std::runtime_error("[lora] " + std::string(path) + " declares lora.target '" +
+                                 a.target + "'; expected dit, decoder or encoder");
     a.rank     = (int)a.gguf.u32("lora.rank");
     a.alpha    = a.gguf.f32("lora.alpha");
     a.strength = strength;
@@ -72,15 +105,51 @@ inline void read_to_f32(ggml_tensor* t, std::vector<float>& dst) {
         ggml_backend_tensor_get(t, dst.data(), 0, n*sizeof(float));
     }
 }
-// Write an F32 host buffer into a tensor of t->type (F32 or F16) — keeps W_eff at the base dtype.
+// Write an F32 host buffer into a tensor of t->type — keeps W_eff at the base dtype.
+//
+// F32/F16 are direct. A QUANTIZED target is re-packed with the type's own quantizer, which
+// means W_eff is quantized a SECOND time: the base was quantized once from the original f32
+// weights, and this rounds the adapted result again. That is a real cost, and it is why the
+// DiT prefers the functional path below — there W is never rewritten at all.
+//
+// It is offered anyway because the autoencoder has no functional path: same_decode/same_encode
+// fold W into mul_mat the same way the DiT does, but nothing hands them adapter tensors, so a
+// quantized AE could otherwise carry no adapter whatsoever. Merging also suits the AE better
+// than it suits the DiT — the AE is loaded and freed repeatedly within a single request, and a
+// merged adapter costs no resident memory and no per-step work.
+//
+// Anything this cannot pack is a hard error rather than a short write. The old else-branch sent
+// n*sizeof(float) into a Q4_K buffer (~0.56 bytes/element), writing ~7x the tensor's size --
+// a heap overrun that would have reported as a successful merge.
 inline void write_from_f32(ggml_tensor* t, const std::vector<float>& src) {
     const int64_t n = ggml_nelements(t);
     if (t->type == GGML_TYPE_F16) {
         std::vector<ggml_fp16_t> tmp(n);
         ggml_fp32_to_fp16_row(src.data(), tmp.data(), n);
         ggml_backend_tensor_set(t, tmp.data(), 0, n*sizeof(ggml_fp16_t));
-    } else {
+    } else if (t->type == GGML_TYPE_F32) {
         ggml_backend_tensor_set(t, src.data(), 0, n*sizeof(float));
+    } else if (ggml_is_quantized(t->type)) {
+        const int64_t ne0 = t->ne[0], rows = n / ne0;
+        if (ggml_quantize_requires_imatrix(t->type))
+            throw std::runtime_error(
+                std::string("[lora] cannot merge into ") + ggml_type_name(t->type) +
+                ": quantizing it needs an importance matrix. Use an f16 base for this set.");
+        if (ne0 % (int64_t)ggml_blck_size(t->type) != 0)
+            throw std::runtime_error(
+                std::string("[lora] cannot merge into ") + ggml_type_name(t->type) +
+                ": row length " + std::to_string(ne0) + " is not a multiple of its block size " +
+                std::to_string(ggml_blck_size(t->type)) + ".");
+        const size_t nbytes = ggml_nbytes(t);
+        std::vector<char> raw(nbytes);
+        const size_t wrote = ggml_quantize_chunk(t->type, src.data(), raw.data(), 0, rows, ne0, nullptr);
+        if (wrote != nbytes)
+            throw std::runtime_error("[lora] requantize produced " + std::to_string(wrote) +
+                                     " bytes for a tensor holding " + std::to_string(nbytes));
+        ggml_backend_tensor_set(t, raw.data(), 0, nbytes);
+    } else {
+        throw std::runtime_error(std::string("[lora] no write path for tensor type ") +
+                                 ggml_type_name(t->type));
     }
 }
 
@@ -100,6 +169,21 @@ struct LoraStack {
 inline bool lora_graph_ok(const std::vector<LoraAdapter>& adapters) {
     for (auto& a : adapters) if (a.type != "lora" && a.type != "dora-rows") return false;
     return true;
+}
+
+// ...and only if the base is not quantized. The graph path reads W through ggml_cast and writes
+// W_eff back through ggml_cpy, and neither has a k-quant route: see the note above the functional
+// path below. The CPU backend implements f32 -> k-quant copies, so the graph path happens to
+// survive there and this looked fine on CUDA/CPU; Metal implements CPY from F32 only to
+// F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q5_0/Q5_1/IQ4_NL/I32, so a Q4_K base aborts the graph with
+// "unsupported op 'CPY'". apply_loras_host re-packs with the type's own quantizer and is the
+// path meant for this, so choose on the base's dtype rather than the adapter type alone.
+inline bool lora_base_needs_host(const GgufModel& base, const std::vector<std::string>& targets) {
+    for (const std::string& wname : targets) {
+        auto it = base.tensors.find(wname);
+        if (it != base.tensors.end() && ggml_is_quantized(it->second->type)) return true;
+    }
+    return false;
 }
 
 // Build one ggml graph that recomputes every W_eff and run it on base.backend (GPU when CUDA).
@@ -221,6 +305,42 @@ inline LoraStack apply_loras_host(GgufModel& base, std::vector<LoraAdapter>& ada
     return LoraStack{};
 }
 
+// An adapter targets `wname` only if its factors have the base weight's shape.
+//
+// Name matching alone is not enough, because the AE variants SHARE A NAMESPACE: SAME-L and
+// SAME-S both name their blocks "ae.dec.<i>.<...>", so a SAME-L adapter lands on 25 of SAME-S's
+// tensor names, 24 of them at a different width (e.g. ae.dec.0.ff.out is 4608x1536 on SAME-L and
+// 2304x768 on SAME-S). That case does NOT crash on its own: the apply loops take `in`/`out` from
+// the BASE, so they read the larger adapter at the wrong stride, stay inside its allocation, and
+// write plausible garbage into 24 weights. The published guidance -- "loading this on SAME-S
+// will not error, it will just sound wrong" -- is exactly this, and it is cheap to refuse.
+//
+// Checked against the factor shapes rather than a declared base_model string, so it also covers
+// adapters converted before that key existed, and rank disagreeing with the metadata.
+inline bool lora_target_shape_ok(const LoraAdapter& a, const std::string& stem, ggml_tensor* W,
+                                 std::string& why) {
+    const int64_t in = W->ne[0], out = W->ne[1];
+    auto bad = [&](const std::string& m) { why = stem + ": " + m; return false; };
+    if (a.gguf.has(stem + ".M_xs")) {
+        ggml_tensor* U = a.gguf.get(stem + ".U");
+        ggml_tensor* V = a.gguf.get(stem + ".V");
+        if (!U || !V) return bad("-xs adapter is missing its U/V bases");
+        if (V->ne[0] != a.rank || V->ne[1] != in) return bad("V is not [rank, in] for this weight");
+        if (U->ne[0] != a.rank || U->ne[1] != out) return bad("U is not [rank, out] for this weight");
+        return true;
+    }
+    ggml_tensor* A = a.gguf.get(stem + ".lora_A");
+    ggml_tensor* B = a.gguf.get(stem + ".lora_B");
+    if (!A || !B) return bad("adapter has lora_A without lora_B, or vice versa");
+    if (A->ne[0] != in)  return bad("lora_A width " + std::to_string(A->ne[0]) +
+                                    " != base in " + std::to_string(in));
+    if (B->ne[1] != out) return bad("lora_B height " + std::to_string(B->ne[1]) +
+                                    " != base out " + std::to_string(out));
+    if (A->ne[1] != a.rank || B->ne[0] != a.rank)
+        return bad("factors disagree with declared rank " + std::to_string(a.rank));
+    return true;
+}
+
 // Apply `adapters` (in order) to `base`, updating every targeted weight in place. Dispatches to
 // the GPU/graph path for additive+dora-rows, else the host fallback.
 inline LoraStack apply_loras(GgufModel& base, std::vector<LoraAdapter>& adapters) {
@@ -229,11 +349,21 @@ inline LoraStack apply_loras(GgufModel& base, std::vector<LoraAdapter>& adapters
         const std::string& wname = kv.first;
         if (wname.size() < 7 || wname.compare(wname.size()-7, 7, ".weight") != 0) continue;
         std::string stem = wname.substr(0, wname.size()-7);
-        for (auto& a : adapters)
-            if (a.gguf.has(stem + ".lora_A") || a.gguf.has(stem + ".M_xs")) { targets.push_back(wname); break; }
+        for (auto& a : adapters) {
+            if (!a.gguf.has(stem + ".lora_A") && !a.gguf.has(stem + ".M_xs")) continue;
+            std::string why;
+            if (!lora_target_shape_ok(a, stem, kv.second, why))
+                throw std::runtime_error(
+                    "[lora] adapter does not fit this base -- " + why +
+                    ". SAME-L and SAME-S share tensor names, so an adapter for the other "
+                    "variant matches by name and would silently corrupt these weights.");
+            targets.push_back(wname);
+            break;
+        }
     }
-    return lora_graph_ok(adapters) ? apply_loras_graph(base, adapters, targets)
-                                   : apply_loras_host(base, adapters, targets);
+    const bool host = !lora_graph_ok(adapters) || lora_base_needs_host(base, targets);
+    return host ? apply_loras_host(base, adapters, targets)
+                : apply_loras_graph(base, adapters, targets);
 }
 
 // ---------------------------------------------------------------------------------------

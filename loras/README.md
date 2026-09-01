@@ -29,3 +29,27 @@ keep the `.txt` files you trained with in the same folder as your adapter and do
 [iplug2 demo](https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo)) pick them up as a prompt pool; the
 http server reads the `.json` pools in [`../prompts`](../prompts). (`libsa3` itself just generates — prompt
 pools are the app's job.) 
+
+## autoencoder adapters
+
+An adapter whose checkpoint declares `target: "decoder"` (or `"encoder"`) is routed onto the
+autoencoder instead of the DiT. `--lora` needs no extra flag to place it: `save_lora_safetensors`
+writes `rank`/`alpha`/`adapter_type`/`target` into the file's own `__metadata__`, so an export
+converts and loads on its own.
+
+```bash
+sa3-lora-convert --safetensors <export>.safetensors --out models/lora-<name>-f32.gguf
+sa3-generate --model medium --lora models/lora-<name>-f32.gguf --prompt "..."
+```
+
+The SAME-L decoder adapter is published, with the write-up of what it does and how it was
+trained, at [thepatch/same-l-decoder-lora](https://huggingface.co/thepatch/same-l-decoder-lora).
+
+SAME-S and SAME-L adapters are **not** interchangeable — their artifacts sit in different bands
+and each wants its own recipe. Loading one against the other is refused on tensor width rather
+than silently corrupting the model, so a mismatch is an error and not a quiet quality loss.
+
+A quantized autoencoder carrying an adapter merges through the host re-quantize path rather than
+the graph path: the graph path reads `W` through `ggml_cast` and writes back through `ggml_cpy`,
+and Metal has no f32 -> k-quant copy, so a Q4_K SAME-L used to abort with `unsupported op 'CPY'`.
+See `lora_base_needs_host` in `src/lora.h`.

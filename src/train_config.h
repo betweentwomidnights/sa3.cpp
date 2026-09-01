@@ -23,6 +23,11 @@ struct TrainConfig {
     // Text-encoder precision, resolved independently of `encoding` -- the useful combination is a
     // quantized DiT with an F16 encoder. Empty => auto (prefers F16, see text_encoder_auto_priority).
     std::string text_encoding;
+    // Autoencoder precision, resolved independently of `encoding` too. SAME rode on `encoding`
+    // alongside the DiT, so training on a q4 base pre-encoded through a q4 autoencoder as well --
+    // baking that loss into every latent the LoRA ever sees. Empty => auto (prefers F32, then F16,
+    // and never a quantized tier unless nothing else is present).
+    std::string ae_encoding;
     std::string models_dir = "models";
     std::string tok_path;
     std::string t5_path;
@@ -93,6 +98,13 @@ struct TrainConfig {
     // Per-track latent-RMS loudness fix during native pre-encode (pre_encode.py
     // --per-track-target-latent-rms). 0 = off. The ratatat reference runs used 0.9.
     float target_latent_rms = 0.0f;
+    // Drop the text encoder between batches of captions. T5 is 8-18 ms of a ~700 ms medium step
+    // but holds 285 MB (Q8_0) for the entire run, so on a memory-bound device it is the worst
+    // resident-bytes-per-step-second in the loop. Needs pre-encoded latents, because it works by
+    // encoding a window of UPCOMING captions in one pass -- which requires their seconds
+    // conditioning to be known ahead. Costs one encoder reload per window, so it is off by
+    // default: a desktop has no reason to pay it. See run_training for the window itself.
+    bool evict_text_encoder = false;
     // Inpaint loss branch (underfit loss.py compute_masked_loss). true = the sa3-medium model
     // config / all reference ratatat runs: loss over the GENERATE region only, mask_loss_weight
     // ignored. false = weighted-pooled mean over gen+context.
@@ -248,6 +260,7 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
     if      (key == "model" || key == "model_variant") c.model_variant = value;
     else if (key == "encoding") c.encoding = value;
     else if (key == "t5-encoding" || key == "t5_encoding") c.text_encoding = value;
+    else if (key == "ae-encoding" || key == "ae_encoding") c.ae_encoding = value;
     else if (key == "models-dir" || key == "models_dir") c.models_dir = value;
     else if (key == "tok" || key == "tok_path") c.tok_path = value;
     else if (key == "t5" || key == "t5_path") c.t5_path = value;
@@ -319,6 +332,9 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
     else if (key == "latents-dir" || key == "latents_dir") c.latents_dir = value;
     else if (key == "target-latent-rms" || key == "target_latent_rms" || key == "per-track-target-latent-rms")
         return set_f(c.target_latent_rms);
+    else if (key == "evict-text-encoder" || key == "evict_text_encoder") {
+        if (!train_parse_bool(value, c.evict_text_encoder)) { err = "invalid boolean for --" + key + ": " + value; return false; }
+    }
     else if (key == "random-crop" || key == "random_crop") {
         if (!train_parse_bool(value, c.random_crop)) { err = "invalid boolean for --" + key + ": " + value; return false; }
     }
@@ -455,6 +471,10 @@ inline bool validate_train_config(const TrainConfig& c, std::string& err) {
         err = "unsupported model variant: " + c.model_variant;
         return false;
     }
+    if (!c.ae_encoding.empty() && encoding_suffix(c.ae_encoding).empty()) {
+        err = "unsupported ae-encoding (expected f16|f32|q4_k_m|q5_k_m|q5_k|q8_0): " + c.ae_encoding;
+        return false;
+    }
     if (encoding_suffix(c.encoding).empty()) {
         err = "unsupported encoding (expected f16|f32|q4_k_m|q5_k_m|q5_k|q8_0): " + c.encoding;
         return false;
@@ -530,6 +550,7 @@ inline std::string train_config_usage(const char* argv0) {
        << "              --resume adapter-step-N.gguf|trainer-state-step-N.gguf (N -> --steps total)\n"
        << "              --encoding f16|f32|q4_k_m|q5_k_m|q5_k|q8_0 (default f16; quantized bases train)\n"
        << "              --t5-encoding ENC (text encoder precision; default auto, prefers F16)\n"
+       << "              --ae-encoding ENC (autoencoder precision; default auto, prefers F32)\n"
        << "              --device cpu|<gpu> (default: SA3_DEVICE, else GPU if available)\n"
        << "adapter: --adapter-type lora|dora-rows|dora-cols|bora|*-xs --rank N --alpha F (default: = rank)\n"
        << "          --lora-scope full|core (full=228 weights, core=168 per-block projections)\n"
@@ -545,7 +566,9 @@ inline std::string train_config_usage(const char* argv0) {
        << "memory: --checkpoint-backward BOOL (default true; per-block backward, fits VRAM)\n"
        << "latents: --pre-encode BOOL (default true; encode files once, crop in latent space)\n"
        << "          --latents-dir DIR (train on a gary4local pre-encode output; overrides --pre-encode)\n"
-       << "          --target-latent-rms F (loudness fix during native pre-encode; ratatat runs used 0.9)\n";
+       << "          --target-latent-rms F (loudness fix during native pre-encode; ratatat runs used 0.9)\n"
+       << "memory: --evict-text-encoder BOOL (default false; drop T5 between caption batches,\n"
+       << "          ~285 MB back at Q8_0, one reload per window; needs pre-encoded latents)\n";
     return ss.str();
 }
 

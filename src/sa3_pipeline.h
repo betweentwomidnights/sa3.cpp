@@ -292,6 +292,22 @@ struct ModelPaths {
     static bool resolve(const std::string& models_dir, const std::string& variant,
                         const std::string& encoding, const std::string& text_encoding,
                         ModelPaths& out, std::string& err);
+
+    // As above, and resolves the autoencoder on ITS own axis too. `ae_encoding` empty => auto
+    // (see autoencoder_auto_priority).
+    //
+    // SAME used to ride on `encoding` alongside the DiT, so --encoding q4_k_m silently took the
+    // autoencoder to Q4_K/Q6_K with it. That is the one net you least want quantized: it is the
+    // last thing the audio passes through, so whatever it adds reaches the output unmasked, and
+    // on the audio2audio paths the signal crosses it twice per iteration. It is also the cheap
+    // one to keep -- SAME-S is 413 MB at F32 against 72 MB at Q4_K_M, beside a DiT that dominates
+    // the footprint either way.
+    //
+    // Quantized autoencoders stay available. They just have to be ASKED for now, rather than
+    // arriving as a side effect of the DiT's tier.
+    static bool resolve(const std::string& models_dir, const std::string& variant,
+                        const std::string& encoding, const std::string& text_encoding,
+                        const std::string& ae_encoding, ModelPaths& out, std::string& err);
 };
 
 // True if the DiT's projection weights are stored as a quantized type. Checked on a weight
@@ -313,6 +329,86 @@ inline bool dit_base_is_quantized(const GgufModel& dit) {
 inline const std::vector<std::string>& text_encoder_auto_priority() {
     static const std::vector<std::string> v = {"F16", "F32"};
     return v;
+}
+
+// Which autoencoder encoding to take when the caller did not name one. F32 leads because it is
+// the reference precision this project is checked against, and because SAME is where precision
+// is worth the bytes: it is the last net the audio crosses, so anything it adds lands in the
+// output unmasked, and continuation/transform push the signal through it twice per iteration.
+//
+// Unlike the text encoder, F16 here is a real (if small) substitution rather than a free size
+// win, so it is second rather than first -- but it is still auto-selected, because 1626 MiB is a
+// lot to insist on for SAME-L when F16 is a good deal closer to F32 than any quantized tier is.
+// Quantized tiers are never auto-selected; see resolve_autoencoder.
+inline const std::vector<std::string>& autoencoder_auto_priority() {
+    static const std::vector<std::string> v = {"F32", "F16"};
+    return v;
+}
+
+// Resolve the autoencoder, on its own axis from the DiT.
+//
+//   1. an explicit request resolves EXACTLY, like --encoding does, including a quantized tier;
+//   2. otherwise take the first of autoencoder_auto_priority() that exists;
+//   3. otherwise fall back to whatever encoding the DiT resolved at, and SAY SO.
+//
+// Step 3 keeps every existing install working -- `download_models.py --encoding q4_k_m` fetched a
+// quantized SAME and nothing else, so refusing here would break that set outright. What changes is
+// that it is no longer silent: the one case this whole axis exists to surface is a quantized
+// autoencoder nobody asked for, so it warns and names the flag that pins it.
+inline std::string resolve_autoencoder(const std::string& md, const std::string& variant,
+                                       const std::string& ae_encoding,
+                                       const std::string& dit_enc_suffix, std::string& err) {
+    const std::string prefix = "stable-audio-3-" + variant + "-same-";
+    auto present = [&](const std::string& enc) {
+        return resolve_one(md, prefix, "-" + enc + ".gguf");
+    };
+    auto available = [&]() {
+        std::string alt;
+        for (const std::string& e : encoding_labels())
+            if (!present(e).empty()) alt += (alt.empty() ? "" : ", ") + e;
+        return alt;
+    };
+
+    if (!ae_encoding.empty()) {
+        const std::string ENC = encoding_suffix(ae_encoding);
+        if (ENC.empty()) {
+            err += (err.empty() ? "" : "; ") +
+                   ("unknown autoencoder encoding '" + ae_encoding +
+                    "' (expected f16|f32|q4_k_m|q5_k_m|q5_k|q8_0)");
+            return "";
+        }
+        std::string p = present(ENC);
+        if (p.empty()) {
+            std::string msg = "no autoencoder (" + prefix + "*-" + ENC + ".gguf)";
+            const std::string alt = available();
+            if (!alt.empty()) msg += " [available: " + alt + "]";
+            err += (err.empty() ? "" : "; ") + msg;
+        }
+        return p;
+    }
+
+    for (const std::string& enc : autoencoder_auto_priority()) {
+        std::string p = present(enc);
+        if (!p.empty()) return p;
+    }
+
+    std::string p = present(dit_enc_suffix);
+    if (!p.empty()) {
+        std::fprintf(stderr,
+                     "warning: no F32/F16 autoencoder in %s/, falling back to the DiT's %s tier. "
+                     "A quantized autoencoder is the last net the audio crosses and audio2audio "
+                     "crosses it twice per iteration; fetch one with "
+                     "`python tools/download_models.py --variant %s --ae-encoding f32` "
+                     "or pin this one explicitly to silence this.\n",
+                     md.c_str(), dit_enc_suffix.c_str(), variant.c_str());
+        return p;
+    }
+
+    std::string msg = "no autoencoder (" + prefix + "*.gguf)";
+    const std::string alt = available();
+    if (!alt.empty()) msg += " [available: " + alt + "]";
+    err += (err.empty() ? "" : "; ") + msg;
+    return "";
 }
 
 // Resolve the shared T5Gemma text encoder. Named `t5gemma-b-b-ul2-encoder-<size>-<ver>-<ENC>.gguf`,
@@ -371,12 +467,18 @@ inline std::string resolve_text_encoder(const std::string& md, const std::string
 
 inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
                                 const std::string& encoding, ModelPaths& out, std::string& err) {
-    return resolve(md, variant, encoding, "", out, err);
+    return resolve(md, variant, encoding, "", "", out, err);
 }
 
 inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
                                 const std::string& encoding, const std::string& text_encoding,
                                 ModelPaths& out, std::string& err) {
+    return resolve(md, variant, encoding, text_encoding, "", out, err);
+}
+
+inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
+                                const std::string& encoding, const std::string& text_encoding,
+                                const std::string& ae_encoding, ModelPaths& out, std::string& err) {
     // The requested encoding is resolved EXACTLY: this project's whole point is numeric parity,
     // so silently substituting a different precision than the caller asked for is not acceptable.
     // A missing file is an error naming what was looked for and what else is present.
@@ -410,15 +512,14 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
     out.t5   = resolve_text_encoder(md, text_encoding, err);
     out.cond = one("stable-audio-3-" + variant + "-conditioner-", ".gguf",       "conditioner");
     const std::string dit_pre  = "stable-audio-3-" + variant + "-dit-";
-    const std::string same_pre = "stable-audio-3-" + variant + "-same-";
     out.dit  = one(dit_pre,  "-" + ENC + ".gguf",  "DiT");
-    out.same = one(same_pre, "-" + ENC + ".gguf",  "SAME");
+    out.same = resolve_autoencoder(md, variant, ae_encoding, ENC, err);
     if (!err.empty()) {
-        // The --encoding hint belongs only to a DiT/SAME miss. The text encoder resolves on its own
-        // axis (--t5-encoding), so appending it to a text-encoder failure told the user to change the
-        // one flag that cannot fix it -- and named the DiT tiers as if they were encoder tiers.
-        if (out.dit.empty() || out.same.empty()) {
-            std::string alt = out.dit.empty() ? alternatives(dit_pre) : alternatives(same_pre);
+        // The --encoding hint belongs only to a DiT miss now. The text encoder and the autoencoder
+        // each resolve on their own axis (--t5-encoding, --ae-encoding), so pointing either of
+        // those failures at --encoding would name the one flag that cannot fix it.
+        if (out.dit.empty()) {
+            std::string alt = alternatives(dit_pre);
             if (!alt.empty()) err += " [available for this variant: " + alt + " — pass --encoding for one of those]";
         }
         err += " in " + md + "/ (run: python tools/download_models.py --variant " + variant + ")";
@@ -550,6 +651,33 @@ public:
     const DitConfig&  dit_config()  const { return dc_; }
 
 private:
+    // Bake this request's autoencoder adapters into the live AE_, if they are not already in it.
+    //
+    // Called after EVERY AE load rather than once per request, because AE_ does not survive a
+    // request the way DIT_ does: a frugal run frees it after the init encode and loads a clean one
+    // again for the decode. Reloading is also how a changed adapter set gets a clean base, since
+    // apply_loras merges in place and cannot be undone.
+    void ensure_ae_loras(GgufModel& ae) {
+        if (ae_applied_ == ae_loras_) return;
+        if (!ae_applied_.empty()) {          // wrong set baked in -> reload a clean base
+            ae.free();
+            ae = load_gguf(paths_.same.c_str(), backend_);
+            ae_applied_.clear();
+        }
+        if (ae_loras_.empty()) return;
+        std::vector<LoraAdapter> adapters;
+        for (auto& ls : ae_loras_)
+            adapters.push_back(load_lora(ls.first.c_str(), ls.second, ae.backend));
+        // Encoder- and decoder-targeted adapters touch disjoint tensors (ae.enc.* vs ae.dec.*),
+        // so one pass covers both and the order between the two halves cannot matter.
+        apply_loras(ae, adapters);
+        ae_applied_ = ae_loras_;
+        printf("lora: applied %zu autoencoder adapter(s) [merged]:\n", adapters.size());
+        for (size_t i = 0; i < adapters.size(); i++)
+            printf("  [%zu] %s  target=%s  strength=%.2f\n", i, ae_loras_[i].first.c_str(),
+                   adapters[i].target.c_str(), ae_loras_[i].second);
+    }
+
     bool loaded_ = false;
     bool nets_resident_ = false;       // are the heavy nets currently loaded? (false after a frugal gen)
     ModelPaths paths_;                 // kept so frugal mode can reload T5/DiT freed mid-request
@@ -561,6 +689,19 @@ private:
     bool dit_merged_ = false;                  // true => dit_loras_ were baked into DIT_ in place
     std::vector<LoraAdapter> dit_adapters_;    // kept resident for the functional path (graph reads A/B)
     FunctionalLora dit_functional_;            // graph-time adapters; empty unless the functional path is used
+    // Autoencoder adapters (lora.target = "decoder" | "encoder"). Always MERGED: same_encode /
+    // same_decode fold W straight into mul_mat and nothing hands them adapter tensors, so there is
+    // no functional path here the way dit_lin is one for the DiT. That suits the AE anyway -- it is
+    // loaded and freed repeatedly within a request, and a merged adapter costs no resident memory
+    // and no per-step work.
+    //
+    // `ae_applied_` records what is baked into the CURRENTLY RESIDENT AE_. It is deliberately not
+    // the same thing as the request's adapter list: AE_ is freed and reloaded partway through a
+    // frugal request (after the init encode, before the decode), and a reloaded base is clean, so
+    // this has to be cleared on free and re-checked after every load rather than tracked per
+    // request the way dit_loras_ is.
+    std::vector<std::pair<std::string,float>> ae_loras_;    // what this request asked for
+    std::vector<std::pair<std::string,float>> ae_applied_;  // what is baked into the live AE_
     T5GemmaConfig tc_{};
     DitConfig     dc_{};
     SameConfig    sc_{};
@@ -879,9 +1020,23 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     }
 
     // ---------- audio2audio: encode init audio -> latent z_init [latent, T] ----------
+    // ---------- route this request's adapters ----------
+    // One --lora list covers both nets; each file says which it adapts via lora.target, so the
+    // caller keeps one list and cannot aim a file at the wrong net. Read from the header alone,
+    // and done HERE rather than beside the DiT's apply: an encoder adapter has to be in place for
+    // the init encode below, which happens well before the DiT is even loaded.
+    std::vector<std::pair<std::string,float>> dit_loras_want;
+    {
+        std::vector<std::pair<std::string,float>> ae_want;
+        for (auto& ls : params.loras)
+            (sa3::lora_target_of(ls.first.c_str()) == "dit" ? dit_loras_want : ae_want).push_back(ls);
+        ae_loras_ = std::move(ae_want);
+    }
+
     std::vector<float> z_init;
     if (has_init) {
         if (!AE.ctx) AE = load_gguf(paths_.same.c_str(), backend_);
+        ensure_ae_loras(AE);
         z_init.resize(N);
         struct EncodeGraph {
             ggml_context* ctx = nullptr;
@@ -1026,7 +1181,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // a 4 GB card OOMs. The release_all_for_frugal_cancel paths and next-gen
     // reloads handle cancellation + subsequent requests respectively.
     if (!keep_models) {
-        if (has_init && AE.ctx) AE.free();             // init encode done
+        if (has_init && AE.ctx) { AE.free(); ae_applied_.clear(); }   // init encode done
         TE.free();
         if (CD_) CD_->free();
     }
@@ -1037,13 +1192,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (!DIT.ctx) DIT = load_gguf(paths_.dit.c_str(), backend_);
     throw_if_cancelled(params.should_cancel);
 
-    // ---------- LoRA/DoRA adapters (chained in order) ----------
     // Applied here, AFTER the DiT is resident (loaded just above), so the in-place weight
     // override lands on real tensors. apply_loras is IN-PLACE over the DiT base, so changing
     // adapters/strength needs a clean base: reload + re-apply only when this request's set
     // differs from what's already baked in (resident back-to-back requests with the SAME
     // adapters skip the work; a change pays a reload).
-    if (dit_loras_ != params.loras) {
+    if (dit_loras_ != dit_loras_want) {
         throw_if_cancelled(params.should_cancel);
         if (dit_merged_) {                   // prior request BAKED adapters in -> reload a clean base
             DIT.free();
@@ -1053,8 +1207,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         dit_functional_.free();              // functional adapters leave the base untouched
         dit_adapters_.clear();
         dit_loras_.clear();
-        if (!params.loras.empty()) {
-            for (auto& ls : params.loras) dit_adapters_.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
+        if (!dit_loras_want.empty()) {
+            for (auto& ls : dit_loras_want) dit_adapters_.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
             // A quantized base can only take the functional path: merging would have to read W
             // out and write W_eff back, and neither has a route for k-quant types. On an f16/f32
             // base the merge is still the default (it costs nothing per step); SA3_FUNCTIONAL_LORA
@@ -1075,12 +1229,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                 dit_merged_ = true;
                 dit_adapters_.clear();       // merged into W; nothing to keep resident
             }
-            printf("lora: applied %zu adapter(s) [%s]:\n", params.loras.size(),
+            printf("lora: applied %zu DiT adapter(s) [%s]:\n", dit_loras_want.size(),
                    dit_functional_.active ? "functional" : "merged");
-            for (size_t i = 0; i < params.loras.size(); i++)
-                printf("  [%zu] %s  strength=%.2f\n", i, params.loras[i].first.c_str(), params.loras[i].second);
+            for (size_t i = 0; i < dit_loras_want.size(); i++)
+                printf("  [%zu] %s  strength=%.2f\n", i, dit_loras_want[i].first.c_str(), dit_loras_want[i].second);
         }
-        dit_loras_ = params.loras;
+        dit_loras_ = dit_loras_want;
         if (params.should_cancel && params.should_cancel())
             throw_cancelled_after_frugal_cleanup();
     }
@@ -1182,6 +1336,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // SAME's ~1.6 GB. For keep_models=true, AE is already resident from the init-encode
     // phase or the prior generate() call.
     if (!AE.ctx) AE = load_gguf(paths_.same.c_str(), backend_);
+    ensure_ae_loras(AE);
     throw_if_cancelled(params.should_cancel);
 
     LoudnessMeta loudness_meta = make_loudness_meta(params.loudness);

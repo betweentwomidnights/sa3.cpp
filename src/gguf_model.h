@@ -330,4 +330,26 @@ inline GgufModel load_gguf(const char* path, ggml_backend_t backend = nullptr) {
     return m;
 }
 
+// ggml_backend_graph_compute returns a status that we used to discard everywhere, which is fine
+// right up until a backend starts failing. Metal in particular LATCHES the failure: once one
+// command buffer comes back != Completed, ggml_metal_graph_compute sets has_error and every later
+// call returns GGML_STATUS_FAILED immediately without touching a single output tensor
+// (ggml-metal-context.m: "recreate the backend to recover"). Since one backend is shared by the
+// autoencoder, T5 and the DiT, a single failed buffer turns the rest of a training run into
+// instant no-ops reading back whatever was already in the buffers -- pre-encode that races through
+// producing all-zero latents, then steps at a fraction of a second reporting loss 0 and gnorm 0.
+// Nothing about that looks like an error, so check the status and say so.
+inline bool graph_compute_checked(ggml_backend_t backend, ggml_cgraph* graph,
+                                  const char* what, std::string& err) {
+    const ggml_status st = ggml_backend_graph_compute(backend, graph);
+    if (st == GGML_STATUS_SUCCESS) return true;
+    const char* name = ggml_backend_name(backend);
+    err = std::string(what) + ": backend '" + (name ? name : "(unknown)") + "' returned " +
+          ggml_status_to_string(st) +
+          ". The backend is in an error state and cannot be recovered within this run; see the "
+          "backend's own log for the failing command buffer. On Metal this is usually memory "
+          "pressure -- retry with a smaller --frames, a more quantized --encoding, or --device cpu";
+    return false;
+}
+
 } // namespace sa3

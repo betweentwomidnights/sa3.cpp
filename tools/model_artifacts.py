@@ -45,6 +45,13 @@ ENCODINGS = FLOAT_ENCODINGS + QUANT_ENCODINGS
 TEXT_ENCODER_ENCODINGS = ("F16", "F32", "Q8_0")
 TEXT_ENCODER_DEFAULT = "F16"
 
+# The autoencoder's default tier, on its own axis from the DiT's. F32 because SAME is the
+# reference precision this project is checked against, because it is the last net the audio
+# crosses (so whatever it adds reaches the output unmasked, and continuation/transform cross it
+# twice per iteration), and because it is small enough beside the DiT for the bytes to be worth
+# it. Quantized autoencoders are still published and still downloadable -- ask with --ae-encoding.
+AUTOENCODER_DEFAULT = "F32"
+
 # Training bases are published F16, F32 and Q4_K_M. Training on a quantized base works on every
 # backend -- CPU, CUDA, Vulkan and Metal -- because the functional adapter path keeps the frozen base
 # as a mul_mat argument, and ggml PR #4 taught out_prod(W, transpose(grad)) to take a quantized src0.
@@ -94,12 +101,20 @@ def text_encoder_filename(encoding):
     return f"t5gemma-b-b-ul2-encoder-0.3B-{VERSION}-{enc}.gguf"
 
 
-def build_download_plan(namespace, variant, encoding, training_base=False, text_encoding=None):
+def build_download_plan(namespace, variant, encoding, training_base=False, text_encoding=None,
+                        ae_encoding=None):
     """Return ``[(repo_id, [filenames...]), ...]`` for download_models.py.
 
     Training needs the inference components as well as the base DiT, so
     ``training_base=True`` adds the base repository instead of replacing the
     normal inference repository.
+
+    ``encoding`` picks the DiT. The autoencoder has its own ``ae_encoding``
+    (default F32) because it used to ride on ``encoding``, which meant asking
+    for a quantized DiT also fetched a quantized SAME -- and then nothing else
+    was on disk for the resolver to prefer. SAME is the last net the audio
+    crosses and the cheap one to keep: 413 MB at F32 for SAME-S against 72 MB
+    at Q4_K_M, beside a DiT that dominates either way.
     """
     if variant not in VARIANTS:
         raise ValueError(f"unknown model variant: {variant}")
@@ -109,6 +124,13 @@ def build_download_plan(namespace, variant, encoding, training_base=False, text_
             f"unsupported encoding: {encoding} (expected one of {', '.join(e.lower() for e in ENCODINGS)})"
         )
 
+    ae_enc = (ae_encoding or AUTOENCODER_DEFAULT).upper()
+    if ae_enc not in ENCODINGS:
+        raise ValueError(
+            f"unsupported ae_encoding: {ae_encoding} (expected one of "
+            f"{', '.join(e.lower() for e in ENCODINGS)})"
+        )
+
     size, same = VARIANTS[variant]
     model = f"stable-audio-3-{variant}"
     plan = [
@@ -116,7 +138,7 @@ def build_download_plan(namespace, variant, encoding, training_base=False, text_
             f"{namespace}/{model}-GGUF",
             [
                 dit_filename(variant, enc),
-                f"{model}-{same}-{VERSION}-{enc}.gguf",
+                f"{model}-{same}-{VERSION}-{ae_enc}.gguf",
                 f"{model}-conditioner-{VERSION}-F32.gguf",
             ],
         )

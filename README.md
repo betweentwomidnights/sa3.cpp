@@ -7,6 +7,11 @@
 > **quantized ggufs are up on huggingface for all three variants — q4_k_m / q5_k_m / q8_0 for the
 > DiT and the autoencoder, plus q4_k_m training bases. `--encoding q4_k_m` gets you the set.**
 >
+> **update: `--encoding` now selects the DiT only.** the autoencoder has its own `--ae-encoding`
+> and defaults to f32 — it is the last net the audio crosses, audio2audio crosses it twice per
+> iteration, and it is small enough beside the DiT to be worth the bytes (same-s is 413mb at f32
+> against 72mb at q4_k_m). quantized autoencoders are still there, just ask for one.
+>
 > **hoping to update the interfaces and embedded applications for such things shortly.**
 
 > **update 7/17/2026 — Metal backend LoRA training is now implemented via CLI. Training is now
@@ -39,7 +44,8 @@ cd sa3.cpp
 
 # 2. download a model set into ./models  (no python — curl from HuggingFace)
 ./models.sh            # windows: models.cmd    (add --training-base for native LoRA training)
-./models.sh --encoding q4_k_m --training-base   # quantized set + a q4 base you can train on
+./models.sh --encoding q4_k_m --training-base   # q4 dit (+ f32 autoencoder) and a q4 base to train on
+./models.sh --encoding q4_k_m --ae-encoding q4_k_m --training-base   # ...quantize the autoencoder too
 
 # 3. put the tools on PATH for this shell (points SA3_MODELS_DIR at ./models too)
 source ./env.sh        # windows:  env.cmd  (cmd)   or   . .\env.ps1  (powershell)

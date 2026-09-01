@@ -32,7 +32,11 @@ typedef struct sa3_context sa3_context;
  *   models_dir   -> $SA3_MODELS_DIR, else "models"
  *   adapters_dir -> models_dir
  *   variant      -> "medium"   ("medium" | "small-music" | "small-sfx")
- *   encoding     -> "f16"      ("f16" | "f32")                                                    */
+ *   encoding     -> "f16"      ("f16" | "f32" | "q4_k_m" | "q5_k_m" | "q5_k" | "q8_0")
+ *
+ * `encoding` selects the DiT. It used to select the autoencoder too, which is why quantizing the
+ * DiT quietly quantized SAME as well; the autoencoder now resolves on its own axis, defaulting to
+ * F32 -- see sa3_config_ex::autoencoder_encoding.                                                 */
 typedef struct {
     const char* models_dir;
     const char* adapters_dir;
@@ -51,6 +55,14 @@ typedef struct {
      * a quantized DiT with an F16 encoder. NULL/"" -> auto, which prefers F16 (equivalent to F32 for
      * this encoder) and never picks a quantized tier on its own. */
     const char* text_encoder_encoding;
+    /* Autoencoder precision, likewise resolved apart from config.encoding. SAME used to ride on that
+     * field, so encoding="q4_k_m" took the autoencoder to Q4_K/Q6_K with it -- and from here there
+     * was no way to ask otherwise, since this struct carries no per-slot paths. The autoencoder is
+     * the last net the audio crosses, and continuation/transform cross it twice per iteration.
+     * NULL/"" -> auto, which prefers F32, then F16, and takes a quantized tier only when nothing
+     * else is present (warning when it does). Quantized autoencoders remain available: name one
+     * here to get it. NEW FIELDS GO AT THE END -- existing callers keep their layout. */
+    const char* autoencoder_encoding;
 } sa3_config_ex;
 
 /* Optional progress callback. fraction is overall 0..1 (UI does *100); stage is
@@ -188,9 +200,15 @@ SA3_API void sa3_free(sa3_context* ctx);
 /* Static version string. */
 SA3_API const char* sa3_version(void);
 
-/* Convert an exported LoRA (safetensors + json from lora_ckpt_export.py; all tensors F32) to a sa3.cpp LoRA
- * gguf, with NO Python. Lets a host import a .safetensors LoRA in-process. Byte-identical to
- * tools/convert_lora.py. Returns 0 on success; non-zero + err message on failure. Does not need a context. */
+/* Convert an exported LoRA (safetensors) to a sa3.cpp LoRA gguf, with NO Python. Lets a host import a
+ * .safetensors adapter in-process. Returns 0 on success; non-zero + err message on failure. Does not
+ * need a context.
+ *
+ * json_path is the sidecar from lora_ckpt_export.py (DiT adapters). Pass NULL or "" for an adapter that
+ * carries its config in the safetensors' own __metadata__ instead -- which is what decoder/encoder
+ * adapters do, since save_lora_safetensors writes them as a single self-describing file. The `target`
+ * found there decides which network the adapter is named for, and lands in the gguf as lora.target so
+ * sa3_generate can route it without being told. */
 SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path,
                              const char* out_gguf_path, char* err, int err_len);
 
@@ -247,6 +265,17 @@ typedef struct {
      * appended field costs it only this one value, where an inserted one silently shifts every
      * field after it. */
     const char* text_encoder_encoding;
+    /* Autoencoder precision, resolved apart from `encoding` as well. It matters more here than at
+     * inference: pre_encode runs the dataset through SAME once, and those latents are the targets
+     * the adapter learns from -- a quantized autoencoder bakes its loss into every one of them,
+     * where no amount of training gets it back. NULL -> auto (prefers F32, then F16, quantized
+     * only when nothing else is present). Appended for the reason given just above. */
+    const char* autoencoder_encoding;
+    /* 1 = drop the text encoder between batches of captions, trading one encoder reload per
+     * window for ~285 MB (Q8_0) of resident memory across the whole run. Requires pre_encode
+     * (or latents_dir); ignored otherwise. Meant for memory-bound hosts -- a phone training
+     * medium -- and off by default everywhere else. Appended for the reason given above. */
+    int     evict_text_encoder;
 } sa3_train_config;
 
 /* One optimizer update. Pointers are valid only for the duration of the callback. */
@@ -271,8 +300,18 @@ typedef struct {
 typedef void (*sa3_train_log_cb)(void* user, const char* line);
 typedef void (*sa3_train_step_cb)(void* user, const sa3_train_step* step);
 
-/* Return non-zero to stop at the next sample boundary. The run still writes a checkpoint and a
- * final adapter before returning, so a cancelled run is resumable rather than lost. */
+/* Return non-zero to stop. Polled at two granularities, and they differ in what you get back:
+ *
+ *   during pre-encode  once per FILE. Nothing has been trained yet, so the run stops with
+ *                      cancelled=1, steps=0 and NO adapter -- final_adapter/preview_command come
+ *                      back empty. Pre-encode is often the longest stretch of a run (every file
+ *                      is decoded and encoded full-length), so this is where a cancel is most
+ *                      likely to land.
+ *   during training    at the next sample boundary. The run still writes a checkpoint and a final
+ *                      adapter first, so it is resumable via resume_path rather than lost.
+ *
+ * Check `cancelled` and then whether final_adapter is empty; do not assume a cancelled run
+ * produced something to load. */
 typedef int (*sa3_train_cancel_cb)(void* user);
 
 /* Supply decoded audio for one dataset item instead of having the library read audio_path.
@@ -295,9 +334,9 @@ typedef struct {
     int    steps;                    /* last completed update */
     int    cancelled;
     double mean_step_seconds;
-    char   final_adapter[1024];      /* adapter-final.gguf */
+    char   final_adapter[1024];      /* adapter-final.gguf; "" if cancelled during pre-encode */
     char   last_checkpoint[1024];    /* adapter-step-N.gguf, "" if none was written */
-    char   preview_command[2048];    /* ready-to-run sa3-generate line */
+    char   preview_command[2048];    /* ready-to-run sa3-generate line; "" when there is no adapter */
 } sa3_train_result;
 
 /* Run a training job to completion. Returns 0 on success (out filled), non-zero on failure with a

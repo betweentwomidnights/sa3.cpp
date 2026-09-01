@@ -14,7 +14,7 @@ inline bool resolve_train_model_paths(const TrainConfig& cfg, ModelPaths& paths,
         !cfg.tok_path.empty() && !cfg.t5_path.empty() && !cfg.dit_path.empty() && !cfg.same_path.empty();
     if (!has_explicit_required) {
         if (!ModelPaths::resolve(cfg.models_dir, cfg.model_variant, cfg.encoding, cfg.text_encoding,
-                                 paths, err)) return false;
+                                 cfg.ae_encoding, paths, err)) return false;
     }
 
     // Stable Audio 3 adapters are trained against the distinct base DiT and applied to the

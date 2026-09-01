@@ -149,7 +149,8 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
 }
 
 static sa3_context* sa3_init_impl(const sa3_config* cfg, int cpu_threads, const char* device,
-                                  const char* text_encoding, char* err, int err_len) {
+                                  const char* text_encoding, const char* ae_encoding,
+                                  char* err, int err_len) {
     try {
         if (cpu_threads < 0) { set_err(err, err_len, "cpu_threads must be positive"); return nullptr; }
         std::string models_dir = cfg && cfg->models_dir ? cfg->models_dir : "";
@@ -159,9 +160,10 @@ static sa3_context* sa3_init_impl(const sa3_config* cfg, int cpu_threads, const 
         const std::string adir     = cfg && cfg->adapters_dir ? cfg->adapters_dir : models_dir;
 
         const std::string tenc = text_encoding ? text_encoding : "";
+        const std::string aenc = ae_encoding ? ae_encoding : "";
 
         sa3::ModelPaths mp; std::string rerr;
-        if (!sa3::ModelPaths::resolve(models_dir, variant, encoding, tenc, mp, rerr)) { set_err(err, err_len, rerr); return nullptr; }
+        if (!sa3::ModelPaths::resolve(models_dir, variant, encoding, tenc, aenc, mp, rerr)) { set_err(err, err_len, rerr); return nullptr; }
 
         auto ctx = std::make_unique<sa3_context>();
         ctx->paths = mp;
@@ -178,13 +180,14 @@ static sa3_context* sa3_init_impl(const sa3_config* cfg, int cpu_threads, const 
 extern "C" {
 
 SA3_API sa3_context* sa3_init(const sa3_config* cfg, char* err, int err_len) {
-    return sa3_init_impl(cfg, 0, nullptr, nullptr, err, err_len);
+    return sa3_init_impl(cfg, 0, nullptr, nullptr, nullptr, err, err_len);
 }
 
 SA3_API sa3_context* sa3_init_ex(const sa3_config_ex* cfg, char* err, int err_len) {
     return sa3_init_impl(cfg ? &cfg->config : nullptr, cfg ? cfg->cpu_threads : 0,
                          cfg ? cfg->device : nullptr,
-                         cfg ? cfg->text_encoder_encoding : nullptr, err, err_len);
+                         cfg ? cfg->text_encoder_encoding : nullptr,
+                         cfg ? cfg->autoencoder_encoding : nullptr, err, err_len);
 }
 
 SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* out, char* err, int err_len) {
@@ -208,10 +211,13 @@ SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 4"; }
 
 SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path,
                              const char* out_gguf_path, char* err, int err_len) {
-    if (!safetensors_path || !json_path || !out_gguf_path) { set_err(err, err_len, "null argument"); return 1; }
+    if (!safetensors_path || !out_gguf_path) { set_err(err, err_len, "null argument"); return 1; }
     try {
         std::string e;
-        if (!sa3::convert_lora_safetensors(safetensors_path, json_path, out_gguf_path, e)) {
+        // NULL/"" json_path means "the config is in the safetensors' own __metadata__", which is
+        // where save_lora_safetensors puts it for autoencoder adapters -- they ship as one file.
+        if (!sa3::convert_lora_safetensors(safetensors_path, json_path ? json_path : "",
+                                           out_gguf_path, e)) {
             set_err(err, err_len, e); return 2;
         }
         return 0;
@@ -245,6 +251,7 @@ SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
         str(cfg->variant,        tc.model_variant);
         str(cfg->encoding,       tc.encoding);
         str(cfg->text_encoder_encoding, tc.text_encoding);
+        str(cfg->autoencoder_encoding,  tc.ae_encoding);
         str(cfg->dataset_dir,    tc.dataset_dir);
         str(cfg->output_dir,     tc.output_dir);
         str(cfg->latents_dir,    tc.latents_dir);
@@ -264,6 +271,7 @@ SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
         if (cfg->checkpoint_every < 0) tc.checkpoint_every = 0;   // negative = no intermediate writes
         if (cfg->cpu_threads > 0)      tc.cpu_threads = cfg->cpu_threads;
         if (cfg->pre_encode)           tc.pre_encode = true;
+        if (cfg->evict_text_encoder)   tc.evict_text_encoder = true;
         if (cfg->seed != 0)            tc.seed = (unsigned long long)cfg->seed;
 
         if (tc.dataset_dir.empty()) { set_err(err, err_len, "dataset_dir is required"); return 2; }

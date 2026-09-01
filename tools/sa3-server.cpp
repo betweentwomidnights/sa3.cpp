@@ -53,6 +53,10 @@ std::string g_encoding  = "f16";
 // small box is a quantized DiT with an F16 encoder. Empty => auto (prefers F16, and never a
 // quantized tier on its own). See docs/DISTRIBUTION.md.
 std::string g_t5_encoding;
+// Autoencoder precision, resolved apart from g_encoding too. It rode on that field, so a
+// quantized DiT quietly quantized SAME as well -- the last net the audio crosses, and the one
+// audio2audio crosses twice per iteration. Empty => auto (prefers F32, then F16).
+std::string g_ae_encoding;
 std::string g_models_dir;
 std::string g_adapters_dir;
 std::string g_prompts_dir;
@@ -559,7 +563,7 @@ void jobs_prune() {
 bool ensure_loaded(std::string& err) {
     if (g_pipe && g_pipe->loaded()) { g_loaded = true; return true; }
     sa3::ModelPaths mp;
-    if (!sa3::ModelPaths::resolve(g_models_dir, g_variant, g_encoding, g_t5_encoding, mp, err))
+    if (!sa3::ModelPaths::resolve(g_models_dir, g_variant, g_encoding, g_t5_encoding, g_ae_encoding, mp, err))
         return false;
     try {
         g_pipe = std::make_unique<sa3::Pipeline>();
@@ -862,6 +866,7 @@ int main(int argc, char** argv) {
         else if (a == "--model")        g_variant = next("medium");
         else if (a == "--encoding")     g_encoding = next("f16");
         else if (a == "--t5-encoding")  g_t5_encoding = next("");
+        else if (a == "--ae-encoding")  g_ae_encoding = next("");
         else if (a == "--models-dir")   g_models_dir = next("models");
         else if (a == "--adapters-dir") g_adapters_dir = next("");
         else if (a == "--prompts-dir")  g_prompts_dir = next("prompts");
@@ -932,6 +937,8 @@ int main(int argc, char** argv) {
         std::string body = "{\"status\":\"ok\",\"model\":\"" + g_variant + "\",\"encoding\":\"" +
                            g_encoding + "\",\"t5_encoding\":\"" +
                            (g_t5_encoding.empty() ? "auto" : g_t5_encoding) +
+                           "\",\"ae_encoding\":\"" +
+                           (g_ae_encoding.empty() ? "auto" : g_ae_encoding) +
                            "\",\"loaded\":" + (loaded ? "true" : "false") +
                            ",\"loudness_defaults\":" + loudness_params_json(sa3::loudness_defaults_from_env()) + "}";
         res.set_content(body, "application/json");
