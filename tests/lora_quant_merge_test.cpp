@@ -4,7 +4,7 @@
 // mul_mat and nothing hands it adapter tensors — so a q4/q5/q8 AE can only carry a decoder or
 // encoder adapter if write_from_f32 can re-pack W_eff into the base's own quantized type.
 //
-// Two things are worth pinning, and they are different claims:
+// Three things are worth pinning, and they are different claims:
 //
 //   1. It does not CORRUPT. The pre-existing else-branch wrote n*sizeof(float) into whatever
 //      buffer it was handed; for Q4_K (~0.56 bytes/element) that is a ~7x overrun reported as a
@@ -15,6 +15,13 @@
 //      land within the error the base's own quantization already carries — i.e. re-quantizing
 //      is not materially worse than the quantization that shipped. That is measured against a
 //      control: quantize the UNADAPTED W and compare, which is the error floor of the format.
+//
+//   3. It TAKES A ROUTE THIS BACKEND CAN RUN. apply_loras picks between a graph merge (ggml_cast
+//      + ggml_cpy) and a host re-quantize. The CPU backend has f32 -> k-quant copies and Metal
+//      does not, so a CPU-only run cannot tell the two routes apart — which is how the Metal
+//      abort fixed in d45cebc survived this test. Hence sa3_test_backends(), not one backend.
+//      F16 is not redundant here: it is the only type that stays on the graph path, so an
+//      over-correction routing everything to the host fails too.
 #include "lora.h"
 #include "test_backend.h"
 
@@ -34,7 +41,9 @@ static void expect(bool ok, const std::string& msg) {
 // weight in the real AE is (256 / 1536 / 4608).
 static const int64_t kIn = 512, kOut = 64, kRank = 8;
 
-static ggml_backend_t backend() { return sa3_test_cpu_backend(); }
+// Set by main() for each backend in turn; every allocation below goes through it.
+static ggml_backend_t g_backend = nullptr;
+static ggml_backend_t backend() { return g_backend; }
 
 // One tensor of `type`, holding the quantized form of `w` (row-major [out][in]).
 static void build_base(sa3::GgufModel& m, const std::string& name, ggml_type type,
@@ -118,6 +127,11 @@ static void run_type(ggml_type type) {
     stack[0].alpha = alpha;
     stack[0].strength = strength;
 
+    // Printed before the merge, unterminated and flushed: a wrong route does not throw, it
+    // aborts inside the backend, so this half-line is what says which type died.
+    std::printf("  %-8s ", tname);
+    std::fflush(stdout);
+
     bool threw = false;
     try {
         sa3::apply_loras(base, stack);
@@ -139,8 +153,8 @@ static void run_type(ggml_type type) {
     expect(err < floor_err * 3.0 + 1e-9,
            std::string(tname) + ": merged error " + std::to_string(err) +
            " should stay near the format floor " + std::to_string(floor_err));
-    std::printf("  %-8s merged rms err %.3e   format floor %.3e   ratio %.2fx\n",
-                tname, err, floor_err, floor_err > 0 ? err / floor_err : 0.0);
+    std::printf("merged rms err %.3e   format floor %.3e   ratio %.2fx\n",
+                err, floor_err, floor_err > 0 ? err / floor_err : 0.0);
 
     base.free();
     stack[0].gguf.free();
@@ -217,10 +231,14 @@ static void run_shape_mismatch() {
 
 int main() {
     std::printf("lora_quant_merge_test\n");
-    for (ggml_type t : { GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, GGML_TYPE_F16 })
-        run_type(t);
-    run_unsupported();
-    run_shape_mismatch();
+    for (const Sa3TestBackend& b : sa3_test_backends()) {
+        g_backend = b.backend;
+        std::printf("[%s]\n", b.name);
+        for (ggml_type t : { GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, GGML_TYPE_F16 })
+            run_type(t);
+        run_unsupported();
+        run_shape_mismatch();
+    }
 
     if (fails) { std::fprintf(stderr, "%d failure(s)\n", fails); return 1; }
     std::printf("OK\n");
