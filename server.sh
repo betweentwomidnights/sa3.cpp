@@ -3,7 +3,7 @@
 # e.g. ./server.sh --model small-music --port 9000.  See docs/SERVER.md.
 set -eu
 BIN=""
-for d in build-cuda build-metal build-vulkan build-hip build-all build; do
+for d in build-cuda build-metal build-opencl build-vulkan build-hip build-all build; do
     if [ -x "$d/bin/sa3-server" ]; then BIN="$d/bin/sa3-server"; break; fi
     if [ -x "$d/bin/Release/sa3-server.exe" ]; then BIN="$d/bin/Release/sa3-server.exe"; break; fi
 done

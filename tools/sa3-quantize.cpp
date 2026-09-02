@@ -36,24 +36,29 @@ struct QuantMix {
     const char *   name;      // --mix value, and the -<NAME>.gguf suffix the resolver looks for
     enum ggml_type body;
     enum ggml_type critical;
+    enum ggml_type embedding;
 };
 
 // Names match the Encoding field in docs/DISTRIBUTION.md (and llama.cpp's spelling), so the
 // --mix value is also the -<NAME>.gguf suffix the resolver looks for once upper-cased.
 static const QuantMix MIXES[] = {
-    { "q4_k_m", GGML_TYPE_Q4_K, GGML_TYPE_Q6_K },
-    { "q5_k_m", GGML_TYPE_Q5_K, GGML_TYPE_Q6_K },
+    { "q4_k_m", GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_Q6_K },
+    { "q5_k_m", GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q6_K },
+    // Generic OpenCL's tiled F16/Q8 GEMMs can exceed the per-kernel work-group
+    // limit on small embedded GPUs. Keep the body on the validated K-quant path,
+    // while Q8_0 embeddings use the lightweight SOA GET_ROWS implementation.
+    { "q4_k_m_opencl", GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0 },
     // Unpromoted Q5_K. The *_k_m mixes always lift embed.weight to Q6_K, which means a Q5_K
     // token-embedding table -- the one tensor that reaches ggml_get_rows -- is otherwise
     // unreachable, leaving the backends' q5_K get_rows kernels untested by this tool.
-    { "q5_k",   GGML_TYPE_Q5_K, GGML_TYPE_Q5_K },
-    { "q8_0",   GGML_TYPE_Q8_0, GGML_TYPE_Q8_0 },
+    { "q5_k",   GGML_TYPE_Q5_K, GGML_TYPE_Q5_K, GGML_TYPE_Q5_K },
+    { "q8_0",   GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0 },
     // Re-encode targets rather than quantization. --mix f16 on an already-quantized gguf
     // dequantizes it back to F16, keeping the quantization error: an F16-sized model that is
     // numerically the quantized one. Lets code paths that cannot read quantized tensors
     // (LoRA weight-space merging) be measured against quantized weights.
-    { "f16",    GGML_TYPE_F16,  GGML_TYPE_F16  },
-    { "f32",    GGML_TYPE_F32,  GGML_TYPE_F32  },
+    { "f16",    GGML_TYPE_F16,  GGML_TYPE_F16,  GGML_TYPE_F16 },
+    { "f32",    GGML_TYPE_F32,  GGML_TYPE_F32,  GGML_TYPE_F32 },
 };
 
 // Compact spellings accepted for convenience; they resolve to the canonical mix above.
@@ -69,6 +74,7 @@ static const QuantMix * find_mix(const char * name) {
 }
 
 static enum ggml_type target_type(const QuantMix & mix, const char * name) {
+    if (strstr(name, "embed.weight")) return mix.embedding;
     return use_q6_k(name) ? mix.critical : mix.body;
 }
 
@@ -131,8 +137,9 @@ int main(int argc, char ** argv) {
 
     if (!in_path || !out_path || !mixp) {
         if (in_path && out_path && !mixp) fprintf(stderr, "error: unknown --mix '%s'\n", mix_name);
-        fprintf(stderr, "Usage: sa3-quantize --in <input.gguf> --out <output.gguf> [--mix q4_k_m|q5_k_m|q5_k|q8_0|f16|f32]\n");
+        fprintf(stderr, "Usage: sa3-quantize --in <input.gguf> --out <output.gguf> [--mix q4_k_m|q4_k_m_opencl|q5_k_m|q5_k|q8_0|f16|f32]\n");
         fprintf(stderr, "  q4_k_m  V/down/embed -> Q6_K, rest -> Q4_K   (default)\n");
+        fprintf(stderr, "  q4_k_m_opencl  V/down -> Q6_K, embed -> Q8_0, rest -> Q4_K\n");
         fprintf(stderr, "  q5_k_m  V/down/embed -> Q6_K, rest -> Q5_K\n");
         fprintf(stderr, "  q5_k    everything   -> Q5_K   (no Q6_K promotion; exercises q5_K get_rows)\n");
         fprintf(stderr, "  q8_0    everything   -> Q8_0\n");
@@ -142,8 +149,8 @@ int main(int argc, char ** argv) {
         return 1;
     }
     const QuantMix & mix = *mixp;
-    fprintf(stderr, "mix %s: body=%s critical=%s\n", mix.name,
-            ggml_type_name(mix.body), ggml_type_name(mix.critical));
+    fprintf(stderr, "mix %s: body=%s critical=%s embedding=%s\n", mix.name,
+            ggml_type_name(mix.body), ggml_type_name(mix.critical), ggml_type_name(mix.embedding));
 
     // ── Open input ────
     struct gguf_init_params params = { /*no_alloc =*/ true, /*ctx =*/ nullptr };  // C++17: no designated initializers

@@ -32,4 +32,19 @@ inline const std::vector<std::string>& encoding_labels() {
     return v;
 }
 
+// Text encoders additionally support an embedded-OpenCL mix produced by
+// `sa3-quantize --mix q4_k_m_opencl`: Q4_K body, Q6_K critical projections,
+// and a Q8_0 token table that the OpenCL GET_ROWS kernel can dequantize.
+inline std::string text_encoder_encoding_suffix(const std::string& encoding) {
+    if (encoding == "q4_k_m_opencl" || encoding == "Q4_K_M_OPENCL") return "Q4_K_M_OPENCL";
+    return encoding_suffix(encoding);
+}
+
+inline const std::vector<std::string>& text_encoder_encoding_labels() {
+    static const std::vector<std::string> v = {
+        "F16", "F32", "Q4_K_M", "Q4_K_M_OPENCL", "Q5_K_M", "Q5_K", "Q8_0"
+    };
+    return v;
+}
+
 } // namespace sa3

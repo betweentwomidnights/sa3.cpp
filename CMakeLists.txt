@@ -14,10 +14,10 @@ endif()
 # Put our binaries next to the ggml DLLs so tools run without PATH juggling.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# Backend toggles (forwarded to the vanilla ggml submodule).
-# CUDA is our first-class target; others are end-stage goals.
+# Backend toggles (forwarded to the pinned ggml submodule).
 option(SA3_CUDA   "Build the GGML CUDA backend"        OFF)
 option(SA3_VULKAN "Build the GGML Vulkan backend"      OFF)
+option(SA3_OPENCL "Build the GGML OpenCL backend"      OFF)
 option(SA3_METAL  "Build the GGML Metal backend"       OFF)
 option(SA3_HIP    "Build the GGML HIP/ROCm backend"    OFF)
 
@@ -71,6 +71,9 @@ if(SA3_CUDA)
 endif()
 if(SA3_VULKAN)
     set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+endif()
+if(SA3_OPENCL)
+    set(GGML_OPENCL ON CACHE BOOL "" FORCE)
 endif()
 if(SA3_METAL)
     set(GGML_METAL ON CACHE BOOL "" FORCE)

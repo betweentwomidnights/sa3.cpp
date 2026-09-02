@@ -81,6 +81,20 @@ static void case_(const std::string& tag, const std::string& dit_enc,
     fs::remove_all(d);
 }
 
+static void text_encoder_opencl_case() {
+    fs::path d = fs::temp_directory_path() / "sa3_ae_test_opencl_t5";
+    fs::remove_all(d);
+    fs::create_directories(d);
+    const fs::path model = d / "t5gemma-b-b-ul2-encoder-0.3B-v1.0-Q4_K_M_OPENCL.gguf";
+    touch(model);
+
+    std::string err;
+    const std::string got = sa3::resolve_text_encoder(d.string(), "q4_k_m_opencl", err);
+    expect(got == model.string(), "OpenCL text-encoder mix did not resolve: " + err);
+    std::printf("  %-28s -> %s\n", "explicit OpenCL T5 mix", fs::path(got).filename().string().c_str());
+    fs::remove_all(d);
+}
+
 int main() {
     std::printf("model_paths_ae_test\n");
 
@@ -99,6 +113,7 @@ int main() {
     // An explicit request for something absent is an error, not a silent substitution.
     case_("explicit missing tier", "F16", {"F16"}, "q8_0", "", "");
     case_("explicit bogus tier", "F16", {"F16"}, "nonsense", "", "");
+    text_encoder_opencl_case();
 
     if (fails) { std::fprintf(stderr, "%d failure(s)\n", fails); return 1; }
     std::printf("OK\n");

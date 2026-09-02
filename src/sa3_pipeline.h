@@ -427,13 +427,13 @@ inline std::string resolve_text_encoder(const std::string& md, const std::string
     };
     auto available = [&]() {
         std::string alt;
-        for (const std::string& e : encoding_labels())
+        for (const std::string& e : text_encoder_encoding_labels())
             if (!present(e).empty()) alt += (alt.empty() ? "" : ", ") + e;
         return alt;
     };
 
     if (!text_encoding.empty()) {
-        const std::string ENC = encoding_suffix(text_encoding);
+        const std::string ENC = text_encoder_encoding_suffix(text_encoding);
         if (ENC.empty()) {
             err += (err.empty() ? "" : "; ") +
                    ("unknown text-encoder encoding '" + text_encoding + "'");
@@ -776,6 +776,15 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     const DitConfig& dc = dc_;
     const SameConfig& sc = sc_;
     ggml_backend_t shared_backend = backend_;
+    auto dump_gen = [](const char* name, const std::vector<float>& values) {
+        const char* dir = getenv("SA3_DUMP_GEN");
+        if (!dir) return;
+        const std::string path = std::string(dir) + "/" + name + ".f32";
+        FILE* f = fopen(path.c_str(), "wb");
+        if (!f) throw std::runtime_error("cannot write diagnostic tensor " + path);
+        fwrite(values.data(), sizeof(float), values.size(), f);
+        fclose(f);
+    };
 
     const std::string& prompt = params.prompt;
     int frames = params.frames;
@@ -1006,6 +1015,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         FILE* f2 = fopen((std::string(dc_dir)+"/gen_global.f32").c_str(), "wb");
         fwrite(globb.data(), sizeof(float), globb.size(), f2); fclose(f2);
     }
+    dump_gen("conditioning_cross", crossb);
+    dump_gen("conditioning_global", globb);
     profile_log(prof, "conditioning", wall_time_s() - t0);
 
     // ---------- schedule (SA3 distribution shift; default = LogSNR rate=0) ----------
@@ -1322,6 +1333,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                    (do_cfg && tcur >= cfg_interval_min && tcur <= cfg_interval_max) ? "  (cfg)" : "");
         if (params.should_cancel && params.should_cancel()) { dit_cancelled = true; break; }
     }
+    dump_gen("latent", host_x);
     profile_log(prof, "dit_upload", dit_upload);
     profile_log(prof, "dit_compute", dit_compute);
     profile_log(prof, "dit_get_update", dit_download_update);
@@ -1466,6 +1478,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     profile_log(prof, "dec_compute", dec_compute);
     profile_log(prof, "dec_download", dec_download);
     profile_log(prof, "dec_total", wall_time_s() - t_dec_total);
+    dump_gen("decoded_audio", ab);
 
     if (!keep_models) {
         AE.free();

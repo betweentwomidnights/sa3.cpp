@@ -40,7 +40,7 @@ git clone --recurse-submodules https://github.com/betweentwomidnights/sa3.cpp.gi
 cd sa3.cpp
 
 # 1. build a backend (own dir each, so they coexist)
-./build.sh cuda        # or: cpu | vulkan | hip | metal | all     (windows: build.cmd cuda)
+./build.sh cuda        # or: cpu | vulkan | opencl | hip | metal | all     (windows: build.cmd cuda)
 
 # 2. download a model set into ./models  (no python — curl from HuggingFace)
 ./models.sh            # windows: models.cmd    (add --training-base for native LoRA training)
@@ -91,9 +91,11 @@ set them locally — see [`.env.example`](.env.example). precedence is **flag > 
 | device / cpu threads / flash | `SA3_DEVICE` `SA3_GPU` `SA3_THREADS` `SA3_FLASH_ATTN` | `--threads` | auto |
 
 build needs cmake + a c++17 compiler (Visual Studio 2022 on windows). cuda needs the CUDA
-Toolkit; vulkan needs the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home); metal is macOS-only.
+Toolkit; vulkan needs the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home); OpenCL needs its
+development headers/loader; metal is macOS-only.
 backend + packaging details: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) ·
-[docs/VULKAN.md](docs/VULKAN.md) · [docs/METAL.md](docs/METAL.md) · [docs/HIP.md](docs/HIP.md).
+[docs/VULKAN.md](docs/VULKAN.md) · [docs/OPENCL.md](docs/OPENCL.md) ·
+[docs/METAL.md](docs/METAL.md) · [docs/HIP.md](docs/HIP.md).
 there's also a small HTTP server (`./server.sh` / `server.cmd`) — see [docs/SERVER.md](docs/SERVER.md).
 native adapter training is documented in [docs/TRAINING.md](docs/TRAINING.md), with measured backend
 and PyTorch comparisons in [docs/TRAINING_BENCHMARKS.md](docs/TRAINING_BENCHMARKS.md).
@@ -124,6 +126,9 @@ what works:
 - vulkan backend + fp16 — validated on NVIDIA dGPU, Intel iGPU, and AMD Radeon 780M/RADV,
   including long-form via `--chunked-decode`. this is the working path on AMD (not HIP).
   see [docs/VULKAN.md](docs/VULKAN.md).
+- OpenCL backend — experimental end-to-end `small-music` Q4 inference is working on Arduino UNO Q /
+  Adreno 702 via Mesa/Rusticl. It currently needs a compatibility mode and serialized dispatches,
+  so correctness is established but performance is not yet representative. See [docs/OPENCL.md](docs/OPENCL.md).
 
 what's next:
 
@@ -137,6 +142,11 @@ what's next:
 - [x] vulkan/radv long-form stability — 780M/RADV lost the device around 200s on a monolithic
   decode; `--chunked-decode` fixes it (thanks @bakamomi for confirming on 780M/RADV)
 - [x] metal backend builds + smoke-tests on Apple M4
+- [x] OpenCL on Arduino UNO Q / Adreno 702 — native build, CPU-reference operator checks, and
+  `small-music` Q4 inference ([docs/OPENCL.md](docs/OPENCL.md))
+- [ ] OpenCL optimization on UNO Q — isolate the fault requiring serialized dispatches, tune
+  measured kernel hotspots, and collect warm CPU/OpenCL benchmarks. Medium Q4 is plausible with
+  existing frugal phase unloading, but remains untested on this board (see [docs/OPENCL.md](docs/OPENCL.md)).
 - [ ] hip/rocm for amd — not working: selects the device but gfx1103/780M aborts in HIP
   code-object loading (#6). on that hardware use the vulkan backend + `--chunked-decode` instead.
   **[ROCm tester wanted](docs/HIP.md)** 🙏
