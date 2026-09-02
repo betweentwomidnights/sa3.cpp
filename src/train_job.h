@@ -554,6 +554,10 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 cache_key.target_latent_rms = cfg.target_latent_rms;
                 int cache_hits = 0, cache_writes = 0;
                 bool cache_write_failed = false;
+                // Built on the first window and reused for every chunk, file and loudness pass:
+                // the shape never varies, and rebuilding it per chunk left Metal holding a wired
+                // buffer per allocation for keep_alive_s.
+                sa3::TrainSameEncoder encoder;
                 for (const auto& pair : train_pairs) {
                     // Checked per FILE, because that is the granularity available: one iteration
                     // decodes a whole track and encodes it full-length, which on a phone is
@@ -586,7 +590,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                             continue;
                         }
                     }
-                    if (!sa3::train_pre_encode_file(ae, sc, decoded, cfg.target_latent_rms, e, err))
+                    if (!sa3::train_pre_encode_file(encoder, ae, sc, decoded, cfg.target_latent_rms, e, err))
                         throw std::runtime_error(err);
                     train_job_logf(hooks, "[pre-encode] %s: %.1fs -> %d frames, gain %.4f, rms %.4f -> %.4f (%d rounds)\n",
                                  stem.c_str(), e.seconds_total, e.n_valid, e.gain, e.rms_pre, e.rms_achieved, e.norm_rounds);
@@ -625,6 +629,9 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                                           : sa3::load_gguf(paths.cond.c_str(), backend);
             }
         }
+        // The legacy per-step encode (--pre-encode false) has the same shape every step, so it
+        // reuses one graph too rather than allocating a backend buffer per step.
+        sa3::TrainSameEncoder step_encoder;
         sa3::TrainDitGraph graph;
         sa3::TrainDitCkpt ck;
         // Checkpointed (per-block) backward: peak activation memory is one block's working set,
@@ -843,7 +850,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                     if (!sa3::prepare_train_audio_window(decoded, target_samples, crop_start, windowed, err))
                         throw std::runtime_error(err);
                     p1 = tnow();
-                    if (!sa3::encode_train_audio_to_latents(ae, sc, windowed, latents, err))
+                    if (!sa3::train_same_encoder_run(step_encoder, ae, sc, windowed, latents, err))
                         throw std::runtime_error(err);
                     // Legacy behavior: full-file duration, ceil'd to whole seconds.
                     seconds_total = std::ceil((double)decoded.n_samples / 44100.0);

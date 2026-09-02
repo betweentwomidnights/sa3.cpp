@@ -72,7 +72,8 @@ using TrainLatentCache = std::map<std::string, TrainLatentEntry>;
 // One full-file encode pass on the reference chunk grid at a given audio gain.
 // z is filled as [latent, total_latents]; only chunks whose kept frames intersect
 // [0, n_valid) are encoded (the rest is padding that training crops never read).
-inline bool train_pre_encode_stitched(GgufModel& ae, const SameConfig& sc, const TrainAudio& full,
+inline bool train_pre_encode_stitched(TrainSameEncoder& enc, GgufModel& ae, const SameConfig& sc,
+                                      const TrainAudio& full,
                                       int64_t actual_samples, int n_valid, int total_latents,
                                       float gain, std::vector<float>& z, std::string& err) {
     const int ds = sc.patch_size * sc.output_seg;
@@ -114,7 +115,7 @@ inline bool train_pre_encode_stitched(GgufModel& ae, const SameConfig& sc, const
             }
         }
         TrainLatents lat;
-        if (!encode_train_audio_to_latents(ae, sc, win, lat, err)) return false;
+        if (!train_same_encoder_run(enc, ae, sc, win, lat, err)) return false;
         if (lat.latent != sc.latent || lat.frames != chunk_lat) {
             err = "pre-encode chunk produced unexpected latent shape";
             return false;
@@ -128,7 +129,8 @@ inline bool train_pre_encode_stitched(GgufModel& ae, const SameConfig& sc, const
 
 // Full-file pre-encode with the optional per-track latent-RMS loudness fix
 // (target_rms <= 0 disables it, matching pre_encode.py's flag default).
-inline bool train_pre_encode_file(GgufModel& ae, const SameConfig& sc, const TrainAudio& full,
+inline bool train_pre_encode_file(TrainSameEncoder& enc, GgufModel& ae, const SameConfig& sc,
+                                  const TrainAudio& full,
                                   float target_rms, TrainLatentEntry& out, std::string& err) {
     const int ds = sc.patch_size * sc.output_seg;
     const int64_t max_samples = (int64_t)(kPreEncodePadSeconds * full.sample_rate) / ds * ds;
@@ -146,7 +148,7 @@ inline bool train_pre_encode_file(GgufModel& ae, const SameConfig& sc, const Tra
     std::vector<float> z;
     const int iters = target_rms > 0.0f ? kPreEncodeNormIters : 0;
     for (int it = 0; it <= iters; ++it) {
-        if (!train_pre_encode_stitched(ae, sc, full, actual, n_valid, total_latents, gain, z, err))
+        if (!train_pre_encode_stitched(enc, ae, sc, full, actual, n_valid, total_latents, gain, z, err))
             return false;
         double ss = 0.0;
         const size_t n = (size_t)sc.latent * (size_t)n_valid;
