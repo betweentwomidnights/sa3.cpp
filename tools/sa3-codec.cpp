@@ -5,10 +5,12 @@
 #include "same_ae.h"
 
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <exception>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 static std::vector<float> read_f32(const char* path, size_t n) {
@@ -25,16 +27,19 @@ static int run(int argc, char** argv) {
     const char* in_path = nullptr;
     const char* mode = "decode";
     int frames = 8;
+    int repeats = 1;
     const char* outdir = ".";
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--gguf")   && i+1 < argc) gguf_path = argv[++i];
         else if (!strcmp(argv[i], "--mode")   && i+1 < argc) mode = argv[++i];
         else if ((!strcmp(argv[i], "--z") || !strcmp(argv[i], "--in")) && i+1 < argc) in_path = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i+1 < argc) frames = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--repeat") && i+1 < argc) repeats = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out")    && i+1 < argc) outdir = argv[++i];
     }
-    if (!gguf_path || !in_path) {
-        fprintf(stderr, "usage: sa3-codec --gguf <f> --mode decode|encode --in <raw.f32> --frames N --out <dir>\n");
+    if (!gguf_path || !in_path || frames <= 0 || repeats <= 0 ||
+        (strcmp(mode, "decode") && strcmp(mode, "encode"))) {
+        fprintf(stderr, "usage: sa3-codec --gguf <f> --mode decode|encode --in <raw.f32> --frames N --repeat N --out <dir>\n");
         return 1;
     }
     const bool encode = !strcmp(mode, "encode");
@@ -87,10 +92,9 @@ static int run(int argc, char** argv) {
     for (auto& t : taps) ggml_build_forward_expand(gf, t.first);
 
     ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(W.backend));
-    ggml_gallocr_alloc_graph(alloc, gf);
+    if (!ggml_gallocr_alloc_graph(alloc, gf)) throw std::runtime_error("codec graph allocation failed");
 
     std::vector<float> inbuf = read_f32(in_path, ggml_nelements(in));
-    ggml_backend_tensor_set(in, inbuf.data(), 0, inbuf.size()*sizeof(float));
 
     auto set_pos = [&](ggml_tensor* p, int64_t n){ std::vector<int32_t> b(n); for (int i=0;i<n;i++) b[i]=i; ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t)); };
     auto set_swa = [&](ggml_tensor* mt){       // SAME-L sliding-window bias; no-op when unused (SAME-S)
@@ -101,13 +105,31 @@ static int run(int argc, char** argv) {
     set_pos(pos, N); set_swa(mask);
     if (chunked) set_pos(pos2, N2);            // mask2 unused (block-diagonal)
 
-    ggml_backend_graph_compute(W.backend, gf);
+    for (int rep = 0; rep < repeats; ++rep) {
+        // The graph allocator may reuse input storage for in-place intermediates.
+        // Restore the fixed host input before EVERY repeat, outside compute timing.
+        ggml_backend_tensor_set(in, inbuf.data(), 0, inbuf.size()*sizeof(float));
+        const auto start = std::chrono::steady_clock::now();
+        if (ggml_backend_graph_compute(W.backend, gf) != GGML_STATUS_SUCCESS) {
+            throw std::runtime_error("codec graph compute failed");
+        }
+        ggml_backend_synchronize(W.backend);
+        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        printf("codec compute repeat %d/%d: %.6f s\n", rep + 1, repeats, elapsed);
+    }
 
     for (auto& t : taps) {
         std::vector<float> b(ggml_nelements(t.first));
         ggml_backend_tensor_get(t.first, b.data(), 0, b.size()*sizeof(float));
+        for (float value : b) {
+            if (!std::isfinite(value)) throw std::runtime_error("nonfinite codec output");
+        }
         std::string fn = std::string(outdir) + "/" + t.second + ".f32";
-        FILE* f = fopen(fn.c_str(), "wb"); fwrite(b.data(), sizeof(float), b.size(), f); fclose(f);
+        FILE* f = fopen(fn.c_str(), "wb");
+        if (!f) throw std::runtime_error("cannot write " + fn);
+        const size_t written = fwrite(b.data(), sizeof(float), b.size(), f);
+        const int closed = fclose(f);
+        if (written != b.size() || closed != 0) throw std::runtime_error("short write " + fn);
         printf("  dumped %-20s ne=[%lld,%lld,%lld]\n", t.second,
                (long long)t.first->ne[0], (long long)t.first->ne[1], (long long)t.first->ne[2]);
     }

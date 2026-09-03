@@ -30,9 +30,12 @@ def main():
     parser.add_argument("reference", type=Path, nargs="?")
     parser.add_argument("--tensor", default="t5g_hidden.f32", help="raw F32 filename within each run")
     parser.add_argument("--no-profile", action="store_true")
+    parser.add_argument("--profile-only", action="store_true", help="operator runs without tensor dumps")
     args = parser.parse_args()
     root = args.run
     profile = root / "cl_profiling.csv"
+    if args.profile_only and (args.no_profile or not profile.exists()):
+        parser.error("--profile-only requires cl_profiling.csv and cannot use --no-profile")
     if profile.exists() and not args.no_profile:
         grouped = defaultdict(lambda: [0, 0.0, 0.0, 0.0])
         with profile.open(newline="") as stream:
@@ -47,6 +50,8 @@ def main():
         print("totals:", [sum(row[i] for row in grouped.values()) for i in range(4)])
         events = json.loads((root / "cl_trace.json").read_text())
         print("valid trace JSON; events:", len(events))
+    if args.profile_only:
+        return
     output = floats(root / args.tensor)
     bad = sum(not math.isfinite(x) for x in output)
     print("elements:", len(output), "nonfinite:", bad)

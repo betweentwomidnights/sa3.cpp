@@ -221,10 +221,10 @@ inline void set_swa_bias(ggml_tensor* mt, const SameConfig& sc, int64_t N) {
     }
 }
 
-// Fill a position tensor with [0,1,...,n-1] (shared by chunked encode + decode).
-inline void set_positions(ggml_tensor* p, int n) {
+// Fill positions, optionally retaining the global origin for an outer decode tile.
+inline void set_positions(ggml_tensor* p, int n, int offset = 0) {
     std::vector<int32_t> b(n);
-    for (int i = 0; i < n; i++) b[i] = i;
+    for (int i = 0; i < n; i++) b[i] = offset + i;
     ggml_backend_tensor_set(p, b.data(), 0, n*sizeof(int32_t));
 }
 
@@ -825,6 +825,18 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (decode_chunk_size < 0 || decode_overlap < 0 ||
         (decode_chunk_size > 0 && decode_overlap >= decode_chunk_size))
         throw std::runtime_error("invalid decode_chunk_size/decode_overlap");
+    const char* same_s_chunk_env = getenv("SA3_EXPERIMENTAL_SAME_S_CHUNKED");
+    const bool same_s_outer_chunks = sc.chunk && same_s_chunk_env && !strcmp(same_s_chunk_env, "1");
+    if (same_s_outer_chunks && decode_chunk_size > 0) {
+        // Preserve SAME-S's two-latent attention-block alignment at every tile
+        // origin, including the end-anchored tile. Keep a conservative halo;
+        // smaller overlaps require separate receptive-field validation.
+        if (sc.eff_chunk != 2*sc.sub_chunk || sc.shift != sc.sub_chunk ||
+            decode_chunk_size % 2 || decode_overlap < 16 || decode_overlap % 4) {
+            throw std::runtime_error("experimental SAME-S decode requires two-latent block geometry, "
+                "an even chunk size, and overlap >= 16 divisible by 4");
+        }
+    }
 
     int same_l_flash_mode = sc.chunk ? 0 : nn::same_flash_attn_mode();
     if (same_l_flash_mode == 2) {
@@ -1399,7 +1411,13 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         dec_build += wall_time_s() - ts;
         ts = wall_time_s();
         dg.alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(AE.backend));
-        ggml_gallocr_alloc_graph(dg.alloc, dg.graph);
+        if (!ggml_gallocr_alloc_graph(dg.alloc, dg.graph)) {
+            ggml_gallocr_free(dg.alloc);
+            ggml_free(dg.ctx);
+            throw std::runtime_error("decoder graph allocation failed");
+        }
+        if (prof) fprintf(stderr, "[sa3-profile] dec_graph frames=%d buffer_bytes=%zu\n",
+                          run_T, ggml_gallocr_get_buffer_size(dg.alloc, 0));
         dec_alloc += wall_time_s() - ts;
         dg.n_samp = (int)dg.audio->ne[0];
         dg.n_ch = (int)dg.audio->ne[1];
@@ -1410,12 +1428,15 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         ggml_free(dg.ctx);
         dg = DecodeGraph{};
     };
-    auto run_decode_graph = [&](DecodeGraph& dg, const float* z_src, std::vector<float>& out) {
+    auto run_decode_graph = [&](DecodeGraph& dg, const float* z_src, std::vector<float>& out, int frame_offset) {
         double ts = wall_time_s();
         ggml_backend_tensor_set(dg.z, z_src, 0, (size_t)sc.latent*dg.T*sizeof(float));
-        set_positions(dg.pos, dg.Ndec);
+        // SAME-S's sinusoidal blocks can amplify tiny rotary rounding differences.
+        // Match the monolithic positions, not just mathematically equivalent relative offsets.
+        const int pos_offset = sc.chunk ? frame_offset * sc.sub_chunk : 0;
+        set_positions(dg.pos, dg.Ndec, pos_offset);
         set_swa_bias(dg.mask, sc, dg.Ndec);
-        if (sc.chunk) set_positions(dg.pos2, dg.N2);
+        if (sc.chunk) set_positions(dg.pos2, dg.N2, pos_offset);
         dec_upload += wall_time_s() - ts;
         ts = wall_time_s();
         ggml_backend_graph_compute(AE.backend, dg.graph);
@@ -1426,8 +1447,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         dec_download += wall_time_s() - ts;
     };
 
-    const bool can_chunk_decode = decode_chunk_size > 0 && !sc.chunk && T >= decode_chunk_size;
-    if (decode_chunk_size > 0 && sc.chunk)
+    const bool can_chunk_decode = decode_chunk_size > 0 && (!sc.chunk || same_s_outer_chunks) && T >= decode_chunk_size;
+    if (decode_chunk_size > 0 && sc.chunk && !same_s_outer_chunks)
         fprintf(stderr, "warning: outer --chunked-decode is only enabled for SAME-L; using monolithic SAME-S decode\n");
 
     const int n_ch = sc.out_channels / sc.patch_size;
@@ -1437,15 +1458,15 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (!can_chunk_decode) {
         throw_if_cancelled(params.should_cancel);
         DecodeGraph dg = build_decode_graph(T);
-        run_decode_graph(dg, host_x.data(), ab);
+        run_decode_graph(dg, host_x.data(), ab, 0);
         free_decode_graph(dg);
         if (params.on_progress) params.on_progress({"decoding", 1, 1, 0.95f});  // match chunked path
         if (params.should_cancel && params.should_cancel())
             throw_cancelled_after_frugal_cleanup();
     } else {
         const std::vector<ChunkTile> tiles = plan_chunks(T, decode_chunk_size, decode_overlap);
-        fprintf(stderr, "[sa3] chunked SAME-L decode: %zu chunks, size=%d overlap=%d\n",
-                tiles.size(), decode_chunk_size, decode_overlap);
+        fprintf(stderr, "[sa3] chunked %s decode: %zu chunks, size=%d overlap=%d\n",
+                sc.chunk ? "SAME-S (experimental)" : "SAME-L", tiles.size(), decode_chunk_size, decode_overlap);
         DecodeGraph dg = build_decode_graph(decode_chunk_size);
         std::vector<float> zchunk((size_t)sc.latent * decode_chunk_size);
         std::vector<float> chunk_audio;
@@ -1456,7 +1477,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             const ChunkTile& tl = tiles[i];   // decode stitches in samples: scale the plan by ds
             for (int t = 0; t < decode_chunk_size; t++)
                 memcpy(&zchunk[(size_t)t*sc.latent], &host_x[(size_t)(tl.src + t)*sc.latent], sc.latent*sizeof(float));
-            run_decode_graph(dg, zchunk.data(), chunk_audio);
+            run_decode_graph(dg, zchunk.data(), chunk_audio, tl.src);
             if (params.on_progress)
                 params.on_progress({"decoding", (int)(i+1), (int)tiles.size(),
                                     0.9f + 0.1f * (float)(i+1) / (float)tiles.size()});

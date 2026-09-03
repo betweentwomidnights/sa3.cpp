@@ -20,7 +20,7 @@ currently needs the experimental Rusticl compatibility mode described below.
 
 ## Arduino UNO Q status
 
-An end-to-end `small-music` Q4 generation has completed on an UNO Q's FD702 GPU and produced a
+End-to-end `small-music` Q4 and F16 smoke generations have completed on an UNO Q's FD702 GPU and produced a
 finite, non-silent 44.1 kHz stereo WAV. This is a correctness milestone, not yet a fast inference
 path.
 
@@ -86,9 +86,10 @@ matched A/B runs.
 
 ## OpenCL-compatible T5 encoding
 
-The published F16 and all-Q8 T5 encoders reach tiled GEMM kernels that request 128 work-items;
+On the preserved baseline, the published F16 and all-Q8 T5 encoders reach tiled GEMM kernels that request 128 work-items;
 Rusticl reports a smaller resource-limited maximum for those kernels on FD702. Use the custom
-`q4_k_m_opencl` mix instead:
+`q4_k_m_opencl` mix for that baseline. The opt-in float-tile candidate below now also runs the
+published F16 encoder. The custom mix is:
 
 - Q4_K for the main weights;
 - Q6_K for accuracy-sensitive projections;
@@ -216,7 +217,7 @@ against the CPU backend. Before trusting longer output:
    end-to-end time, peak memory, swap, temperature, and throttling. GPU wins are a measured goal,
    not guaranteed for every workload. If only some phases win, evaluate explicit hybrid placement
    including transfer costs rather than forcing all phases onto the GPU.
-6. Validate medium separately after shared kernels stabilize. SAME-S currently runs as one outer
+6. Validate medium separately after shared kernels stabilize. SAME-S defaults to one outer
    decode graph but uses internal block-diagonal/shifted attention; SAME-L uses sliding-window
    attention and supports outer overlap tiling. Medium also changes matrix shapes and resource
    pressure, so small-model tuning does not establish medium coverage. Start with a short frugal
@@ -328,3 +329,242 @@ Useful operator-test examples:
 Mesa 26.2.1 currently prints a warning about not detecting a patched `libclc` when using the
 extracted prefix. The tested kernels still compile and pass the CPU-reference cases, but the
 warning should remain visible until the board image has a fully integrated Mesa/libclc stack.
+
+## Float-tile precision experiment
+
+`GGML_OPENCL_RUSTICL_TILED_FLOAT=1`, together with Rusticl compatibility mode, opts into a
+32-work-item, 32x32 output / K=32 tile for F16 or F32 weights and F32 activations/accumulation.
+Shared rows have a 33-float pitch (8.25 KiB total), an experiment in reducing bank conflicts.
+It supports byte-strided inputs and host-dispatched broadcast batches; it does not imply native
+half arithmetic. The candidate is selected only when its reported per-kernel work-group limit
+allows 32 work-items. The older F16 tile now also checks its 128-work-item requirement before
+selection. Other devices retain their existing float dispatch paths.
+
+Run correctness before performance, without overlapping builds or other benchmark processes:
+
+```bash
+bash tools/unoq-precision.sh test GPUOpenCL
+bash tools/unoq-precision.sh perf CPU
+bash tools/unoq-precision.sh perf GPUOpenCL
+GGML_OPENCL_RUSTICL_TILED_K=1 GGML_OPENCL_RUSTICL_TILED_FLOAT=1 \
+  bash tools/unoq-textenc.sh safe 1 3 256
+SA3_UNOQ_T5_WEIGHTS=/home/arduino/sa3-models/t5gemma-b-b-ul2-encoder-0.3B-v1.0-F16.gguf \
+  GGML_OPENCL_RUSTICL_TILED_FLOAT=1 bash tools/unoq-textenc.sh safe 1 3 256
+```
+
+The operator sweep uses identical M/N/K shapes, not identical quantized values across precisions.
+Each correctness case compares against CPU at the same weight precision. The performance suite
+uses its own warmup/repetition policy and the board's four CPU threads. It remains an instrumented
+microbenchmark, not end-to-end latency. Existing K-quant kernels fuse tile dequantization into
+floating-point multiplication; measured kernel time does not isolate dequantization cost.
+Use `tools/unoq-profile-summary.py RUN --profile-only` to inspect operator-only profiles.
+
+`tools/unoq-generate.sh DEVICE DIT_PRECISION AE_PRECISION T5_PRECISION` runs the established
+one-step, 0.1-second smoke with stage dumps and resource statistics, using both candidate tile
+switches. Defaults are GPU / Q4_K_M / Q4_K_M / Q4_K_M_OPENCL. It intentionally does not keep all
+models resident. Compare CPU/GPU with matching encodings; compare fixed-latent codec output
+separately before attributing generated-waveform differences to codec precision.
+
+Reference lessons from Stability AI's `optimized/tflite` implementation: precision is a per-stage
+decision, weight-only quantization is not integer arithmetic, and fixed-shape shared-weight decoder
+plans apply to SAME-S as well as SAME-L. SAME-S outer tiling is gated by the separate experimental
+switch documented below; it is not enabled by the kernel switches. The UNO Q CPU does
+not advertise `asimddp` or `i8mm`, so modern-CPU INT8 performance claims do not transfer directly.
+Medium Q4 remains a separate memory-constrained target; small-model float results do not settle it.
+
+Hexagon remains a capability investigation, not an enabled backend: the board exposes root-only
+`/dev/fastrpc-adsp` with a running audio DSP, but no CDSP device was found. The pinned ggml backend
+expects CDSP and targets v73/v75/v79/v81. Audio DSP presence alone does not establish compatibility.
+
+Published F16 small-music DiT and SAME-S weights were fetched from `thepatch/stable-audio-3-small-music-GGUF`
+at revision `e06bd8e9a23de11207334cb57c0599c9c3e5bc42`, without changing the existing Q4 files.
+Their SHA-256 values matched the published LFS hashes before the temporary downloads were renamed:
+
+- DiT, 919,265,984 bytes: `d00baebc5ed850701ff19904d750dd98c03fdadc7c24a8ab0abcad8efba36cb4`.
+- SAME-S, 216,721,728 bytes: `ae34819e33cb188e54c4102125e0926d6739978772923b05e00ce9e74684e736`.
+
+### Operator results (2026-09-02 local / 2026-09-03 UTC)
+
+The final padded candidate passed **22/22** CPU-reference cases (`precision-test-GPUOpenCL-KLfg9Y`).
+These include K=37 tails, M=35/N=33 edges, nonzero view offsets, padded rows, permuted batch/row
+strides and broadcasting in both batch dimensions. Two earlier fixture attempts aborted before
+completing: transposed A is rejected by ggml's graph API, and transposed B is unsupported by this
+CPU reference implementation. Neither abort was a GPU fault; the final fixtures keep K contiguous.
+
+Matched M=768, N=256, K=768, milliseconds per matrix multiplication (lower is better):
+
+| Weight type | CPU, four threads | GPU, initial 32-float pitch | GPU, final 33-float pitch |
+|---|---:|---:|---:|
+| Q4_K | 20.52 | 76.45 | 79.27 |
+| Q6_K | 27.02 | 100.82 | 101.79 |
+| F16 | 33.11 | 88.65 | 89.74 |
+| F32 | 42.46 | 86.60 | 88.23 |
+
+The unchanged quantized paths provide context for run-to-run drift; the small float differences
+do not establish a padding benefit. Float storage is not a speed win on this shape. The initial
+GPU profile recorded 115.95 s of device execution and 117.07 s of inclusive host finishes across
+warmup plus 332 timed iterations per type, confirming compute rather than host synchronization
+dominates. Profiles explicitly contain `mul_mat_f16_f32_small` and `mul_mat_f32_f32_small`.
+Artifacts: `precision-perf-CPU-E5zppQ`, `precision-perf-GPUOpenCL-IZahB8` (initial) and
+`precision-perf-GPUOpenCL-QTlyos` (final). No builds/downloads overlapped these timing sweeps.
+
+One-layer T5, sequence 256, three repetitions:
+
+| Encoding/backend | Compute time | CPU-reference output cosine |
+|---|---:|---:|
+| F16 CPU | 0.454–0.477 s | reference |
+| F16 GPU, float tile | 1.268–1.278 s | 0.9999999983 |
+| Q4 custom GPU, both tiles | 1.206–1.209 s | 0.9999869695 |
+| Q4 custom GPU, previous K tile only | 1.747–1.750 s | 0.99998697 |
+
+All outputs were finite. The FP16 encoder is now runnable, with RMSE 0.000347 against the matching
+CPU result; it uses a 537.14 MiB weight buffer and 7 MiB graph buffer. CPU and GPU peak RSS were
+1,034,344 and 619,344 KiB respectively, with zero swap. The Q4 run uses a 251.35 MiB weight buffer.
+The Q4 graph improved about 31% in latency, mostly from F32 attention: its three-repeat device time
+fell from about 1.84 s to 0.173 s, while CPU-reference agreement remained unchanged. This does not
+make the overall GPU faster than CPU, nor establish that Q4 T5 has equal quality to F16 T5.
+Artifacts: `textenc-cpu-L1-S256-6jqR2H`, `textenc-safe-L1-S256-fn7RR4` (F16), and
+`textenc-safe-L1-S256-cOQXrE` (Q4 with both tiles).
+
+For fixed-latent SAME-S comparisons, build `sa3-codec` and run
+`bash tools/unoq-codec.sh DEVICE ENCODING /absolute/latent.f32 FRAMES` with the same latent file
+for every case. This runs three synchronized repetitions, checks finite output, writes the
+intermediate taps and raw `audio.f32`, and records model/input hashes and process memory statistics.
+Compare with `tools/unoq-profile-summary.py RUN REFERENCE --tensor audio.f32`; this bypasses sampler
+divergence and does not apply the pipeline's loudness processing. It is not a musical quality test.
+
+Cold-start follow-up: `Pipeline::load` currently loads/uploads each complete model sequentially
+to extract configuration, frees it, and then `generate` loads it again at the relevant phase.
+This preserves low simultaneous weight residency but duplicates I/O/upload work. A metadata-only
+configuration reader (plus the small `ae.running_std` tensor) is a concrete next optimization.
+Its contribution to wall time has not yet been isolated; do not attribute all unprofiled time to it.
+
+### Complete small-music smoke and fixed-latent results
+
+One step, 0.1 seconds requested, seed 1, four CPU threads, no simultaneous model residency:
+
+| Configuration | T5 compute | DiT compute | Decode compute | Process wall | Peak RSS (KiB) |
+|---|---:|---:|---:|---:|---:|
+| Q4 CPU | 3.908 s | 6.411 s | 0.487 s | 14.81 s | 644756 |
+| Q4 GPU, both tiles | 14.387 s | 32.014 s | 3.429 s | 110.38 s | 514960 |
+| F16 CPU | 5.446 s | 8.504 s | 0.645 s | 29.87 s | 1140084 |
+| F16 GPU, float tile | 14.928 s | 31.971 s | 3.480 s | 99.91 s | 714500 |
+
+All four wrote valid 44.1 kHz stereo, 4410-frame WAVs; all float stage dumps were finite, and
+no process swapped. RSS is not total GPU/system memory usage. This establishes F16 feasibility
+for the short smoke, not arbitrary-duration memory fit. The apparent F16 process-time advantage
+on GPU is outside measured compute (50.38 s F16 versus 49.83 s Q4); loading and cache state need
+separate control before attributing that advantage to precision. CPU remains faster.
+
+CPU/GPU cosine by stage: Q4 conditioning 0.998590, latent 0.998025, decoded audio 0.840407;
+F16 conditioning 0.999999719, latent 0.999999390, decoded audio 0.997569. Neither is an exact
+waveform match or a musical-quality evaluation. Q4's prior larger discrepancy remains present.
+
+Fixed input `generate-tiled-FAvhUt/latent.f32` (512 values, RMS 104.86, an extreme one-step latent),
+SAME-S T=2, three repetitions with the original input restored before each repeat:
+
+| SAME-S precision | CPU compute | GPU compute | CPU/GPU audio cosine |
+|---|---:|---:|---:|
+| Q4_K_M | 0.491–0.530 s | 3.432–3.481 s | 0.928944 |
+| F16 | 0.629–0.664 s | 3.436–3.520 s | 0.998243 |
+
+Q4/F16 CPU audio cosine on that same input was 0.835315. These are numerical diagnostics on an
+unrepresentative short sampler output, not evidence about perceptual quality on real music.
+The decoder itself contributes to the divergence, so do not attribute all waveform differences
+to the sampler. Use F16 as the clearer correctness reference while retaining Q4 as the compact
+baseline, and validate realistic latents/listening before selecting production precision.
+
+An initial repetition-harness bug failed to restore the latent after graph execution reused its
+storage. Those earlier codec runs (`aSCHL2`, `Tat1vY`, `hrws7V`, `RqzANK`) are **invalid fixed-input
+comparisons**. The corrected Q4 CPU three-repeat output is bit-identical to an independent one-pass
+run (`codec-repeat-check`). Valid codec artifacts: `codec-cpu-Q4_K_M-2GGAl5`,
+`codec-gpu-Q4_K_M-N1eB9U`, `codec-cpu-F16-d3Pwrf`, `codec-gpu-F16-KLIYPy`.
+Full generation artifacts: `generate-cpu-q4_k_m-q4_k_m-q4_k_m_opencl-Nymcaz`,
+`generate-gpu-q4_k_m-q4_k_m-q4_k_m_opencl-IoDqTY`, `generate-cpu-f16-f16-f16-ZsNWh5`,
+and `generate-gpu-f16-f16-f16-rvdFSK`.
+
+### Experimental fixed-shape SAME-S decoding
+
+`SA3_EXPERIMENTAL_SAME_S_CHUNKED=1` allows the existing outer decode planner to use SAME-S.
+Default behavior remains monolithic. This is **decode only**; SAME-S outer encoding is unchanged.
+The candidate requires the known two-latent attention-block geometry, an even chunk size, and
+overlap at least 16 and divisible by 4 (also strictly smaller than the chunk). It reuses one
+allocated graph and the already loaded AE weights across chunks, restoring each input before
+execution. Retained output regions are stitched without cross-fading.
+
+Absolute RoPE positions must be preserved for both attention halves. Restarting each chunk at
+zero produced cosine 0.73193 against monolithic CPU output, with errors beginning exactly at the
+second chunk's retained region. With global position offsets, the 4-second CPU comparison is
+**bit-identical** for conditioning, latent, all 360,448 decoded float samples, and therefore has
+zero boundary error on this test. This is why relative-position equivalence alone was insufficient
+for enabling this path. SAME-L and encoder position behavior is unchanged.
+
+```bash
+SA3_UNOQ_DURATION=4 bash tools/unoq-generate.sh cpu
+SA3_UNOQ_DURATION=4 SA3_UNOQ_DECODE_CHUNK=32 \
+  SA3_EXPERIMENTAL_SAME_S_CHUNKED=1 bash tools/unoq-generate.sh cpu
+```
+
+The 44-frame reference used a 36,116,480-byte decoder graph buffer; the reused 32-frame graph uses
+26,665,376 bytes (about 26% less). Decode compute increased from 7.39 to 10.92 seconds because two
+overlapping chunks process 64 frames in total. Whole-process peak RSS remained about 645,000 KiB,
+dominated by other phases: do not describe the graph-buffer reduction as an overall RSS reduction.
+CPU artifacts: `generate-cpu-q4_k_m-q4_k_m-q4_k_m_opencl-COJMWA` (monolithic),
+`generate-cpu-q4_k_m-q4_k_m-q4_k_m_opencl-dX82w9` (absolute-position chunks).
+`...-J22GwG` is the failed zero-origin candidate and must not be used as a valid tiling result.
+Medium/SAME-L remains a separate validation target; these SAME-S results do not certify medium.
+
+### Large-dispatch watchdog investigation
+
+The first 4-second GPU monolithic reference (`...-YW8oO5`) failed during SAME-S with OpenCL event
+status -14 and a kernel-driver GPU hang/recovery report. A decoder-only traced replay
+(`codec-gpu-Q4_K_M-kxUKkO`) also failed. Its last submission was Q4_K GEMM with global geometry
+4608x25x1, local 32x1x1; the inclusive finish wait was 1.484 seconds. This suggests a long-submission
+watchdog problem, but a finish wait that includes failure/recovery is not a valid kernel benchmark.
+Neither failed run produced valid decoded output. No reboot, watchdog disabling, or system-driver
+change was used.
+
+`GGML_OPENCL_RUSTICL_GEMM_MAX_COLUMNS=256` opts the candidate F16/F32 and Q4_K/Q6_K tiles into column
+striping. It additionally limits estimated work to approximately 500 MFLOP per submission, rounding
+to 32-column boundaries and accounting for batches in the K-quant kernels. This is a heuristic,
+not a guaranteed execution-time ceiling; a minimum tile can still be too expensive on another
+shape/device. Full batch strides and offsets are retained, including the final partial stripe.
+The value must be a positive multiple of 32; unset disables splitting. The precision, generation,
+and codec experiment runners now enable 256 by default. Earlier timing tables predate splitting.
+
+With the limit forced to **32**, all 22 operator cases passed again
+(`precision-test-GPUOpenCL-eu6NLV`), exercising split output columns, tails, offset views and batches.
+Unchanged work-group geometry and K accumulation order make this a submission-size change rather
+than another arithmetic precision change. Keep serialized dispatch enabled for these tests.
+
+The identical decoder-only 44-frame input then completed with splitting
+(`codec-gpu-Q4_K_M-CSCR1Y`): 41.00 s compute, all output taps finite, a valid 13,514-event profile,
+and a maximum recorded device execution of 152.58 ms per dispatch. No new driver hang/recovery
+was logged. This supports the long-dispatch explanation and provides a mitigation for this
+workload; it does not resolve every previous asynchronous driver fault or certify all shapes.
+
+With splitting enabled, the one-layer Q4 T5 reference (`textenc-safe-L1-S256-2znhUH`) took
+1.198 s per repeat, retaining the earlier float-tile speedup. Both full 4-second, one-step GPU
+runs then completed without a new driver recovery:
+
+| SAME-S decode | Graph buffer | Decode compute | Process wall | Peak RSS |
+|---|---:|---:|---:|---:|
+| Monolithic, 44 frames | 36,116,608 bytes | 37.60 s | 154.17 s | 516708 KiB |
+| Chunk size 32, overlap 16 | 26,665,472 bytes | 56.03 s | 172.56 s | 516764 KiB |
+
+Artifacts: `generate-gpu-q4_k_m-q4_k_m-q4_k_m_opencl-4UBcH6` and
+`generate-gpu-q4_k_m-q4_k_m-q4_k_m_opencl-SOHItp`. Conditioning, latent, and all 360,448 decoded
+floats were **bit-identical between these GPU runs**, matching the CPU chunk-equivalence result.
+Both WAVs contain 176,400 stereo frames at 44.1 kHz. All compared float values were finite.
+The profiles contained 18,345 and 24,841 kernel events, respectively, with maximum device durations
+151.65 and 152.59 ms. This validates the tested four-second shape, not all durations or music quality.
+Chunking saves graph memory but costs overlap compute; whole-process RSS did not decrease.
+
+Invalid chunk size 31 and overlap 12 were also rejected with the expected diagnostic and exit 1
+before generation (`...-vp22ZZ`, `...-IIsnQF`). The latest backend passes a non-profiling C++ syntax
+check; experiment scripts pass `bash -n` and the profile helper passes Python compilation.
+
+Next work should focus on the remaining GEMM device time and avoiding startup's redundant model
+loads. Neither a metadata-only loader nor a Hexagon/Vulkan implementation is included here.
+Keep F16 as an accuracy reference, Q4 as the compact baseline, and medium as a separate validation
+target. The experimental GPU path still does not beat the CPU.
