@@ -1,5 +1,19 @@
 # OpenCL backend
 
+## Local experimental project
+
+Development is isolated on `feature/unoq-opencl-experimental` in both sa3.cpp and its ggml
+submodule. This is a local-only experiment: no push, published fork, or upstream integration is
+implied. The known-working serialized baseline is checkpointed at sa3.cpp `0b355e3` and ggml
+`e7ee7182`. Commit ggml changes first, then update the parent gitlink so each checkpoint identifies
+both source trees. These unpublished pins are not fetchable from GitHub; preserve both repositories
+(or local Git bundles), not just the parent repository. Existing remotes are unchanged.
+
+The UNO Q checkout is the deployment/build copy. Keep the original `build-opencl` as the baseline
+and use `build-opencl-profile` for instrumented work. Match its existing build settings, including
+`GGML_OPENCL_USE_ADRENO_KERNELS=OFF` for the tested generic Rusticl dispatch path; the build helper's
+Adreno-enabled default is not the exact configuration used by this board's baseline.
+
 `./build.sh opencl` builds sa3.cpp and the pinned ggml OpenCL backend in `build-opencl/`.
 The build uses embedded OpenCL C kernels and enables ggml's Adreno kernels. The Arduino UNO Q
 currently needs the experimental Rusticl compatibility mode described below.
@@ -21,11 +35,12 @@ Two driver details matter:
 - The image's Mesa/Rusticl 25.2.6 enumerates FD702, but does not expose the subgroup support ggml
   needs. The successful run used Mesa/Rusticl 26.2.1 from a user-local prefix.
 - Mesa 26.2.1 exposes the Intel-compatible subgroup interface when `RUSTICL_FEATURES=intel` is
-  set. `GGML_OPENCL_RUSTICL_SUBGROUP32_COMPAT=1` opts ggml into the corresponding at-most-32-thread
-  generic dispatch path, uses whole-work-group local-memory reduction where the physical subgroup
+  set. `GGML_OPENCL_RUSTICL_SUBGROUP32_COMPAT=1` opts ggml into a generic dispatch path with small
+  K-quant work-groups, uses whole-work-group local-memory reduction where the physical subgroup
   width cannot be trusted, disables unstable fusions, and serializes kernel dispatches to avoid
-  delayed FD702 device faults. That serialization is intentionally conservative and is a major
-  performance suspect; device execution and host wait costs still need separate profiling.
+  delayed FD702 device faults. That serialization is intentionally conservative. The first
+  event-timed T5 profile below finds slow kernel execution, not synchronization overhead, to be
+  the dominant cost in that workload.
 
 Do not replace the board's system Mesa packages just to reproduce this experiment. The tested
 setup extracts the newer Debian packages under `/home/arduino/mesa26/root` and selects them only
@@ -177,9 +192,9 @@ against the CPU backend. Before trusting longer output:
    track finite values and CPU-reference errors at T5, DiT, and decode. The observed decoded-audio
    cosine of 0.84044 deserves isolated decoder tests with identical input latents; it is not an
    established quality tolerance. Add a longer, multi-step listening test once stable.
-2. Make profiling preserve execution semantics. Currently `GGML_OPENCL_PROFILING` takes a different
-   enqueue branch that bypasses the Rusticl per-dispatch `clFinish`. Unify the safety behavior
-   before comparing profiling builds. Record kernel names, tensor shapes, work sizes, event
+2. Make profiling preserve execution semantics. The initial `GGML_OPENCL_PROFILING` branch bypassed
+   the Rusticl per-dispatch `clFinish`; the experimental instrumentation now shares the enqueue
+   and synchronization path between both build modes. Record kernel names, tensor shapes, work sizes, event
    execution times, host enqueue/wait times, and phase-boundary live/peak buffer allocations.
    Bound and release profiling events so instrumentation does not accumulate resource pressure.
 3. Reduce the no-serialization failure to a short repeatable kernel sequence, starting with T5
@@ -210,6 +225,95 @@ against the CPU backend. Before trusting longer output:
 Set `SA3_PROFILE=1` for phase timings. For cross-backend numerical diagnosis, create an empty
 directory and set `SA3_DUMP_GEN` to it; sa3 writes raw F32 conditioning, latent, and decoded-audio
 tensors there.
+
+### Standalone T5 fault reduction
+
+Initial profiling result (2026-09-02): a one-layer, 256-token T5 graph passed three CPU and three
+serialized GPU repetitions. CPU compute was 0.327-0.333 s; GPU compute was 5.166-5.168 s.
+Across all three GPU repetitions, event execution totaled 15.351 s versus 15.460 s spent inside
+`clFinish` (inclusive of execution). Q4_K matrix-vector kernels accounted for 10.465 s, Q6_K for
+2.821 s, and F32 attention matrix multiplication for 1.853 s. Thus Q4/Q6 kernels account for about
+87% of device time; removing host waits alone cannot explain or fix this slowdown. CPU/GPU
+hidden-state cosine was 0.99998697, RMSE 0.0301843, with all 196,608 values finite.
+
+With per-dispatch finishes disabled, the profiled one-layer graph also passed three repetitions
+at 5.150-5.166 s and produced identical output to the serialized GPU run. A full 12-layer graph
+then completed at 60.627 s with finite output. These runs did not reproduce the original fault;
+event profiling and flushed dispatch tracing can affect driver submission behavior. The original
+unprofiled full-generation fault remains unresolved. Existing kernel logs show hang recovery and,
+on one earlier attempt, GPU read-translation faults; neither establishes the root cause.
+
+This evidence changes the priority: retain safe dispatch while testing an opt-in 32x32 tiled
+Q4_K/Q6_K GEMM (`GGML_OPENCL_RUSTICL_TILED_K=1`). Its 32-work-item geometry replaces the unavailable
+128-work-item tile only in Rusticl compatibility mode, with a per-kernel limit check and fallback.
+Partial tiles and broadcast batches need CPU-reference tests before relying on model output.
+
+The first tiled candidate passed all six targeted Q4_K/Q6_K operator cases: T5-sized
+`m=768,n=256,k=768`, partial `m=35,n=33,k=256`, and the latter with broadcast batches.
+The one-layer GPU graph ran in 1.688-1.702 s during the test-binary build, then 1.747-1.750 s in a
+separate three-repeat run after compilation finished. The matched CPU repeat was 0.327-0.336 s.
+This is roughly a 3x improvement over the safe matrix-vector path, not a GPU win over CPU.
+
+The tiled, serialized, profiled full small-music smoke test completed with these phase timings:
+
+| Measurement | Previous safe fallback | Tiled candidate |
+|---|---:|---:|
+| T5 compute | 60.70 s | 20.70 s |
+| DiT compute | 79.70 s | 36.78 s |
+| SAME-S decode compute | 6.89 s | 3.38 s |
+| Process wall time | 206.51 s | 120.57 s |
+
+Peak RSS was 516,068 KiB with no swap. The candidate wrote a valid stereo 44.1 kHz WAV with all
+8,820 PCM samples nonzero. Against the previous safe GPU float dumps, cosine was 0.999999999998
+for conditioning, 0.999999999997 for latent, and 0.99999619 for decoded audio (decode RMSE 0.01035).
+This checks that tiling preserved the prior result; it does not resolve that baseline's larger
+CPU/GPU audio discrepancy or establish useful musical quality from a one-step, 0.1-second test.
+
+Full-run device execution totaled 58.46 s: Q6_K GEMM 22.95 s, Q4_K GEMM 19.37 s, and F32 matrix
+multiplication 14.00 s (about 96% combined). Those are the next compute targets. Roughly 60 s
+remains outside the measured compute phases; separately time initialization and weight loading
+before attributing that cost. These are diagnostic comparisons, with tracing/profiling enabled
+for the candidate and some compilation overlapping its startup, not controlled serving benchmarks.
+The original CPU full smoke result remains 14.20 s.
+
+Artifacts are retained on the board under `/home/arduino/sa3-experiments/` and copied locally to
+the ignored `bench/unoq/` directory. Important runs: `textenc-safe-L1-S256-bxUTsX` (fallback),
+`textenc-safe-L1-S256-Nudpel` (final tiled repeat), `textenc-cpu-L1-S256-chDHcr` (matched CPU),
+`generate-tiled-FAvhUt` (full generation), and `ops-tiled-VHIC5o` (6/6 operator checks).
+Both profiling and non-profiling C++ branches compile (the latter checked with `-fsyntax-only`);
+runtime validation in this iteration used the profiling build. Tiling remains opt-in and the
+original `build-opencl` binary is preserved.
+
+Build the instrumented binary separately from the preserved baseline:
+
+```bash
+cmake -S . -B build-opencl-profile -DCMAKE_BUILD_TYPE=Release \
+  -DSA3_OPENCL=ON -DGGML_OPENCL_TARGET_VERSION=300 \
+  -DGGML_OPENCL_EMBED_KERNELS=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=OFF \
+  -DGGML_OPENCL_PROFILING=ON -DGGML_BUILD_TESTS=ON
+cmake --build build-opencl-profile --target sa3-textenc sa3-generate test-backend-ops -j2
+bash tools/unoq-textenc.sh cpu 1 3 256
+bash tools/unoq-textenc.sh safe 1 3 256
+```
+
+Runner arguments are mode, encoder layers (`-1` means all), repetitions, and sequence length.
+Each run creates a directory under `/home/arduino/sa3-experiments`, with source/build identity,
+process resource statistics, and `t5g_hidden.f32`. A truncated encoder still uses the final norm
+and loads the whole weight file; it is a diagnostic graph, not valid full-model conditioning or a
+test of reduced weight residency. Both CPU and GPU must use the same truncation for comparisons.
+
+`GGML_OPENCL_DISPATCH_TRACE=/absolute/path.tsv` flushes each enqueue/finish boundary to disk to
+survive a process abort. Profiling writes `cl_profiling.csv` and valid `cl_trace.json` on clean
+backend teardown. Host finish time **includes** device execution; do not add them together.
+`python3 tools/unoq-profile-summary.py GPU_RUN_DIR CPU_RUN_DIR` summarizes kernels and compares
+the float outputs. Trace I/O and profiling overhead mean these are diagnostic timings.
+
+Only after validating the safe case, `bash tools/unoq-textenc.sh async 1 1 256` opts into a fault
+experiment. Internally `GGML_OPENCL_RUSTICL_FINISH_INTERVAL=0` disables per-dispatch finishing;
+positive N finishes every Nth wrapped dispatch. Unset means the safe default of 1. These controls
+only affect Rusticl compatibility mode. Other existing barriers remain, and asynchronous profiling
+waits to collect/release a batch at 2048 events, so it is not a barrier-free execution test.
+An enqueue or graph submission time followed by failed readback is never a successful benchmark.
 
 Useful operator-test examples:
 

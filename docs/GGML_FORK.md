@@ -1,5 +1,10 @@
 # Maintaining the SA3 ggml fork
 
+Local experimental exception: `feature/unoq-opencl-experimental` in both repositories carries
+unpublished UNO Q / Rusticl checkpoints. These pins intentionally do not follow the publication
+policy below while the experiment stays local. Preserve both repositories or incremental Git
+bundles; do not assume GitHub can supply the experimental submodule commit. See [OPENCL.md](OPENCL.md).
+
 `sa3.cpp` pins an exact commit from
 [`betweentwomidnights/ggml`](https://github.com/betweentwomidnights/ggml). The fork carries a small
 training-oriented patch stack that is not yet available in upstream ggml.

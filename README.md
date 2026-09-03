@@ -1,5 +1,9 @@
 # stable-audio-3 in c++
 
+Local experimental branch: `feature/unoq-opencl-experimental` in both this repository and `ggml/`.
+This UNO Q / Rusticl work is not a production backend or a published fork. No GitHub changes are
+required for the experiment. See [the experiment notes](docs/OPENCL.md).
+
 > **update 8/16/2026 — you can train a lora on a q4 base now, and it actually sounds decent. a
 > 2000-step dora trained on a q4_k_m base came out audibly indistinguishable from the same run on
 > f16, and it trains *faster*, on a base 2.9x smaller. works on cuda, vulkan, metal and cpu.**
