@@ -80,9 +80,18 @@ feature. It works well in gary4local, but bringing it into this repository would
 a deliberately selected DSP implementation and dependency/licensing policy; it does not
 belong in the DiT/T5/Oobleck primitives.
 
-Foundation-specific prompt randomization is also deferred to the generalized SAT CLI.
-The intended interface is a `--randomize` option that emits the audio and reports the
-actual prompt and seed, rather than a separate randomization endpoint.
+The optional `sat-generate` frontend exposes Foundation-specific prompt randomization
+without putting application policy into the pipeline. `--randomize` uses a deterministic
+C++ port of RoyalCities' weighted vocabulary and M1/T1 organization. `--randomize-mode
+mix` selects T1 and `--family` locks the anchor family. The audio seed drives the prompt
+selection too, and the command reports the exact prompt, seed, variant, musical geometry,
+and output path. This is deliberately one generate operation rather than a separate
+randomization endpoint.
+
+```powershell
+sat-generate --model foundation-1 --randomize --randomize-mode mix `
+  --family Synth --bars 4 --bpm 128 --key-root F# --key-mode minor --seed 42
+```
 
 ## Publication layout
 
@@ -154,5 +163,4 @@ while SAO 1.0's larger measured trajectory drift makes Q8 its conservative defau
 
 ## Remaining gates
 
-1. Generalize the current SAOS-named CLI and add Foundation `--randomize` output metadata.
-2. Validate the stacked SAOS and SAO 1.0/Foundation changes on Metal.
+1. Validate the stacked SAOS and SAO 1.0/Foundation changes on Metal.

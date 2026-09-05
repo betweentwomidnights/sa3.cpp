@@ -34,6 +34,15 @@ conservative recommendation for this model.
 The official inference profile is DPM++ 3M SDE, sigma 0.3–500, 100 steps, and CFG 7.
 Stable Audio Open 1.0 supports up to approximately 47 seconds at 44.1 kHz stereo.
 
+```powershell
+cmake -S . -B build-sat -DSA3_BUILD_SAT=ON -DSA3_CUDA=ON
+cmake --build build-sat --config Release --target sat-generate
+python tools/download_models.py --sat --sat-model stable-audio-open-1.0
+$env:SA3_DEVICE="cuda"
+sat-generate --model stable-audio-open-1.0 --prompt "cinematic ambient soundscape" `
+  --seconds 47 --seed 42 --out sao1.wav
+```
+
 ## Sources and licensing
 
 - Stable Audio Open 1.0 source revision: `f21265c1e2710b3bd2386596943f0007f55f802e`.

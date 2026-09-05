@@ -143,7 +143,9 @@ def main():
         sat_model = canonical_sat_model(args.sat_model)
         selection = args.saos_variant if sat_model == "saos" else sat_model
         print(f"[done] SAT {selection} ({encoding}) -> {args.out}/")
-        print("Use the optional SAT pipeline or CLI with the downloaded component paths.")
+        model_arg = selection
+        action = "--randomize" if sat_model == "foundation-1" else '--prompt "..."'
+        print(f"run: sat-generate --model {model_arg} {action} --out song.wav")
     else:
         suffix = " + training base" if args.training_base else ""
         print(f"[done] {args.variant} ({encoding}){suffix} -> {args.out}/")

@@ -8,10 +8,17 @@
 
 namespace sa3::sat {
 
-inline std::string foundation_prompt(const std::string& description, int bars, int bpm) {
+inline std::string foundation_prompt(const std::string& description, int bars, int bpm,
+                                     const std::string& key_root = {},
+                                     const std::string& key_mode = {}) {
     const std::string suffix = std::to_string(bars) + " Bars, " +
                                std::to_string(bpm) + " BPM";
-    return description.empty() ? suffix : description + ", " + suffix;
+    std::string result = description.empty() ? suffix : description + ", " + suffix;
+    if (!key_root.empty()) {
+        result += ", " + key_root;
+        if (!key_mode.empty()) result += " " + key_mode;
+    }
+    return result;
 }
 
 // Apply only Foundation's trained duration contract. Sampler choice remains a named

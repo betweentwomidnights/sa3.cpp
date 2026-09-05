@@ -45,9 +45,23 @@ BPM and stretch the result downstream.
 RoyalCities' UI profile uses DPM++ 3M SDE, sigma 0.01–100, 100 steps, and CFG 7. The
 gary4local fallback profile uses DPM++ 2M SDE, sigma 0.5–50, 100 steps, and CFG 7.
 
-The SAT CLI is being generalized around these model profiles. A planned `--randomize` mode
-will report the selected prompt and seed together with the output audio instead of exposing
-a separate randomization API.
+Build the opt-in SAT CLI, download one complete tier, and generate directly from the
+Foundation musical grid:
+
+```powershell
+cmake -S . -B build-sat -DSA3_BUILD_SAT=ON -DSA3_CUDA=ON
+cmake --build build-sat --config Release --target sat-generate
+python tools/download_models.py --sat --sat-model foundation-1
+$env:SA3_DEVICE="cuda"
+sat-generate --model foundation-1 --randomize --bars 4 --bpm 128 --seed 42 `
+  --out foundation.wav
+```
+
+`--randomize` uses the RoyalCities M1 structured prompt vocabulary by default, then
+prints the exact prompt, seed, key, musical geometry, and output path. Use
+`--randomize-mode mix` for the richer T1 variant, `--family Synth` to lock its anchor,
+or `--foundation-profile gary` to A/B the gary4local fallback sampler. Run
+`sat-generate --help` for the complete model-specific option list.
 
 ## Sources and licensing
 

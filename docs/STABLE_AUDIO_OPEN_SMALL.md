@@ -35,11 +35,10 @@ change those settings while retaining loadable tensor shapes.
   checkpoint topology checks.
 - `src/sat/pipeline.h`: reusable application component for staged T5, classic-DiT,
   and Oobleck execution, with objective-aware sampler/step/CFG defaults.
-- `src/sat/model_paths.h`: SAOS-specific published filenames and local model resolution.
-  SAT remains the runtime umbrella; this catalog intentionally does not claim future
-  SAO 1.0 or Foundation-1 repositories.
-- `tools/saos-generate.cpp`: SAOS-specific command-line driver over the shared SAT library.
-  It is a thin frontend over `sa3::sat::Pipeline` and does not add SAOS branches to
+- `src/sat/model_paths.h`: published filenames and local resolution for the SAOS,
+  SAO 1.0, and Foundation-1 repositories.
+- `tools/sat-generate.cpp`: family-aware command-line driver over the shared SAT library.
+  It is a thin frontend over `sa3::sat::Pipeline` and does not add SAT branches to
   `sa3_pipeline.h` or the existing public API.
 
 ## Conversion and validation
@@ -81,8 +80,8 @@ executable or model-specific runtime dependency.
 Enable the isolated runner and its focused tests explicitly:
 
 ```powershell
-cmake -S . -B build-saos -DSA3_BUILD_SAT=ON
-cmake --build build-saos --config Release --target saos-generate
+cmake -S . -B build-sat -DSA3_BUILD_SAT=ON
+cmake --build build-sat --config Release --target sat-generate
 ```
 
 This also creates the `sa3_sat` static-library target. An embedding application can
@@ -91,18 +90,18 @@ link that component directly and consume tightly packed planar float audio from
 
 For CUDA, add `-DSA3_CUDA=ON` to the configure command. `SA3_BUILD_SAT` creates the
 component even when `SA3_BUILD_TOOLS=OFF`; the latter only controls whether the
-`saos-generate` frontend and focused test executables are also created.
+`sat-generate` frontend and focused test executables are also created.
 
 Download the reference all-F16 SAOS bundle and generate with the catalog resolver:
 
 ```bash
 ./models.sh --sat --sat-model saos --saos-variant arc
-saos-generate --model arc --prompt "A short, beautiful piano riff in C minor" \
+sat-generate --model arc --prompt "A short, beautiful piano riff in C minor" \
   --seconds 11 --out saos.wav
 ```
 
 Use `--saos-variant kickbass` or `jerry-grunge` when downloading a finetune, then pass
-the same name to `saos-generate --model`. The downloader defaults are scoped by family:
+the same name to `sat-generate --model`. The downloader defaults are scoped by family:
 ordinary no-flag usage still downloads SA3 medium/F16, while `--sat` selects SAOS F16
 for the DiT, T5, and Oobleck. `--encoding q5_k_m`, `--t5-encoding`, and `--ae-encoding` can
 override those tiers independently. `SA3_MODELS_DIR` or `--models-dir` changes the
@@ -117,7 +116,7 @@ python tools/convert_sat_oobleck.py --src model.safetensors --config model_confi
 python tools/convert_sat_t5.py --src t5-base/model.safetensors --config t5-base/config.json `
   --tokenizer t5-base/tokenizer.json --out t5-base-encoder-f16.gguf
 $env:SA3_DEVICE="cuda"; $env:SA3_FLASH_ATTN="1"
-saos-generate --t5 t5-base-encoder-f16.gguf `
+sat-generate --model arc --t5 t5-base-encoder-f16.gguf `
   --prompt "A short, beautiful piano riff in C minor" --seconds 11 `
   --dit saos-dit-f16.gguf --ae saos-oobleck-f16.gguf `
   --frames 256 --steps 8 --samples 485100 --out saos.wav
@@ -135,7 +134,7 @@ or RF DPM++ with guidance. When omitted, a `rectified_flow` GGUF resolves to Eul
 ```powershell
 python tools/convert_sat_dit.py --src finetune.ckpt --config finetune_config.json `
   --out finetune-dit-f16.gguf --model-id my-saos-finetune
-saos-generate --t5 t5-base-encoder-f16.gguf --dit finetune-dit-f16.gguf `
+sat-generate --model arc --t5 t5-base-encoder-f16.gguf --dit finetune-dit-f16.gguf `
   --ae saos-oobleck-f16.gguf --prompt "..." --sampler dpmpp --steps 40 `
   --cfg-scale 4 --seconds 11 --peak-normalize --out finetune.wav
 ```

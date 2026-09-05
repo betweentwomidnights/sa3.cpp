@@ -1,5 +1,6 @@
 #include "sampling.h"
 #include "sat/dit.h"
+#include "sat/foundation_prompt.h"
 #include "sat/foundation_timing.h"
 #include "sat/model_spec.h"
 #include "sat/model_paths.h"
@@ -340,6 +341,28 @@ int main() {
                     foundation_params.sigma_min == 0.01f &&
                     foundation_params.sigma_max == 100.0f,
                     "Foundation RoyalCities sampler profile");
+    fails += expect(sa3::sat::foundation_prompt("warm pad", 8, 120, "F#", "minor") ==
+                        "warm pad, 8 Bars, 120 BPM, F# minor",
+                    "Foundation prompt includes timing and key conditioning");
+
+    const sa3::sat::FoundationRandomPrompt random_a =
+        sa3::sat::randomize_foundation_prompt(42, sa3::sat::FoundationPromptMode::Standard);
+    const sa3::sat::FoundationRandomPrompt random_b =
+        sa3::sat::randomize_foundation_prompt(42, sa3::sat::FoundationPromptMode::Standard);
+    fails += expect(!random_a.description.empty() && random_a.description == random_b.description &&
+                    random_a.variant == "M1",
+                    "Foundation random prompts are deterministic from the audio seed");
+    const sa3::sat::FoundationRandomPrompt synth_mix =
+        sa3::sat::randomize_foundation_prompt(7, sa3::sat::FoundationPromptMode::Mix, "synth");
+    fails += expect(synth_mix.family == "Synth" && synth_mix.variant == "T1" &&
+                    synth_mix.description.find("Synth") != std::string::npos,
+                    "Foundation T1 randomizer honors a family lock");
+    bool rejected_family = false;
+    try {
+        (void)sa3::sat::randomize_foundation_prompt(
+            1, sa3::sat::FoundationPromptMode::Standard, "Drums");
+    } catch (const std::invalid_argument&) { rejected_family = true; }
+    fails += expect(rejected_family, "Foundation randomizer rejects unknown family locks");
 
     // A finetune may change inference defaults without changing any loadable tensor shape.
     sa3::sat::ModelSpec finetune = saos;
