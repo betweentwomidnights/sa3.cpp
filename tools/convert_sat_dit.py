@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Convert the classic stable-audio-tools continuous DiT to GGUF.
 
-This intentionally targets the small, well-defined architecture used by Stable
-Audio Open 1.0 and Stable Audio Open Small.  The graph contract lives in
+This intentionally targets the well-defined architecture shared by Stable Audio
+Open Small, Stable Audio Open 1.0, and compatible finetunes. The graph contract lives in
 src/sat/dit.h; keeping this converter separate from SA3's MM-DiT converter avoids
 model-family branches in either implementation.
 """
@@ -86,15 +86,17 @@ def read_spec(path):
     try:
         d = cfg["model"]["diffusion"]
         c = d["config"]
-        seconds = next(x["config"] for x in cfg["model"]["conditioning"]["configs"]
-                       if x["id"] == "seconds_total")
+        conditioners = {x["id"]: x["config"]
+                        for x in cfg["model"]["conditioning"]["configs"]}
+        seconds_total = conditioners["seconds_total"]
     except (KeyError, TypeError) as exc:
         raise ConversionError("not a stable-audio-tools conditional diffusion config") from exc
     if d.get("type") != "dit" or c.get("transformer_type") != "continuous_transformer":
         raise ConversionError("only the classic continuous_transformer DiT is supported")
     qk = c.get("attn_kwargs", {}).get("qk_norm")
-    if qk != "ln":
-        raise ConversionError(f"expected qk_norm='ln', got {qk!r}")
+    if qk not in (None, "ln"):
+        raise ConversionError(f"unsupported qk_norm: {qk!r}")
+    seconds_start = conditioners.get("seconds_start")
     return cfg, {
         "sample_rate": int(cfg["sample_rate"]),
         "sample_size": int(cfg["sample_size"]),
@@ -104,10 +106,13 @@ def read_spec(path):
         "heads": int(c["num_heads"]),
         "cond_dim": int(c["cond_token_dim"]),
         "global_dim": int(c["global_cond_dim"]),
-        "objective": str(d["diffusion_objective"]),
-        "qk_norm": qk,
-        "seconds_min": float(seconds["min_val"]),
-        "seconds_max": float(seconds["max_val"]),
+        "objective": str(d.get("diffusion_objective", "v")),
+        "qk_norm": qk or "none",
+        "seconds_start": seconds_start is not None,
+        "seconds_start_min": float(seconds_start["min_val"]) if seconds_start else None,
+        "seconds_start_max": float(seconds_start["max_val"]) if seconds_start else None,
+        "seconds_total_min": float(seconds_total["min_val"]),
+        "seconds_total_max": float(seconds_total["max_val"]),
     }
 
 
@@ -144,8 +149,12 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
     writer.add_string("sat.dit.qk_norm", spec["qk_norm"])
     writer.add_string("sat.diffusion_objective", spec["objective"])
     writer.add_string("sat.dit.weight_type", weight_type.upper())
-    writer.add_float32("sat.conditioner.seconds_total.min", spec["seconds_min"])
-    writer.add_float32("sat.conditioner.seconds_total.max", spec["seconds_max"])
+    writer.add_bool("sat.conditioner.seconds_start", spec["seconds_start"])
+    if spec["seconds_start"]:
+        writer.add_float32("sat.conditioner.seconds_start.min", spec["seconds_start_min"])
+        writer.add_float32("sat.conditioner.seconds_start.max", spec["seconds_start_max"])
+    writer.add_float32("sat.conditioner.seconds_total.min", spec["seconds_total_min"])
+    writer.add_float32("sat.conditioner.seconds_total.max", spec["seconds_total_max"])
 
     consumed = set()
     count = params = 0
@@ -198,7 +207,10 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
         inv = take("transformer.rotary_pos_emb.inv_freq").astype(np.float32).reshape(-1)
         expected = 1.0 / (10000.0 ** (np.arange(0, rotary_dims, 2, dtype=np.float32) /
                                       rotary_dims))
-        if inv.shape != expected.shape or not np.allclose(inv, expected, rtol=2e-5, atol=1e-7):
+        # Foundation-1 stores every tensor, including this deterministic buffer,
+        # in FP16. Allow one FP16 rounding step while still rejecting a changed
+        # rotary width/base.
+        if inv.shape != expected.shape or not np.allclose(inv, expected, rtol=5e-4, atol=5e-7):
             raise ConversionError("unexpected rotary_pos_emb frequencies")
 
         for i in range(spec["depth"]):
@@ -215,20 +227,25 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
             emit(d + "cross.q.weight", s + "cross_attn.to_q.weight", True)
             emit(d + "cross.kv.weight", s + "cross_attn.to_kv.weight", True)
             emit(d + "cross.out.weight", s + "cross_attn.to_out.weight", True)
-            for attn in ("self_attn", "cross_attn"):
-                tag = "self" if attn == "self_attn" else "cross"
-                for qk in ("q", "k"):
-                    emit(d + f"{tag}.{qk}_norm.weight", s + f"{attn}.{qk}_norm.weight")
-                    emit(d + f"{tag}.{qk}_norm.bias", s + f"{attn}.{qk}_norm.bias")
+            if spec["qk_norm"] == "ln":
+                for attn in ("self_attn", "cross_attn"):
+                    tag = "self" if attn == "self_attn" else "cross"
+                    for qk in ("q", "k"):
+                        emit(d + f"{tag}.{qk}_norm.weight", s + f"{attn}.{qk}_norm.weight")
+                        emit(d + f"{tag}.{qk}_norm.bias", s + f"{attn}.{qk}_norm.bias")
             emit(d + "ff.in.weight", s + "ff.ff.0.proj.weight", True)
             emit(d + "ff.in.bias", s + "ff.ff.0.proj.bias")
             emit(d + "ff.out.weight", s + "ff.ff.2.weight", True)
             emit(d + "ff.out.bias", s + "ff.ff.2.bias")
 
-        sec = "conditioner.conditioners.seconds_total.embedder.embedding."
-        emit_full("conditioner.seconds_total.fourier.weight", sec + "0.weights")
-        emit_full("conditioner.seconds_total.linear.weight", sec + "1.weight")
-        emit_full("conditioner.seconds_total.linear.bias", sec + "1.bias")
+        conditioner_ids = ["seconds_total"]
+        if spec["seconds_start"]:
+            conditioner_ids.insert(0, "seconds_start")
+        for conditioner_id in conditioner_ids:
+            sec = f"conditioner.conditioners.{conditioner_id}.embedder.embedding."
+            emit_full(f"conditioner.{conditioner_id}.fourier.weight", sec + "0.weights")
+            emit_full(f"conditioner.{conditioner_id}.linear.weight", sec + "1.weight")
+            emit_full(f"conditioner.{conditioner_id}.linear.bias", sec + "1.bias")
 
         model_keys = {k for k in keys if k.startswith(prefix)}
         unexpected = sorted(model_keys - consumed)

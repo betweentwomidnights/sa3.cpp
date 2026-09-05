@@ -55,10 +55,15 @@ static void print_help() {
         "Generation:\n"
         "  --prompt TEXT         text prompt (required unless --conditioning is used)\n"
         "  --negative-prompt T   negative text conditioning\n"
+        "  --seconds-start N     timeline offset conditioning (SAO 1.0 family)\n"
         "  --seconds N           output duration, up to 11 seconds (default 11)\n"
-        "  --sampler NAME        auto, pingpong, euler, or dpmpp\n"
+        "  --sampler NAME        auto, pingpong, euler, dpmpp, dpmpp-2m-sde, or dpmpp-3m-sde\n"
         "  --steps N             denoising steps\n"
         "  --cfg-scale N         classifier-free guidance scale\n"
+        "  --sigma-min N         V-prediction minimum sigma\n"
+        "  --sigma-max N         V-prediction maximum sigma\n"
+        "  --sigma-rho N         V-prediction schedule curvature (default 1)\n"
+        "  --sde-eta N           SDE noise strength (default 1)\n"
         "  --seed N              random seed\n"
         "  --out FILE            output WAV (default saos-ggml.wav; --wav is an alias)\n"
         "  --peak-normalize      normalize the output WAV peak\n\n"
@@ -105,8 +110,13 @@ static int run(int argc, char** argv) {
         else if (!strcmp(argv[i], "--t5") && i + 1 < argc) paths.t5 = argv[++i];
         else if (!strcmp(argv[i], "--prompt") && i + 1 < argc) params.prompt = argv[++i];
         else if (!strcmp(argv[i], "--negative-prompt") && i + 1 < argc) params.negative_prompt = argv[++i];
+        else if (!strcmp(argv[i], "--seconds-start") && i + 1 < argc) params.seconds_start = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) params.seconds = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--cfg-scale") && i + 1 < argc) params.cfg_scale = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--sigma-min") && i + 1 < argc) params.sigma_min = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--sigma-max") && i + 1 < argc) params.sigma_max = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--sigma-rho") && i + 1 < argc) params.sigma_rho = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--sde-eta") && i + 1 < argc) params.sde_eta = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--sampler") && i + 1 < argc)
             params.sampler = sa3::sat::parse_sampler(argv[++i]);
         else if (!strcmp(argv[i], "--dump-conditioning") && i + 1 < argc) dump_cond_prefix = argv[++i];
@@ -179,6 +189,9 @@ static int run(int argc, char** argv) {
     printf("model: objective=%s sampler=%s steps=%d cfg=%.3f\n",
            result.objective.c_str(), sa3::sat::sampler_name(result.sampler),
            result.steps, result.cfg_scale);
+    if (result.objective == "v")
+        printf("sigma: min=%.6g max=%.6g rho=%.6g eta=%.6g\n",
+               result.sigma_min, result.sigma_max, result.sigma_rho, result.sde_eta);
     const sa3::sat::GenerateTiming& t = result.timing;
     printf("benchmark: conditioning=%.3fs dit_load=%.3fs dit_build_alloc=%.3fs denoise=%.3fs "
            "step_median_warm=%.1fms ae_load=%.3fs ae_build_alloc=%.3fs decode=%.3fs "

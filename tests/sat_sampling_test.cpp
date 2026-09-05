@@ -263,6 +263,25 @@ int main() {
     fails += expect(saos.dit.embed_dim == 1024 && saos.dit.depth == 16,
                     "SAOS DiT topology");
 
+    const sa3::sat::ModelSpec sao1 = sa3::sat::stable_audio_open_1();
+    const sa3::sat::ModelSpec foundation = sa3::sat::foundation_1();
+    fails += expect(sa3::sat::validate(sao1, &why) &&
+                    sa3::sat::validate(foundation, &why),
+                    "SAO 1.0 family specs validate");
+    fails += expect(sao1.dit.embed_dim == 1536 && sao1.dit.depth == 24 &&
+                    sao1.dit.num_heads == 24 && !sao1.dit.qk_layer_norm,
+                    "SAO 1.0 classic DiT topology");
+    fails += expect(sao1.conditioner.seconds_start &&
+                    sao1.dit.global_cond_dim == 1536 &&
+                    sao1.text_encoder.max_length == 128,
+                    "SAO 1.0 timing and text conditioning topology");
+    fails += expect(sao1.sample_size == 2097152 && foundation.sample_size == 882000,
+                    "Foundation changes only the published sample window");
+    fails += expect(foundation.sample_size / foundation.oobleck.downsampling_ratio() == 430,
+                    "Foundation follows stable-audio-tools floor division for latent frames");
+    fails += expect(sa3::sat::weight_topology_compatible(sao1, foundation, &why),
+                    "Foundation is weight-topology compatible with SAO 1.0");
+
     // A finetune may change inference defaults without changing any loadable tensor shape.
     sa3::sat::ModelSpec finetune = saos;
     finetune.sample_size = 262144;
@@ -353,6 +372,56 @@ int main() {
     fails += expect(sa3::sat::parse_sampler("dpmpp") == sa3::sat::Sampler::Dpmpp &&
                     std::string(sa3::sat::sampler_name(sa3::sat::Sampler::PingPong)) == "pingpong",
                     "SAT sampler names round-trip");
+
+    const std::vector<float> sigmas =
+        sa3::sampling::make_sigma_polyexponential_schedule(3, 0.5f, 50.0f);
+    fails += expect(sigmas.size() == 4 && near(sigmas[0], 50.0f, 1.0e-4f) &&
+                    near(sigmas[1], 5.0f) && near(sigmas[2], 0.5f) && sigmas[3] == 0.0f,
+                    "V-prediction polyexponential schedule matches k-diffusion");
+    const sa3::sampling::VPredictionScalings vc =
+        sa3::sampling::v_prediction_scalings(1.0f);
+    fails += expect(near(vc.skip, 0.5f) && near(vc.output, -std::sqrt(0.5f)) &&
+                    near(vc.input, std::sqrt(0.5f)) && near(vc.timestep, 0.5f),
+                    "V-prediction preconditioning matches k-diffusion");
+    float xv[] = {2.0f, -1.0f};
+    const float vd0[] = {0.5f, -0.25f};
+    const float vn0[] = {0.1f, -0.2f};
+    const float vd1[] = {0.4f, -0.1f};
+    const float vn1[] = {-0.3f, 0.4f};
+    const float vd2s[] = {0.3f, 0.05f};
+    const float vn2[] = {0.2f, 0.1f};
+    const float vd3[] = {0.2f, 0.2f};
+    sa3::sampling::VPredictionDpmppState vs;
+    sa3::sampling::v_dpmpp_3m_sde_step(xv, vd0, vn0, 2, 50.0f, 5.0f, vs);
+    fails += expect(near(xv[0], 1.0124937f) && near(xv[1], -1.2524874f),
+                    "V-prediction DPM++ 3M first update matches reference algebra");
+    sa3::sampling::v_dpmpp_3m_sde_step(xv, vd1, vn1, 2, 5.0f, 0.5f, vs);
+    fails += expect(near(xv[0], 0.1783744f) && near(xv[1], 0.20522625f),
+                    "V-prediction DPM++ 3M second-order update matches reference algebra");
+    sa3::sampling::v_dpmpp_3m_sde_step(xv, vd2s, vn2, 2, 0.5f, 0.05f, vs);
+    fails += expect(near(xv[0], 0.2302312f) && near(xv[1], 0.17428084f),
+                    "V-prediction DPM++ 3M third-order update matches reference algebra");
+    sa3::sampling::v_dpmpp_3m_sde_step(xv, vd3, nullptr, 2, 0.05f, 0.0f, vs);
+    fails += expect(near(xv[0], 0.2f) && near(xv[1], 0.2f),
+                    "V-prediction DPM++ terminal update returns denoised estimate");
+
+    float xv2[] = {2.0f, -1.0f};
+    sa3::sampling::VPredictionDpmppState vs2;
+    sa3::sampling::v_dpmpp_2m_sde_step(xv2, vd0, vn0, 2, 50.0f, 5.0f, vs2);
+    fails += expect(near(xv2[0], 1.0124937f) && near(xv2[1], -1.2524874f),
+                    "V-prediction DPM++ 2M first update matches reference algebra");
+    sa3::sampling::v_dpmpp_2m_sde_step(xv2, vd1, vn1, 2, 5.0f, 0.5f, vs2);
+    fails += expect(near(xv2[0], 0.20737682f) && near(xv2[1], 0.16172261f),
+                    "V-prediction DPM++ 2M multistep update matches reference algebra");
+    sa3::sampling::v_dpmpp_2m_sde_step(xv2, vd3, nullptr, 2, 0.5f, 0.0f, vs2);
+    fails += expect(near(xv2[0], 0.2f) && near(xv2[1], 0.2f),
+                    "V-prediction DPM++ 2M terminal update matches reference algebra");
+
+    fails += expect(sa3::sat::parse_sampler("dpmpp-2m-sde") ==
+                        sa3::sat::Sampler::Dpmpp2mSde &&
+                    sa3::sat::parse_sampler("dpmpp-3m-sde") ==
+                        sa3::sat::Sampler::Dpmpp3mSde,
+                    "V-prediction SDE sampler names round-trip");
 
     bool threw = false;
     try { (void)sa3::sampling::make_rf_logsnr_schedule(0); }

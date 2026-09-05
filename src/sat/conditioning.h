@@ -50,4 +50,10 @@ inline std::vector<float> seconds_total_condition(const GgufModel& W, float seco
                             W.f32("sat.conditioner.seconds_total.max"));
 }
 
+inline std::vector<float> seconds_start_condition(const GgufModel& W, float seconds) {
+    return number_condition(W, "conditioner.seconds_start.", seconds,
+                            W.f32("sat.conditioner.seconds_start.min"),
+                            W.f32("sat.conditioner.seconds_start.max"));
+}
+
 } // namespace sa3::sat
