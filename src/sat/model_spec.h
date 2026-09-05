@@ -86,6 +86,31 @@ inline ModelSpec stable_audio_open_small() {
     return spec;
 }
 
+inline ModelSpec stable_audio_open_1() {
+    ModelSpec spec;
+    spec.architecture = "stable-audio-open-1.0";
+    spec.sample_size = 2097152;
+    spec.text_encoder.max_length = 128;
+    spec.conditioner.seconds_start = true;
+    spec.dit.embed_dim = 1536;
+    spec.dit.depth = 24;
+    spec.dit.num_heads = 24;
+    spec.dit.global_cond_dim = 1536;
+    spec.dit.qk_layer_norm = false;
+    spec.objective = DiffusionObjective::VPrediction;
+    spec.default_sampler = Sampler::Dpmpp3mSde;
+    spec.default_steps = 100;
+    spec.default_cfg_scale = 7.0f;
+    return spec;
+}
+
+inline ModelSpec foundation_1() {
+    ModelSpec spec = stable_audio_open_1();
+    spec.architecture = "foundation-1";
+    spec.sample_size = 882000;
+    return spec;
+}
+
 inline bool validate(const ModelSpec& s, std::string* why = nullptr) {
     auto fail = [&](const char* message) {
         if (why) *why = message;
@@ -97,12 +122,12 @@ inline bool validate(const ModelSpec& s, std::string* why = nullptr) {
     if (s.oobleck.audio_channels != s.audio_channels)
         return fail("Oobleck audio channels do not match the model");
     if (s.oobleck.downsampling_ratio() <= 0 ||
-        s.sample_size % s.oobleck.downsampling_ratio() != 0)
-        return fail("sample size is not divisible by the Oobleck downsampling ratio");
+        s.sample_size < s.oobleck.downsampling_ratio())
+        return fail("sample size is shorter than one Oobleck latent frame");
     if (s.oobleck.latent_channels != s.dit.io_channels)
         return fail("Oobleck latent channels do not match DiT I/O channels");
     if (!s.conditioner.prompt || !s.conditioner.seconds_total)
-        return fail("SAOS requires prompt and seconds_total conditioners");
+        return fail("SAT models require prompt and seconds_total conditioners");
     if (s.text_encoder.hidden_size != s.conditioner.output_dim ||
         s.dit.cond_token_dim != s.conditioner.output_dim)
         return fail("conditioning dimensions disagree");

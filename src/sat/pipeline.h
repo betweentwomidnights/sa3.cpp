@@ -31,11 +31,16 @@ struct StepProgress {
 struct GenerateParams {
     std::string prompt;
     std::string negative_prompt;
+    float seconds_start = 0.0f;
     float seconds = 11.0f;
     int frames = 256;
     int steps = 0;                 // 0: objective-specific default
     int output_samples = 0;        // 0: seconds * model sample rate
     float cfg_scale = -1.0f;       // <0: objective-specific default
+    float sigma_min = -1.0f;       // <0: objective-specific default
+    float sigma_max = -1.0f;       // <0: objective-specific default
+    float sigma_rho = 1.0f;
+    float sde_eta = 1.0f;
     uint64_t seed = 1234;
     Sampler sampler = Sampler::Auto;
 
@@ -71,6 +76,10 @@ struct GenerateResult {
     int max_prompt_tokens = 0;
     int steps = 0;
     float cfg_scale = 1.0f;
+    float sigma_min = 0.0f;
+    float sigma_max = 0.0f;
+    float sigma_rho = 0.0f;
+    float sde_eta = 0.0f;
     Sampler sampler = Sampler::Auto;
     std::string objective;
     GenerateTiming timing;
