@@ -135,7 +135,8 @@ native CUDA component with the shared SAOS T5 and Oobleck artifacts:
   `jerry_encoded_bs64_epoch=374-step=3000.ckpt`: a 5.77 GB preencoded Lightning
   training snapshot. Conversion selected its 382-tensor EMA DiT, paired it with the
   frozen duration conditioner, and omitted optimizer, loss, and autoencoder state.
-  RF DPM++ at 40 steps/CFG 4 likewise generated 11 seconds in about 2.5 seconds.
+  RF DPM++ at 40 steps/CFG 4 likewise generated 11 seconds in about 2.5 seconds. The
+  validation prompt was `chillhop synth warm bass dusty drums sidechain 90 bpm`.
 
 The objective-driven no-override path was also exercised on KickBass and resolved to
 Euler, 50 steps, and CFG 4 as intended.
@@ -148,6 +149,11 @@ Euler, 50 steps, and CFG 4 as intended.
 2. Convert a Foundation-1 checkpoint and let metadata/topology validation determine
    which Oobleck/T5 artifacts it can share. Its larger DiT requires a separately sized
    graph even when the implementation is identical.
+3. Publish the validated SAOS and finetune GGUFs. Prefer one SAOS GGUF model repository
+   with shared T5/Oobleck artifacts at the top level and a directory per DiT variant
+   (`arc`, `base`, `kickbass`, and `jerry-grunge`). Include source-checkpoint revision,
+   conversion command, tensor/weight type, recommended sampler defaults, license and
+   attribution, checksums, and a short reproducible generation example for each variant.
 
 ## Deferred LoRA question
 
