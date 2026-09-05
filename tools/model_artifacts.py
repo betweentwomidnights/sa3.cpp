@@ -24,6 +24,11 @@ STABILITY_LICENSE_SHA256 = "d6f6b1a4dce5c852bd6d7d9482d002baf0ccdb71e662250b73be
 
 SHARED_REPO = "t5gemma-b-b-ul2-GGUF"
 
+SAOS_REPO = "stable-audio-open-small-GGUF"
+SAOS_VARIANTS = ("arc", "kickbass", "jerry-grunge")
+SAOS_ENCODINGS = ("F16", "Q8_0", "Q5_K_M", "Q4_K_M")
+SAOS_DEFAULT_ENCODING = "Q5_K_M"
+
 # Encodings the DiT and SAME are published in. The conditioner and tokenizer are always F32 --
 # those two really are small (a 793 KiB conditioner, a 14 MiB vocab), so there is nothing to gain.
 FLOAT_ENCODINGS = ("F16", "F32")
@@ -161,3 +166,50 @@ def build_download_plan(namespace, variant, encoding, training_base=False, text_
         )
     )
     return plan
+
+
+def saos_dit_filename(variant, encoding):
+    """Return the repo-relative published DiT path for SAOS or one of its finetunes."""
+    variant = variant.lower().replace("_", "-")
+    enc = encoding.upper()
+    if variant not in SAOS_VARIANTS:
+        raise ValueError(
+            f"unknown SAOS variant: {variant} (expected one of {', '.join(SAOS_VARIANTS)})"
+        )
+    if enc not in SAOS_ENCODINGS:
+        raise ValueError(
+            f"unsupported SAOS encoding: {encoding} "
+            f"(expected one of {', '.join(e.lower() for e in SAOS_ENCODINGS)})"
+        )
+    if variant == "arc":
+        return f"stable-audio-open-small-dit-0.3B-{VERSION}-{enc}.gguf"
+    if variant == "kickbass":
+        return f"finetunes/kickbass/kickbass-v1-e257-dit-0.3B-{VERSION}-{enc}.gguf"
+    return f"finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-{VERSION}-{enc}.gguf"
+
+
+def saos_t5_filename(encoding):
+    enc = encoding.upper()
+    if enc not in SAOS_ENCODINGS:
+        raise ValueError(f"unsupported SAOS T5 encoding: {encoding}")
+    return f"t5-base-encoder-0.1B-{VERSION}-{enc}.gguf"
+
+
+def saos_oobleck_filename(encoding):
+    enc = encoding.upper()
+    if enc not in SAOS_ENCODINGS:
+        raise ValueError(f"unsupported SAOS Oobleck encoding: {encoding}")
+    return f"stable-audio-open-small-oobleck-{VERSION}-{enc}.gguf"
+
+
+def build_saos_download_plan(namespace, variant="arc", encoding=SAOS_DEFAULT_ENCODING,
+                             text_encoding=None, ae_encoding=None):
+    """Return the single-repository SAOS/finetune download plan."""
+    enc = encoding.upper()
+    text_enc = (text_encoding or enc).upper()
+    ae_enc = (ae_encoding or enc).upper()
+    return [(
+        f"{namespace}/{SAOS_REPO}",
+        [saos_dit_filename(variant, enc), saos_t5_filename(text_enc),
+         saos_oobleck_filename(ae_enc)],
+    )]

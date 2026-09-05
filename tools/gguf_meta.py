@@ -45,3 +45,14 @@ def add_general(w, basename, name, finetune=None, n_params=None, license_id=LICE
         w.add_string("general.finetune", finetune)
     if n_params is not None:
         w.add_string("general.size_label", size_label(n_params))
+
+
+def add_source(w, name, organization, repo_url, revision, source_file=None):
+    """Record the exact upstream checkpoint identity using standard base-model fields."""
+    w.add_base_model_count(1)
+    w.add_base_model_name(0, name)
+    w.add_base_model_organization(0, organization)
+    w.add_base_model_repo_url(0, repo_url)
+    w.add_base_model_version(0, revision)
+    if source_file:
+        w.add_string("general.source.file", source_file)

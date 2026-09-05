@@ -12,12 +12,33 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
-from model_artifacts import (TEXT_ENCODER_ENCODINGS, build_download_plan, dit_filename,
-                             dit_identity, text_encoder_filename)
+from model_artifacts import (TEXT_ENCODER_ENCODINGS, build_download_plan,
+                             build_saos_download_plan, dit_filename, dit_identity,
+                             saos_dit_filename, text_encoder_filename)
 from stage_training_base_repos import notice_text
 
 
 class ModelArtifactsTest(unittest.TestCase):
+    def test_saos_publication_names_are_family_scoped(self):
+        self.assertEqual(
+            saos_dit_filename("arc", "q5_k_m"),
+            "stable-audio-open-small-dit-0.3B-v1.0-Q5_K_M.gguf",
+        )
+        self.assertEqual(
+            saos_dit_filename("kickbass", "q4_k_m"),
+            "finetunes/kickbass/kickbass-v1-e257-dit-0.3B-v1.0-Q4_K_M.gguf",
+        )
+        self.assertEqual(
+            saos_dit_filename("jerry_grunge", "f16"),
+            "finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-F16.gguf",
+        )
+
+    def test_saos_q5_bundle_is_self_contained(self):
+        plan = build_saos_download_plan("thepatch", "jerry-grunge")
+        self.assertEqual(plan[0][0], "thepatch/stable-audio-open-small-GGUF")
+        self.assertEqual(len(plan[0][1]), 3)
+        self.assertTrue(all("Q5_K_M" in name for name in plan[0][1]))
+
     def test_training_base_identity_is_unambiguous(self):
         identity = dit_identity("medium", training_base=True)
         self.assertEqual(identity["basename"], "stable-audio-3-medium-base-dit")
@@ -154,6 +175,41 @@ class ModelArtifactsTest(unittest.TestCase):
             output,
         )
         self.assertIn("t5gemma-b-b-ul2-v1.0-vocab.gguf", output)
+
+    def assert_saos_downloader_plan(self, command):
+        result = subprocess.run(command, cwd=REPO_ROOT, check=True, text=True,
+                                capture_output=True)
+        output = result.stdout.replace("\\", "/")
+        self.assertEqual(output.count("[plan]"), 3)
+        self.assertIn("thepatch/stable-audio-open-small-GGUF/resolve/main/", output)
+        self.assertIn(
+            "finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-Q5_K_M.gguf",
+            output,
+        )
+        self.assertIn("t5-base-encoder-0.1B-v1.0-Q5_K_M.gguf", output)
+        self.assertIn("stable-audio-open-small-oobleck-v1.0-Q5_K_M.gguf", output)
+
+    def test_python_downloader_saos_plan(self):
+        self.assert_saos_downloader_plan([
+            sys.executable, "tools/download_models.py", "--sat", "--sat-model", "saos",
+            "--saos-variant", "jerry-grunge", "--dry-run", "--out", "test-models",
+        ])
+
+    def test_shell_downloader_saos_plan(self):
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not installed")
+        self.assert_saos_downloader_plan([
+            bash, "models.sh", "--sat", "--sat-model", "saos", "--saos-variant",
+            "jerry-grunge", "--dry-run", "--out", "test-models",
+        ])
+
+    @unittest.skipUnless(os.name == "nt", "Windows command script")
+    def test_cmd_downloader_saos_plan(self):
+        self.assert_saos_downloader_plan([
+            "cmd.exe", "/d", "/c", str(REPO_ROOT / "models.cmd"), "--sat", "--sat-model",
+            "saos", "--saos-variant", "jerry-grunge", "--dry-run", "--out", "test-models",
+        ])
 
     # models.sh stays a RELATIVE path: shutil.which("bash") may resolve to the WSL shim in
     # WindowsApps, whose filesystem namespace has no C:\ — an absolute Windows path fails there

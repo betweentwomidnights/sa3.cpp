@@ -32,6 +32,7 @@
 #include "same_ae.h"
 #include "lora.h"
 #include "rng.h"
+#include "sampling.h"
 #include "audio_post.h"
 
 #include <algorithm>
@@ -1310,10 +1311,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                              cfg_scale, apg_scale, cfg_rescale, cfg_norm_threshold);
             v_use = vcfg.data();
         }
-        for (int j = 0; j < N; j++) {
-            float denoised = host_x[j] - tcur * v_use[j];
-            host_x[j] = (1.0f - tnext) * denoised + tnext * stepnoise[(size_t)i*N + j];
-        }
+        sa3::sampling::rf_pingpong_step(host_x.data(), v_use,
+                                        stepnoise.data() + (size_t)i*N, (size_t)N,
+                                        tcur, tnext);
         dit_download_update += wall_time_s() - ts;
         if (params.on_progress)   // sampling spans 0..0.9 of the overall bar; callback overrides the printf
             params.on_progress({"sampling", i+1, steps, 0.9f * (float)(i+1) / (float)steps});

@@ -47,16 +47,30 @@ inline void read_exact(FILE* f, void* dst, size_t bytes, const std::string& what
     }
 }
 
+inline std::vector<int16_t> interleave_planar_i16(const float* data, int n_samples,
+                                                  int n_ch, int channel_stride) {
+    if (!data || n_samples < 0 || n_ch < 1 || channel_stride < n_samples)
+        throw std::invalid_argument("invalid planar audio geometry");
+    auto clip = [](float v) {
+        v = v < -1.f ? -1.f : (v > 1.f ? 1.f : v);
+        return (int16_t)(v * 32767.0f);
+    };
+    std::vector<int16_t> inter((size_t)n_samples * n_ch);
+    for (int s = 0; s < n_samples; ++s)
+        for (int c = 0; c < n_ch; ++c)
+            inter[(size_t)s*n_ch + c] = clip(data[(size_t)c*channel_stride + s]);
+    return inter;
+}
+
 } // namespace wav_detail
 
-// Write interleaved 16-bit WAV from planar f32 channels (ch0[0..n-1], ch1[0..n-1], ...).
-inline void write_wav_planar(const std::string& path, const float* data, int n_samples,
-                             int n_ch, int sample_rate) {
-    auto clip = [](float v){ v = v < -1.f ? -1.f : (v > 1.f ? 1.f : v); return (int16_t)(v * 32767.0f); };
-    std::vector<int16_t> inter((size_t)n_samples * n_ch);
-    for (int s = 0; s < n_samples; s++)
-        for (int c = 0; c < n_ch; c++)
-            inter[(size_t)s*n_ch + c] = clip(data[(size_t)c*n_samples + s]);
+// Write interleaved 16-bit WAV from planar f32 channels whose source planes may be
+// longer than the requested output. channel_stride is the distance between channel
+// starts; this matters when cropping a decoded buffer without first repacking it.
+inline void write_wav_planar_strided(const std::string& path, const float* data, int n_samples,
+                                     int n_ch, int sample_rate, int channel_stride) {
+    std::vector<int16_t> inter = wav_detail::interleave_planar_i16(
+        data, n_samples, n_ch, channel_stride);
 
     const uint32_t data_bytes = (uint32_t)inter.size() * sizeof(int16_t);
     const uint32_t byte_rate  = sample_rate * n_ch * 2;
@@ -69,6 +83,12 @@ inline void write_wav_planar(const std::string& path, const float* data, int n_s
     fwrite("data", 1, 4, f); u32(data_bytes);
     fwrite(inter.data(), 1, data_bytes, f);
     fclose(f);
+}
+
+// Write a complete tightly-packed planar buffer.
+inline void write_wav_planar(const std::string& path, const float* data, int n_samples,
+                             int n_ch, int sample_rate) {
+    write_wav_planar_strided(path, data, n_samples, n_ch, sample_rate, n_samples);
 }
 
 // Same WAV bytes in memory (for an HTTP response body, etc.) instead of a file.

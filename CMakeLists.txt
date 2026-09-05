@@ -30,6 +30,7 @@ else()
     set(SA3_BUILD_TOOLS_DEFAULT ON)
 endif()
 option(SA3_BUILD_TOOLS "Build the CLI tools and tests" ${SA3_BUILD_TOOLS_DEFAULT})
+option(SA3_BUILD_SAT "Build the optional classic stable-audio-tools component, CLI, and tests" OFF)
 option(SA3_STATIC "Build libsa3 as a static library (for embedding in an app binary)" OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     # An iOS app links a static archive or an embedded framework; a bare .dylib is not signable
@@ -134,6 +135,13 @@ add_library(sa3 INTERFACE)
 target_include_directories(sa3 INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sa3 INTERFACE ggml)
 
+# Optional classic stable-audio-tools component. Kept independent of the CLI
+# switch so an embedding application can link SAOS without building any tools.
+if(SA3_BUILD_SAT)
+    add_library(sa3_saos STATIC src/sat/pipeline.cpp)
+    target_link_libraries(sa3_saos PUBLIC sa3)
+endif()
+
 # --- tools -----------------------------------------------------------------
 if(SA3_BUILD_TOOLS)
 add_executable(sa3-smoke tools/sa3-smoke.cpp)
@@ -150,6 +158,11 @@ target_link_libraries(sa3-dit PRIVATE sa3)
 
 add_executable(sa3-textmusic tools/sa3-textmusic.cpp)
 target_link_libraries(sa3-textmusic PRIVATE sa3)
+
+if(SA3_BUILD_SAT)
+    add_executable(saos-generate tools/saos-generate.cpp)
+    target_link_libraries(saos-generate PRIVATE sa3_saos)
+endif()
 
 add_executable(sa3-tokenize tools/sa3-tokenize.cpp)
 target_link_libraries(sa3-tokenize PRIVATE sa3)
@@ -260,6 +273,11 @@ target_include_directories(sa3-latents-cache-test PRIVATE ${CMAKE_CURRENT_SOURCE
 add_executable(sa3-set-wide-row-test tests/set_wide_row_test.cpp)
 target_link_libraries(sa3-set-wide-row-test PRIVATE sa3)
 
+if(SA3_BUILD_SAT)
+    add_executable(sa3-sat-sampling-test tests/sat_sampling_test.cpp)
+    target_link_libraries(sa3-sat-sampling-test PRIVATE sa3_saos)
+endif()
+
 if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     add_test(NAME sa3-train-config-test COMMAND sa3-train-config-test)
@@ -282,10 +300,26 @@ if(BUILD_TESTING)
     add_test(NAME sa3-lora-quant-merge-test COMMAND sa3-lora-quant-merge-test)
     add_test(NAME sa3-latents-cache-test COMMAND sa3-latents-cache-test)
     add_test(NAME sa3-set-wide-row-test COMMAND sa3-set-wide-row-test)
+    if(SA3_BUILD_SAT)
+        add_test(NAME sa3-sat-sampling-test COMMAND sa3-sat-sampling-test)
+    endif()
     if(Python3_Interpreter_FOUND)
         add_test(NAME sa3-model-artifacts-test
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_artifacts_test.py")
+        if(SA3_BUILD_SAT)
+            add_test(NAME sa3-sat-oobleck-converter-test
+                     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_oobleck_converter_test.py")
+            add_test(NAME sa3-sat-dit-converter-test
+                     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_dit_converter_test.py")
+            add_test(NAME sa3-sat-t5-converter-test
+                     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_t5_converter_test.py")
+        endif()
         set_tests_properties(sa3-model-artifacts-test PROPERTIES LABELS "non-gpu;tooling")
+        if(SA3_BUILD_SAT)
+            set_tests_properties(sa3-sat-oobleck-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
+            set_tests_properties(sa3-sat-dit-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
+            set_tests_properties(sa3-sat-t5-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
+        endif()
     endif()
     set_tests_properties(
         sa3-train-config-test sa3-train-dataset-test sa3-train-model-paths-test
@@ -295,6 +329,9 @@ if(BUILD_TESTING)
         sa3-train-prompt-test sa3-train-inpaint-test
         sa3-dit-lin-functional-test sa3-latents-cache-test
         PROPERTIES LABELS "non-gpu;training;lora")
+    if(SA3_BUILD_SAT)
+        set_tests_properties(sa3-sat-sampling-test PROPERTIES LABELS "non-gpu;sat")
+    endif()
 endif()
 
 endif() # SA3_BUILD_TOOLS
