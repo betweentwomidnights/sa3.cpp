@@ -2,6 +2,7 @@
 #include "sat/dit.h"
 #include "sat/model_spec.h"
 #include "sat/oobleck.h"
+#include "sat/pipeline.h"
 #include "sat/t5.h"
 #include "wav.h"
 
@@ -307,6 +308,35 @@ int main() {
     sa3::sampling::rf_pingpong_step(x.data(), velocity, noise, x.size(), 0.8f, 0.25f);
     fails += expect(near(x[0], 1.1375f) && near(x[1], 0.6375f),
                     "ping-pong update matches reference algebra");
+
+    float xe[] = {1.0f, -2.0f};
+    const float ve[] = {2.0f, 4.0f};
+    sa3::sampling::rf_euler_step(xe, ve, 2, 1.0f, 0.5f);
+    fails += expect(near(xe[0], 0.0f) && near(xe[1], -4.0f),
+                    "RF Euler update matches reference algebra");
+
+    float xd[] = {1.0f, -2.0f};
+    sa3::sampling::RfDpmppState dpmpp;
+    sa3::sampling::rf_dpmpp_step(xd, ve, 2, 1.0f, 0.75f, dpmpp);
+    fails += expect(near(xd[0], 0.5f) && near(xd[1], -3.0f),
+                    "RF DPM++ first update matches reference algebra");
+    const float vd[] = {0.25f, -0.5f};
+    sa3::sampling::rf_dpmpp_step(xd, vd, 2, 0.75f, 0.5f, dpmpp);
+    fails += expect(near(xd[0], 0.4375f) && near(xd[1], -2.875f),
+                    "RF DPM++ multistep update matches reference algebra");
+    const float vd2[] = {-0.1f, 0.2f};
+    sa3::sampling::rf_dpmpp_step(xd, vd2, 2, 0.5f, 0.25f, dpmpp);
+    fails += expect(near(xd[0], 0.50625f) && near(xd[1], -3.0125f),
+                    "RF DPM++ finite-history correction matches reference algebra");
+    const float before0 = xd[0], before1 = xd[1];
+    sa3::sampling::rf_dpmpp_step(xd, vd2, 2, 0.25f, 0.0f, dpmpp);
+    fails += expect(near(xd[0], before0 - 0.25f * vd2[0]) &&
+                    near(xd[1], before1 - 0.25f * vd2[1]),
+                    "RF DPM++ terminal update returns the denoised estimate");
+
+    fails += expect(sa3::sat::parse_sampler("dpmpp") == sa3::sat::Sampler::Dpmpp &&
+                    std::string(sa3::sat::sampler_name(sa3::sat::Sampler::PingPong)) == "pingpong",
+                    "SAT sampler names round-trip");
 
     bool threw = false;
     try { (void)sa3::sampling::make_rf_logsnr_schedule(0); }

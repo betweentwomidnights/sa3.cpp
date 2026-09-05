@@ -33,8 +33,11 @@ change those settings while retaining loadable tensor shapes.
   cross attention, and SwiGLU feed-forward blocks.
 - `src/sat/model_spec.h`: SAOS model geometry, inference defaults, validation, and
   checkpoint topology checks.
-- `tools/saos-generate.cpp`: isolated experimental ping-pong pipeline and timing driver.
-  It does not add SAOS branches to `sa3_pipeline.h` or the existing public API.
+- `src/sat/pipeline.h`: reusable application component for staged T5, classic-DiT,
+  and Oobleck execution, with objective-aware sampler/step/CFG defaults.
+- `tools/saos-generate.cpp`: isolated experimental command-line and timing driver.
+  It is a thin frontend over `sa3::sat::Pipeline` and does not add SAOS branches to
+  `sa3_pipeline.h` or the existing public API.
 
 ## Conversion and validation
 
@@ -79,9 +82,13 @@ cmake -S . -B build-saos -DSA3_BUILD_SAOS=ON
 cmake --build build-saos --config Release --target saos-generate
 ```
 
-For CUDA, add `-DSA3_CUDA=ON` to the configure command. `SA3_BUILD_SAOS` is only
-effective when the general `SA3_BUILD_TOOLS` option is enabled; both default to the
-appropriate non-application behavior (`SA3_BUILD_SAOS` is always off).
+This also creates the `sa3_saos` static-library target. An embedding application can
+link that component directly and consume tightly packed planar float audio from
+`sa3::sat::Pipeline::generate`; it does not need to invoke or link the CLI.
+
+For CUDA, add `-DSA3_CUDA=ON` to the configure command. `SA3_BUILD_SAOS` creates the
+component even when `SA3_BUILD_TOOLS=OFF`; the latter only controls whether the
+`saos-generate` frontend and focused test executables are also created.
 
 ```powershell
 python tools/convert_sat_dit.py --src model.safetensors --config model_config.json --out saos-dit-f16.gguf
@@ -99,14 +106,46 @@ The model is sampled at its trained 256 latent frames (524,288 decoded samples),
 the WAV is cropped to exactly 485,100 samples/11 seconds. The timing line separates
 weight loading, graph build/allocation, eight-step denoising, and Oobleck decoding.
 
+For a topology-compatible pre-ARC/full-checkpoint finetune, convert its `.ckpt`
+directly (Lightning `state_dict` and EMA wrappers are detected safely), then use Euler
+or RF DPM++ with guidance. When omitted, a `rectified_flow` GGUF resolves to Euler,
+50 steps, and CFG 4; `rf_denoiser` continues to resolve to ping-pong, 8 steps, and CFG 1.
+
+```powershell
+python tools/convert_sat_dit.py --src finetune.ckpt --config finetune_config.json `
+  --out finetune-dit-f16.gguf --model-id my-saos-finetune
+saos-generate --t5 t5-base-encoder-f16.gguf --dit finetune-dit-f16.gguf `
+  --ae saos-oobleck-f16.gguf --prompt "..." --sampler dpmpp --steps 40 `
+  --cfg-scale 4 --seconds 11 --peak-normalize --wav finetune.wav
+```
+
+Peak normalization is a CLI presentation option matching Gary's current service;
+the reusable component returns unclipped planar float samples so embedding applications
+retain control over loudness and limiting.
+
+## Full-checkpoint validation
+
+Two independent `rectified_flow` finetunes have been converted and run through the
+native CUDA component with the shared SAOS T5 and Oobleck artifacts:
+
+- `S3Sound/kickbass`, checkpoint `kickbass_v1_saos_e257_s18870.ckpt`: an unwrapped
+  750-tensor full checkpoint. RF DPM++ at 40 steps/CFG 4 generated 11 seconds in
+  about 2.5 seconds total on an RTX 5070 Laptop GPU.
+- `thepatch/jerry_grunge`, checkpoint
+  `jerry_encoded_bs64_epoch=374-step=3000.ckpt`: a 5.77 GB preencoded Lightning
+  training snapshot. Conversion selected its 382-tensor EMA DiT, paired it with the
+  frozen duration conditioner, and omitted optimizer, loss, and autoencoder state.
+  RF DPM++ at 40 steps/CFG 4 likewise generated 11 seconds in about 2.5 seconds.
+
+The objective-driven no-override path was also exercised on KickBass and resolved to
+Euler, 50 steps, and CFG 4 as intended.
+
 ## Remaining integration gates
 
 1. Add the T5 precompiled Unicode normalization table; the current dependency-free
    tokenizer exactly covers ordinary prompt text but does not yet reproduce every NFKC-like
    normalization performed by SentencePiece for unusual Unicode compatibility characters.
-2. Decide whether to expose the family through a reusable SAT pipeline class or keep it
-   as application composition; do not put model-family branching in the SA3 pipeline.
-3. Convert a Foundation-1 checkpoint and let metadata/topology validation determine
+2. Convert a Foundation-1 checkpoint and let metadata/topology validation determine
    which Oobleck/T5 artifacts it can share. Its larger DiT requires a separately sized
    graph even when the implementation is identical.
 

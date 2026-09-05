@@ -135,6 +135,13 @@ add_library(sa3 INTERFACE)
 target_include_directories(sa3 INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sa3 INTERFACE ggml)
 
+# Optional classic stable-audio-tools component. Kept independent of the CLI
+# switch so an embedding application can link SAOS without building any tools.
+if(SA3_BUILD_SAOS)
+    add_library(sa3_saos STATIC src/sat/pipeline.cpp)
+    target_link_libraries(sa3_saos PUBLIC sa3)
+endif()
+
 # --- tools -----------------------------------------------------------------
 if(SA3_BUILD_TOOLS)
 add_executable(sa3-smoke tools/sa3-smoke.cpp)
@@ -153,10 +160,8 @@ add_executable(sa3-textmusic tools/sa3-textmusic.cpp)
 target_link_libraries(sa3-textmusic PRIVATE sa3)
 
 if(SA3_BUILD_SAOS)
-    # Experimental classic stable-audio-tools runner. Kept independent of the SA3
-    # pipeline so SAOS/Foundation support does not add model-family conditionals there.
     add_executable(saos-generate tools/saos-generate.cpp)
-    target_link_libraries(saos-generate PRIVATE sa3)
+    target_link_libraries(saos-generate PRIVATE sa3_saos)
 endif()
 
 add_executable(sa3-tokenize tools/sa3-tokenize.cpp)
@@ -270,7 +275,7 @@ target_link_libraries(sa3-set-wide-row-test PRIVATE sa3)
 
 if(SA3_BUILD_SAOS)
     add_executable(sa3-sat-sampling-test tests/sat_sampling_test.cpp)
-    target_link_libraries(sa3-sat-sampling-test PRIVATE sa3)
+    target_link_libraries(sa3-sat-sampling-test PRIVATE sa3_saos)
 endif()
 
 if(BUILD_TESTING)

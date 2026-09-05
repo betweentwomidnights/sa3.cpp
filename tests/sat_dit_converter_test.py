@@ -95,6 +95,40 @@ class SatDitConverterTest(unittest.TestCase):
         with self.assertRaisesRegex(ConversionError, "unrecognized DiT tensors"):
             temp, _, _ = self.fixture(sd); temp.cleanup()
 
+    def test_lightning_checkpoint_state_dict(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is unavailable")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src, cfg, out = root / "m.ckpt", root / "m.json", root / "m.gguf"
+            torch.save({"state_dict": {k: torch.from_numpy(v) for k, v in state().items()}}, src)
+            cfg.write_text(json.dumps(config()), encoding="utf-8")
+            result = convert(src, cfg, out)
+            self.assertEqual(result["tensor_count"], 39)
+            self.assertEqual(len(GGUFReader(str(out)).tensors), 39)
+
+    def test_lightning_ema_checkpoint(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is unavailable")
+        wrapped = {}
+        for key, value in state().items():
+            if key.startswith("model.model."):
+                key = "diffusion_ema.ema_model." + key[len("model."):]
+            else:
+                key = "diffusion." + key
+            wrapped[key] = torch.from_numpy(value)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src, cfg, out = root / "ema.ckpt", root / "m.json", root / "m.gguf"
+            torch.save({"state_dict": wrapped}, src)
+            cfg.write_text(json.dumps(config()), encoding="utf-8")
+            result = convert(src, cfg, out)
+            self.assertEqual(result["tensor_count"], 39)
+
 
 if __name__ == "__main__":
     unittest.main()

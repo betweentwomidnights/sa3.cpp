@@ -8,6 +8,7 @@ model-family branches in either implementation.
 """
 
 import argparse
+from contextlib import contextmanager
 import json
 import sys
 from pathlib import Path
@@ -21,6 +22,63 @@ import gguf_meta
 
 class ConversionError(ValueError):
     pass
+
+
+@contextmanager
+def open_tensor_source(path):
+    """Open safetensors or a PyTorch/Lightning checkpoint without executing pickle code."""
+    path = Path(path)
+    if path.suffix.lower() == ".safetensors":
+        with safe_open(str(path), framework="numpy") as source:
+            yield set(source.keys()), source.get_tensor
+        return
+
+    try:
+        import torch
+    except ImportError as exc:
+        raise ConversionError("PyTorch is required to convert .ckpt files") from exc
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    except TypeError:  # mmap is unavailable on older torch versions
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    state = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    if not isinstance(state, dict):
+        raise ConversionError("checkpoint does not contain a tensor state_dict")
+
+    # Lightning training snapshots wrap the inference model under `diffusion.`.
+    # Prefer EMA when present, matching Gary's stable-audio model loader.
+    ema_prefix = "diffusion_ema.ema_model."
+    diffusion_prefix = "diffusion."
+    if any(k.startswith(ema_prefix) for k in state):
+        tensors = {}
+        for key, value in state.items():
+            if key.startswith(ema_prefix):
+                tail = key[len(ema_prefix):]
+                # EMA owns the inner DiffusionTransformer, so its `model.*`
+                # corresponds to the wrapper's `model.model.*` namespace.
+                tensors[tail if tail.startswith("model.model.") else "model." + tail] = value
+            elif key.startswith(diffusion_prefix + "conditioner."):
+                # The frozen conditioner is not part of the EMA object.
+                tensors[key[len(diffusion_prefix):]] = value
+    elif any(k.startswith(diffusion_prefix) for k in state):
+        tensors = {k[len(diffusion_prefix):]: v for k, v in state.items()
+                   if k.startswith(diffusion_prefix)}
+    else:
+        tensors = state
+
+    def get_tensor(name):
+        value = tensors[name]
+        if not hasattr(value, "detach"):
+            return np.asarray(value)
+        value = value.detach().cpu()
+        if value.dtype == torch.bfloat16:
+            value = value.float()
+        return value.numpy()
+
+    try:
+        yield set(tensors), get_tensor
+    finally:
+        del tensors, state, checkpoint
 
 
 def read_spec(path):
@@ -90,15 +148,14 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
     consumed = set()
     count = params = 0
     prefix = "model.model."
-    with safe_open(str(src), framework="numpy") as f:
-        keys = set(f.keys())
+    with open_tensor_source(src) as (keys, get_tensor):
 
         def take(name):
             key = prefix + name
             if key not in keys:
                 raise ConversionError(f"missing DiT tensor: {key}")
             consumed.add(key)
-            return f.get_tensor(key)
+            return get_tensor(key)
 
         def emit(dst, src_name, weight=False, squeeze_kernel=False):
             nonlocal count, params
@@ -116,7 +173,7 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
             nonlocal count, params
             if key not in keys:
                 raise ConversionError(f"missing conditioner tensor: {key}")
-            a = np.ascontiguousarray(f.get_tensor(key).astype(wdtype if weight else np.float32))
+            a = np.ascontiguousarray(get_tensor(key).astype(wdtype if weight else np.float32))
             writer.add_tensor(dst, a)
             count += 1
             params += int(a.size)

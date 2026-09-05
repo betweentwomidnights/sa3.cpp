@@ -17,7 +17,9 @@ enum class DiffusionObjective {
 };
 
 enum class Sampler {
+    Auto,
     Euler,
+    Dpmpp,
     PingPong,
     Dpmpp2mSde,
     Dpmpp3mSde,
