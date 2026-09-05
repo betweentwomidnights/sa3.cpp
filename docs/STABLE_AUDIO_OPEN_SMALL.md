@@ -174,6 +174,9 @@ The shared artifacts were also isolated:
 - Oobleck Q8/Q5/Q4 retained 0.9990, 0.9987, and 0.9983 log-magnitude cosine.
   Most Oobleck convolution tensors remain F16 because the generic quantizer only
   quantizes compatible two-dimensional matrices, so its size reduction is modest.
+  In the most sensitive ARC Q4 test, replacing only the Q4 Oobleck with F16 changed
+  the all-Q4 render by just 0.999541 raw-waveform and 0.999949 RMS-envelope cosine.
+  The extra 59 MiB therefore does not recover the upstream Q4 trajectory drift.
 
 Publish F16, Q8_0, Q5_K_M, and Q4_K_M components. Label Q5_K_M as the recommended
 download: it is only 37 MiB larger than an all-Q4 bundle, while staying robust across
