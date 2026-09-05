@@ -132,13 +132,6 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
     parameter_count = 0
 
     writer = GGUFWriter(str(out), arch="sat-oobleck")
-    gguf_meta.add_general(
-        writer,
-        basename=f"{model_id}-oobleck-decoder",
-        name=f"{model_id} Oobleck decoder",
-        finetune=model_id,
-        license_id="stabilityai-community",
-    )
     writer.add_string("sat.architecture", "stable-audio-tools")
     writer.add_uint32("sat.format_version", 1)
     writer.add_string("sat.model_id", model_id)
@@ -225,6 +218,17 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
             raise ConversionError(f"unrecognized decoder tensors: {preview}{suffix}")
 
     writer.add_uint64("sat.ae.parameter_count", parameter_count)
+    gguf_meta.add_general(
+        writer,
+        basename=f"{model_id}-oobleck",
+        name=f"{model_id} Oobleck decoder",
+        finetune=model_id,
+        license_id="stabilityai-community",
+    )
+    gguf_meta.add_source(
+        writer, "Stable Audio Open Small", "Stability AI",
+        "https://huggingface.co/stabilityai/stable-audio-open-small",
+        "dc620d91535857b72ebb59b4ca45978db6d417f5", "model.safetensors")
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file()

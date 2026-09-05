@@ -111,7 +111,11 @@ def read_spec(path):
     }
 
 
-def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f16"):
+def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f16",
+            source_repo="https://huggingface.co/stabilityai/stable-audio-open-small",
+            source_revision="dc620d91535857b72ebb59b4ca45978db6d417f5",
+            source_file="model.safetensors", source_name=None,
+            source_organization="Stability AI"):
     _, spec = read_spec(config)
     if spec["width"] % spec["heads"]:
         raise ConversionError("DiT width must be divisible by the head count")
@@ -122,8 +126,6 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
     out.parent.mkdir(parents=True, exist_ok=True)
 
     writer = GGUFWriter(str(out), arch="sat-dit")
-    gguf_meta.add_general(writer, basename=f"{model_id}-dit", name=f"{model_id} classic DiT",
-                          finetune=model_id, license_id="stabilityai-community")
     writer.add_string("sat.architecture", "stable-audio-tools")
     writer.add_uint32("sat.format_version", 1)
     writer.add_string("sat.model_id", model_id)
@@ -234,6 +236,11 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
             raise ConversionError("unrecognized DiT tensors: " + ", ".join(unexpected[:8]))
 
     writer.add_uint64("sat.dit.parameter_count", params)
+    gguf_meta.add_general(writer, basename=f"{model_id}-dit", name=f"{model_id} classic DiT",
+                          finetune=model_id, n_params=params,
+                          license_id="stabilityai-community")
+    gguf_meta.add_source(writer, source_name or model_id, source_organization, source_repo,
+                         source_revision, source_file)
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file()
@@ -248,9 +255,15 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--model-id", default="stable-audio-open-small")
     ap.add_argument("--out-type", choices=("f16", "f32"), default="f16")
+    ap.add_argument("--source-repo", default="https://huggingface.co/stabilityai/stable-audio-open-small")
+    ap.add_argument("--source-revision", default="dc620d91535857b72ebb59b4ca45978db6d417f5")
+    ap.add_argument("--source-file", default="model.safetensors")
+    ap.add_argument("--source-name")
+    ap.add_argument("--source-organization", default="Stability AI")
     a = ap.parse_args()
     try:
-        r = convert(a.src, a.config, a.out, a.model_id, a.out_type)
+        r = convert(a.src, a.config, a.out, a.model_id, a.out_type, a.source_repo,
+                    a.source_revision, a.source_file, a.source_name, a.source_organization)
     except (ConversionError, OSError, KeyError, json.JSONDecodeError) as exc:
         sys.exit(f"error: {exc}")
     print(f"wrote {r['output']} ({r['tensor_count']} tensors, "

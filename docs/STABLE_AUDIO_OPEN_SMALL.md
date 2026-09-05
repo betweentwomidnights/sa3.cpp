@@ -35,6 +35,9 @@ change those settings while retaining loadable tensor shapes.
   checkpoint topology checks.
 - `src/sat/pipeline.h`: reusable application component for staged T5, classic-DiT,
   and Oobleck execution, with objective-aware sampler/step/CFG defaults.
+- `src/sat/model_paths.h`: SAOS-specific published filenames and local model resolution.
+  SAT remains the runtime umbrella; this catalog intentionally does not claim future
+  SAO 1.0 or Foundation-1 repositories.
 - `tools/saos-generate.cpp`: isolated experimental command-line and timing driver.
   It is a thin frontend over `sa3::sat::Pipeline` and does not add SAOS branches to
   `sa3_pipeline.h` or the existing public API.
@@ -78,7 +81,7 @@ executable or model-specific runtime dependency.
 Enable the isolated runner and its focused tests explicitly:
 
 ```powershell
-cmake -S . -B build-saos -DSA3_BUILD_SAOS=ON
+cmake -S . -B build-saos -DSA3_BUILD_SAT=ON
 cmake --build build-saos --config Release --target saos-generate
 ```
 
@@ -86,9 +89,26 @@ This also creates the `sa3_saos` static-library target. An embedding application
 link that component directly and consume tightly packed planar float audio from
 `sa3::sat::Pipeline::generate`; it does not need to invoke or link the CLI.
 
-For CUDA, add `-DSA3_CUDA=ON` to the configure command. `SA3_BUILD_SAOS` creates the
+For CUDA, add `-DSA3_CUDA=ON` to the configure command. `SA3_BUILD_SAT` creates the
 component even when `SA3_BUILD_TOOLS=OFF`; the latter only controls whether the
 `saos-generate` frontend and focused test executables are also created.
+
+Download the recommended all-Q5 SAOS bundle and generate with the catalog resolver:
+
+```powershell
+python tools/download_models.py --sat --sat-model saos --saos-variant arc
+saos-generate --model arc --prompt "A short, beautiful piano riff in C minor" `
+  --seconds 11 --out saos.wav
+```
+
+Use `--saos-variant kickbass` or `jerry-grunge` when downloading a finetune, then pass
+the same name to `saos-generate --model`. The downloader defaults are scoped by family:
+ordinary no-flag usage still downloads SA3 medium/F16, while `--sat` selects SAOS Q5_K_M
+for the DiT, T5, and Oobleck. `--encoding`, `--t5-encoding`, and `--ae-encoding` can
+override those tiers independently. `SA3_MODELS_DIR` or `--models-dir` changes the
+catalog root.
+
+The explicit component path form remains available for conversion and parity work:
 
 ```powershell
 python tools/convert_sat_dit.py --src model.safetensors --config model_config.json --out saos-dit-f16.gguf
@@ -99,7 +119,7 @@ $env:SA3_DEVICE="cuda"; $env:SA3_FLASH_ATTN="1"
 saos-generate --t5 t5-base-encoder-f16.gguf `
   --prompt "A short, beautiful piano riff in C minor" --seconds 11 `
   --dit saos-dit-f16.gguf --ae saos-oobleck-f16.gguf `
-  --frames 256 --steps 8 --samples 485100 --wav saos.wav
+  --frames 256 --steps 8 --samples 485100 --out saos.wav
 ```
 
 The model is sampled at its trained 256 latent frames (524,288 decoded samples), then
@@ -116,7 +136,7 @@ python tools/convert_sat_dit.py --src finetune.ckpt --config finetune_config.jso
   --out finetune-dit-f16.gguf --model-id my-saos-finetune
 saos-generate --t5 t5-base-encoder-f16.gguf --dit finetune-dit-f16.gguf `
   --ae saos-oobleck-f16.gguf --prompt "..." --sampler dpmpp --steps 40 `
-  --cfg-scale 4 --seconds 11 --peak-normalize --wav finetune.wav
+  --cfg-scale 4 --seconds 11 --peak-normalize --out finetune.wav
 ```
 
 Peak normalization is a CLI presentation option matching Gary's current service;
@@ -191,14 +211,17 @@ thermal-state-dependent rather than promise a fixed speedup.
 1. Add the T5 precompiled Unicode normalization table; the current dependency-free
    tokenizer exactly covers ordinary prompt text but does not yet reproduce every NFKC-like
    normalization performed by SentencePiece for unusual Unicode compatibility characters.
-2. Convert a Foundation-1 checkpoint and let metadata/topology validation determine
-   which Oobleck/T5 artifacts it can share. Its larger DiT requires a separately sized
-   graph even when the implementation is identical.
-3. Publish the validated SAOS and finetune GGUFs. Prefer one SAOS GGUF model repository
-   with shared T5/Oobleck artifacts at the top level and a directory per DiT variant
-   (`arc`, `base`, `kickbass`, and `jerry-grunge`). Include source-checkpoint revision,
+2. Convert SAO 1.0 and Foundation-1 independently and let metadata/topology validation
+   determine which Oobleck/T5 artifacts they can share. Their larger DiT requires a
+   separately sized graph even when the implementation is identical, and Foundation-1
+   additionally requires the RoyalCities inference behavior.
+3. Publish the validated artifacts in `thepatch/stable-audio-open-small-GGUF`, with the
+   ARC DiT and shared T5/Oobleck at repository root and only the validated finetunes under
+   `finetunes/kickbass/` and `finetunes/jerry-grunge/`. Include source-checkpoint revision,
    conversion command, tensor/weight type, recommended sampler defaults, license and
    attribution, checksums, and a short reproducible generation example for each variant.
+   SAO 1.0 and Foundation-1 will receive their own model repositories rather than being
+   folded into a misleading catch-all SAT repository.
 
 ## Deferred LoRA question
 

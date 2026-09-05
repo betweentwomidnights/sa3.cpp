@@ -1,6 +1,7 @@
 #include "sampling.h"
 #include "sat/dit.h"
 #include "sat/model_spec.h"
+#include "sat/model_paths.h"
 #include "sat/oobleck.h"
 #include "sat/pipeline.h"
 #include "sat/t5.h"
@@ -237,6 +238,21 @@ static int test_oobleck_metadata() {
 
 int main() {
     int fails = 0;
+
+    fails += expect(sa3::sat::saos_dit_relative_path("arc", "q5_k_m") ==
+                    "stable-audio-open-small-dit-0.3B-v1.0-Q5_K_M.gguf",
+                    "canonical SAOS ARC filename");
+    fails += expect(sa3::sat::saos_dit_relative_path("kickbass", "q4_k_m") ==
+                    "finetunes/kickbass/kickbass-v1-e257-dit-0.3B-v1.0-Q4_K_M.gguf",
+                    "canonical nested KickBass filename");
+    fails += expect(sa3::sat::saos_dit_relative_path("jerry_grunge", "F16") ==
+                    "finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-F16.gguf",
+                    "SAOS variant aliases normalize");
+    fails += expect(sa3::sat::saos_t5_relative_path("q8_0") ==
+                    "t5-base-encoder-0.1B-v1.0-Q8_0.gguf" &&
+                    sa3::sat::saos_oobleck_relative_path("q8_0") ==
+                    "stable-audio-open-small-oobleck-v1.0-Q8_0.gguf",
+                    "canonical shared SAOS component filenames");
 
     const sa3::sat::ModelSpec saos = sa3::sat::stable_audio_open_small();
     std::string why;

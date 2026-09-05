@@ -40,8 +40,6 @@ def convert(src, config, tokenizer, out, weight_type="f16"):
 
     out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
     w = GGUFWriter(str(out), arch="sat-t5")
-    gguf_meta.add_general(w, basename="t5-base-encoder", name="T5-base encoder",
-                          license_id="apache-2.0")
     w.add_string("sat.architecture", "stable-audio-tools")
     w.add_uint32("sat.format_version", 1)
     w.add_uint32("sat.t5.dim", dim)
@@ -96,6 +94,11 @@ def convert(src, config, tokenizer, out, weight_type="f16"):
             raise ConversionError("unrecognized encoder tensors: " + ", ".join(unexpected[:8]))
 
     w.add_uint64("sat.t5.parameter_count", params)
+    gguf_meta.add_general(w, basename="t5-base-encoder", name="T5-base encoder",
+                          n_params=params, license_id="apache-2.0")
+    gguf_meta.add_source(
+        w, "T5-base", "Google", "https://huggingface.co/google-t5/t5-base",
+        "a9723ea7f1b39c1eae772870f3b547bf6ef7e6c1", "model.safetensors")
     w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
     return {"output": str(out), "tensor_count": count, "parameter_count": params,
             "token_count": len(tokens)}

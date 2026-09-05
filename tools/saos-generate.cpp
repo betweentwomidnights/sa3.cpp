@@ -1,5 +1,6 @@
 // saos-generate -- thin CLI over the optional sa3_saos pipeline component.
 #include "sat/pipeline.h"
+#include "sat/model_paths.h"
 #include "wav.h"
 
 #include <algorithm>
@@ -40,12 +41,54 @@ static void write_f32(const std::string& path, const std::vector<float>& data) {
     fclose(f);
 }
 
+static void print_help() {
+    printf(
+        "Usage:\n"
+        "  saos-generate --prompt TEXT [options]\n"
+        "  saos-generate --dit FILE --t5 FILE --ae FILE --prompt TEXT [options]\n\n"
+        "Published SAOS models (from thepatch/stable-audio-open-small-GGUF):\n"
+        "  --model NAME          arc (default), kickbass, or jerry-grunge\n"
+        "  --models-dir DIR      model directory (default $SA3_MODELS_DIR or ./models)\n"
+        "  --encoding TYPE       DiT/T5/Oobleck tier (default q5_k_m)\n"
+        "  --t5-encoding TYPE    override the T5 tier\n"
+        "  --ae-encoding TYPE    override the Oobleck tier\n\n"
+        "Generation:\n"
+        "  --prompt TEXT         text prompt (required unless --conditioning is used)\n"
+        "  --negative-prompt T   negative text conditioning\n"
+        "  --seconds N           output duration, up to 11 seconds (default 11)\n"
+        "  --sampler NAME        auto, pingpong, euler, or dpmpp\n"
+        "  --steps N             denoising steps\n"
+        "  --cfg-scale N         classifier-free guidance scale\n"
+        "  --seed N              random seed\n"
+        "  --out FILE            output WAV (default saos-ggml.wav; --wav is an alias)\n"
+        "  --peak-normalize      normalize the output WAV peak\n\n"
+        "Auto defaults come from the GGUF: ARC uses pingpong/8 steps/CFG 1; ordinary\n"
+        "SAOS finetunes use Euler/50 steps/CFG 4. Explicit flags override them.\n\n"
+        "Low-level/debug:\n"
+        "  --dit FILE --t5 FILE --ae FILE    load explicit components\n"
+        "  --conditioning PREFIX             read PREFIX.cross.f32/global.f32\n"
+        "  --dump-conditioning PREFIX        write conditioning buffers\n"
+        "  --latent FILE --initial-latent FILE --step-noise FILE\n"
+        "  --frames N --samples N\n\n"
+        "Examples:\n"
+        "  saos-generate --prompt \"warm dusty chillhop, 90 bpm\" --out loop.wav\n"
+        "  saos-generate --model jerry-grunge --prompt \"grunge guitar riff\" --seed 42\n"
+        "  saos-generate --model kickbass --sampler dpmpp --steps 40 --cfg-scale 4 \\\n"
+        "      --prompt \"hard techno kick and rolling bass loop, 140 BPM\"\n");
+}
+
 static int run(int argc, char** argv) {
     sa3::sat::PipelinePaths paths;
     sa3::sat::GenerateParams params;
     const char* cond_prefix = nullptr;
     const char* dump_cond_prefix = nullptr;
-    const char* wav_path = "saos-ggml.wav";
+    std::string wav_path = "saos-ggml.wav";
+    std::string model = sa3::sat::kDefaultSaosVariant;
+    std::string encoding = sa3::sat::kDefaultSaosEncoding;
+    std::string t5_encoding;
+    std::string ae_encoding;
+    const char* env_models = std::getenv("SA3_MODELS_DIR");
+    std::string models_dir = env_models && *env_models ? env_models : "models";
     const char* latent_path = nullptr;
     const char* initial_path = nullptr;
     const char* step_noise_path = nullptr;
@@ -53,6 +96,11 @@ static int run(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--dit") && i + 1 < argc) paths.dit = argv[++i];
         else if (!strcmp(argv[i], "--ae") && i + 1 < argc) paths.autoencoder = argv[++i];
+        else if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
+        else if (!strcmp(argv[i], "--models-dir") && i + 1 < argc) models_dir = argv[++i];
+        else if (!strcmp(argv[i], "--encoding") && i + 1 < argc) encoding = argv[++i];
+        else if (!strcmp(argv[i], "--t5-encoding") && i + 1 < argc) t5_encoding = argv[++i];
+        else if (!strcmp(argv[i], "--ae-encoding") && i + 1 < argc) ae_encoding = argv[++i];
         else if (!strcmp(argv[i], "--conditioning") && i + 1 < argc) cond_prefix = argv[++i];
         else if (!strcmp(argv[i], "--t5") && i + 1 < argc) paths.t5 = argv[++i];
         else if (!strcmp(argv[i], "--prompt") && i + 1 < argc) params.prompt = argv[++i];
@@ -62,7 +110,8 @@ static int run(int argc, char** argv) {
         else if (!strcmp(argv[i], "--sampler") && i + 1 < argc)
             params.sampler = sa3::sat::parse_sampler(argv[++i]);
         else if (!strcmp(argv[i], "--dump-conditioning") && i + 1 < argc) dump_cond_prefix = argv[++i];
-        else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
+        else if ((!strcmp(argv[i], "--out") || !strcmp(argv[i], "--wav")) && i + 1 < argc)
+            wav_path = argv[++i];
         else if (!strcmp(argv[i], "--latent") && i + 1 < argc) latent_path = argv[++i];
         else if (!strcmp(argv[i], "--initial-latent") && i + 1 < argc) initial_path = argv[++i];
         else if (!strcmp(argv[i], "--step-noise") && i + 1 < argc) step_noise_path = argv[++i];
@@ -73,16 +122,22 @@ static int run(int argc, char** argv) {
             params.seed = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--peak-normalize")) peak_normalize = true;
         else if (!strcmp(argv[i], "--help")) {
-            printf("usage: saos-generate --dit model.gguf --ae decoder.gguf "
-                   "(--t5 t5.gguf --prompt TEXT | --conditioning PREFIX) "
-                   "[--negative-prompt TEXT] [--seconds 11] [--sampler auto|euler|dpmpp|pingpong] "
-                   "[--cfg-scale N] [--frames 256] [--steps N] [--samples N] [--seed 1234] "
-                   "[--peak-normalize] [--wav out.wav] "
-                   "[--initial-latent x.f32 --step-noise noise.f32]\n");
+            print_help();
             return 0;
         } else {
             throw std::runtime_error(std::string("unknown/incomplete argument: ") + argv[i]);
         }
+    }
+    const int explicit_paths = !paths.dit.empty() + !paths.t5.empty() + !paths.autoencoder.empty();
+    if (explicit_paths == 0) {
+        if (t5_encoding.empty()) t5_encoding = encoding;
+        if (ae_encoding.empty()) ae_encoding = encoding;
+        std::string error;
+        if (!sa3::sat::resolve_saos_model(models_dir, model, encoding, t5_encoding,
+                                          ae_encoding, &paths, &error))
+            throw std::runtime_error(error);
+    } else if ((cond_prefix && explicit_paths != 2) || (!cond_prefix && explicit_paths != 3)) {
+        throw std::runtime_error("explicit model mode requires --dit and --ae, plus --t5 when using --prompt");
     }
     const bool native_conditioning = !paths.t5.empty() && !params.prompt.empty();
     if (paths.dit.empty() || paths.autoencoder.empty() ||
@@ -119,7 +174,7 @@ static int run(int argc, char** argv) {
     sa3::write_wav_planar(wav_path, result.audio.data(), result.samples,
                           result.channels, result.sample_rate);
     const double audio_seconds = (double)result.samples / result.sample_rate;
-    printf("wrote %s  (%d samples, %d ch, %.3f audio sec)\n", wav_path,
+    printf("wrote %s  (%d samples, %d ch, %.3f audio sec)\n", wav_path.c_str(),
            result.samples, result.channels, audio_seconds);
     printf("model: objective=%s sampler=%s steps=%d cfg=%.3f\n",
            result.objective.c_str(), sa3::sat::sampler_name(result.sampler),
