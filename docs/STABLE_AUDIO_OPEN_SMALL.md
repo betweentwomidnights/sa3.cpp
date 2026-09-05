@@ -141,6 +141,48 @@ native CUDA component with the shared SAOS T5 and Oobleck artifacts:
 The objective-driven no-override path was also exercised on KickBass and resolved to
 Euler, 50 steps, and CFG 4 as intended.
 
+## Quantization validation
+
+The existing model-agnostic `sa3-quantize` path works without SAT-specific tensor
+branches. ARC, KickBass, and Jerry Grunge were each converted from F16 to Q8_0,
+Q5_K_M, and Q4_K_M. `sa3-quant-check` compared 122 quantized tensors at Q8_0 and
+119 at each K-quant tier for every DiT; all nine artifacts had zero tensors below
+0.990 cosine similarity.
+
+Each complete bundle below uses the same tier for its DiT, T5-base, and Oobleck.
+Audio comparisons use matched prompts/seeds against the all-F16 bundle. RMS-envelope
+and log-magnitude-spectrum cosine are reported because raw waveform cosine overstates
+small diffusion-trajectory and phase changes.
+
+| Tier | Complete bundle | ARC envelope / log-mag | Jerry envelope / log-mag |
+| --- | ---: | ---: | ---: |
+| F16 | 1,010 MiB | reference | reference |
+| Q8_0 | 569 MiB | 0.9995 / 0.9917 | 0.9999 / 0.9986 |
+| Q5_K_M | 416 MiB | 0.9937 / 0.9895 | 0.9992 / 0.9977 |
+| Q4_K_M | 379 MiB | 0.9383 / 0.9832 | 0.9973 / 0.9964 |
+
+The all-Q4 KickBass bundle measured 0.9952 envelope and 0.9855 log-magnitude
+cosine. DiT-only Q4 tests were stronger than the cumulative ARC result (0.9666
+envelope and 0.9870 log-magnitude), confirming that ARC is more sensitive to the
+combined T5 and DiT perturbation rather than identifying a corrupt quantized tensor.
+
+The shared artifacts were also isolated:
+
+- T5-base conditioning cosine was 0.999895 at Q8_0, 0.998273 at Q5_K_M, and
+  0.994069 at Q4_K_M. A full Jerry generation with only T5 quantized retained
+  0.9990, 0.9987, and 0.9979 log-magnitude cosine respectively.
+- Oobleck Q8/Q5/Q4 retained 0.9990, 0.9987, and 0.9983 log-magnitude cosine.
+  Most Oobleck convolution tensors remain F16 because the generic quantizer only
+  quantizes compatible two-dimensional matrices, so its size reduction is modest.
+
+Publish F16, Q8_0, Q5_K_M, and Q4_K_M components. Label Q5_K_M as the recommended
+download: it is only 37 MiB larger than an all-Q4 bundle, while staying robust across
+both objectives. Q8_0 is the near-transparent tier, F16 is the reference tier, and
+Q4_K_M is the space-first tier. CUDA load time falls substantially with quantization;
+end-to-end time improved by roughly 10–15% in back-to-back 11-second runs, while
+denoising speed on this relatively small DiT was close enough to treat as backend- and
+thermal-state-dependent rather than promise a fixed speedup.
+
 ## Remaining integration gates
 
 1. Add the T5 precompiled Unicode normalization table; the current dependency-free
