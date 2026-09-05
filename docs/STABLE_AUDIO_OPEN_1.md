@@ -39,6 +39,11 @@ SAO 1.0 adds no new model execution entry point. Applications use the existing
 `sigma_rho`, and `sde_eta` populated for V-prediction. The runtime supports
 both DPM++ 2M SDE and DPM++ 3M SDE.
 
+`seconds` and `seconds_total` are deliberately separate. `seconds` describes the
+requested output crop; `seconds_total` is the value passed to the learned numeric
+conditioner and defaults to `seconds` for existing callers. Foundation's musical
+profile needs these values to differ.
+
 A service that already fronts SAOS can reuse its prompt, seed, duration,
 negative-prompt, progress, WAV, and response-metadata plumbing. The family
 descriptor only needs to select the DiT, the 128-token T5, the maximum sample
@@ -52,6 +57,45 @@ Foundation currently has two useful named profiles:
 | RoyalCities UI | DPM++ 3M SDE | 0.01–100 | 100 | 7 |
 
 These remain application policy rather than hard-coded graph behavior.
+
+## Foundation musical timing
+
+Foundation-1's trained grid is 4 or 8 bars at 100, 110, 120, 128, 130, 140,
+or 150 BPM. `sat/foundation_timing.h` implements the complete grid, and
+`sat/profiles.h` applies it to `GenerateParams` while appending the required
+`N Bars, N BPM` prompt conditioning.
+
+The profile matches RoyalCities' three separate lengths:
+
+1. exact output samples: `round((60 / BPM) * 4 * bars * 44100)`;
+2. learned `seconds_total`: the exact duration rounded up to a whole second;
+3. latent canvas: that conditioned duration rounded up to the 2,048-sample
+   Oobleck stride.
+
+The decoded result is then cropped to the exact musical sample count. Unsupported
+BPMs are rejected rather than silently mapped to a different tempo.
+
+Pitch-preserving time stretching for arbitrary host tempos remains an open application
+feature. It works well in gary4local, but bringing it into this repository would require
+a deliberately selected DSP implementation and dependency/licensing policy; it does not
+belong in the DiT/T5/Oobleck primitives.
+
+Foundation-specific prompt randomization is also deferred to the generalized SAT CLI.
+The intended interface is a `--randomize` option that emits the audio and reports the
+actual prompt and seed, rather than a separate randomization endpoint.
+
+## Publication layout
+
+SAO 1.0 and Foundation-1 are packaged as separate, self-contained repositories:
+
+- `thepatch/stable-audio-open-1.0-GGUF`
+- `thepatch/foundation-1-GGUF`
+
+Both use the same canonical 128-token T5 and Oobleck filenames, and those shared
+artifacts are byte-identical between repositories. `tools/stage_sat_large_repos.py`
+constructs both release directories, verifies source licenses, and writes SHA-256
+manifests. `tools/download_models.py --sat --sat-model ...` resolves either family
+without changing the default SA3 download.
 
 ## Reference validation
 
@@ -67,7 +111,16 @@ measured:
 The native CUDA pipeline also completed matched 11-second, 100-step renders for
 both Foundation profiles and the official SAO 1.0 profile.
 
-## Preliminary quantization matrix
+The musical-timing integration was subsequently exercised through the packaged
+Q5 Foundation bundle at both 4 bars / 128 BPM and the longest 8 bars / 100 BPM
+boundary. The latter used 431 latent frames conditioned with `seconds_total=20`
+and cropped to exactly 846,720 stereo samples (19.200 s), including the canvas
+extension 688 samples beyond the nominal 882,000-sample checkpoint window.
+The packaged SAO 1.0 Q8 bundle also completed its full 1,024-frame context and
+cropped it to 2,072,700 samples (47.000 s). Both ran on CUDA against the pinned
+GGML submodule.
+
+## Quantization matrix
 
 The generic quantizer required no SAT-specific tensor rules. Per-tensor checks
 at a 0.990 cosine threshold passed all tested artifacts:
@@ -95,13 +148,11 @@ CUDA end-to-end real-time factors for the SAO 1.0 run were 0.879 at F16,
 showed the same roughly 10–15 percent quantized speed improvement.
 
 These paired metrics measure divergence from one F16 trajectory, not absolute
-audio quality. Q8 is the conservative high-fidelity tier. Q5 and Q4 need the
-same ear-test gate used for SAOS before assigning publication recommendations;
-all tiers are technically healthy and remain candidates for publication.
+audio quality. All tiers passed listening tests and remain publication candidates.
+Q8 is the conservative high-fidelity tier; Foundation Q5 is the recommended balance,
+while SAO 1.0's larger measured trajectory drift makes Q8 its conservative default.
 
 ## Remaining gates
 
-1. Complete ear tests across more than one Foundation and SAO 1.0 prompt.
-2. Finalize family-scoped publication filenames and model repository layout.
-3. Add catalog/downloader aliases without changing default SA3 builds or downloads.
-4. Validate the stacked SAOS and SAO 1.0/Foundation changes on Metal.
+1. Generalize the current SAOS-named CLI and add Foundation `--randomize` output metadata.
+2. Validate the stacked SAOS and SAO 1.0/Foundation changes on Metal.

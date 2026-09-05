@@ -2,13 +2,15 @@
 """Download the sa3.cpp GGUF model set from HuggingFace into ./models.
 
 By default, fetches one SA3 model variant. ``--sat`` selects an optional
-stable-audio-tools family instead; currently that means SAOS and its validated finetunes.
+stable-audio-tools family instead: SAOS, Stable Audio Open 1.0, or Foundation-1.
 
   python3 -m pip install -U "huggingface_hub"
   python3 tools/download_models.py --variant medium --encoding f16
   python3 tools/download_models.py --variant medium --encoding q4_k_m --training-base
   python3 tools/download_models.py --variant medium --encoding q8_0 --dry-run
   python3 tools/download_models.py --sat --sat-model saos --saos-variant jerry-grunge
+  python3 tools/download_models.py --sat --sat-model foundation-1 --encoding q5_k_m
+  python3 tools/download_models.py --sat --sat-model sao1 --encoding q8_0
   HF_TOKEN=hf_... python3 tools/download_models.py --variant small-sfx   # if a repo is gated
 
 For the fastest official Hugging Face path, install a recent `huggingface_hub`
@@ -20,7 +22,8 @@ import argparse, importlib.util, os, sys
 
 from model_artifacts import (ENCODINGS, SAOS_DEFAULT_ENCODING, SAOS_ENCODINGS, SAOS_VARIANTS,
                              TEXT_ENCODER_DEFAULT, TEXT_ENCODER_ENCODINGS, VARIANTS,
-                             build_download_plan, build_saos_download_plan)
+                             build_download_plan, build_saos_download_plan,
+                             build_sat_large_download_plan, canonical_sat_model)
 
 DEFAULT_NAMESPACE = "thepatch"
 
@@ -50,21 +53,22 @@ def main():
     ap = argparse.ArgumentParser(description="Download sa3.cpp GGUF models from HuggingFace.")
     ap.add_argument("--sat", action="store_true",
                     help="download an optional stable-audio-tools family instead of SA3")
-    ap.add_argument("--sat-model", default="saos", choices=["saos"],
-                    help="stable-audio-tools architecture family (currently: saos)")
+    ap.add_argument("--sat-model", default="saos",
+                    choices=["saos", "stable-audio-open-1.0", "sao1", "foundation-1"],
+                    help="stable-audio-tools model family")
     ap.add_argument("--saos-variant", default="arc", choices=list(SAOS_VARIANTS),
                     help="SAOS checkpoint: arc, kickbass, or jerry-grunge")
     ap.add_argument("--variant", default="medium", choices=list(VARIANTS))
     all_encodings = sorted({e.lower() for e in ENCODINGS + SAOS_ENCODINGS})
     ap.add_argument("--encoding", default=None, choices=all_encodings,
-                    help="DiT encoding (default: f16 for both SA3 and SAOS)")
+                    help="DiT encoding (default: f16 for both SA3 and SAT)")
     ap.add_argument("--ae-encoding", dest="ae_encoding", default=None,
                     choices=[e.lower() for e in ENCODINGS],
                     help="autoencoder encoding, on its own axis from --encoding "
                          "(default f32; it used to follow --encoding, so a quantized DiT "
                          "silently fetched a quantized SAME)")
     ap.add_argument("--t5-encoding", default=None, choices=all_encodings,
-                    help="text encoder encoding (default: SA3 f16; SAOS follows --encoding)")
+                    help="text encoder encoding (default: SA3 f16; SAT follows --encoding)")
     ap.add_argument("--namespace", default=DEFAULT_NAMESPACE, help="HuggingFace org/user")
     ap.add_argument("--out", default="models", help="output dir (default ./models)")
     ap.add_argument("--training-base", action="store_true",
@@ -78,15 +82,22 @@ def main():
             ap.error("--training-base applies to SA3, not --sat")
         encoding = args.encoding or SAOS_DEFAULT_ENCODING.lower()
         if encoding.upper() not in SAOS_ENCODINGS:
-            ap.error(f"SAOS does not publish {encoding}; choose f16, q8_0, q5_k_m, or q4_k_m")
+            ap.error(f"SAT does not publish {encoding}; choose f16, q8_0, q5_k_m, or q4_k_m")
         for option, value in (("--t5-encoding", args.t5_encoding),
                               ("--ae-encoding", args.ae_encoding)):
             if value and value.upper() not in SAOS_ENCODINGS:
-                ap.error(f"SAOS {option} does not publish {value}")
-        plan = build_saos_download_plan(
-            args.namespace, args.saos_variant, encoding,
-            text_encoding=args.t5_encoding, ae_encoding=args.ae_encoding,
-        )
+                ap.error(f"SAT {option} does not publish {value}")
+        sat_model = canonical_sat_model(args.sat_model)
+        if sat_model == "saos":
+            plan = build_saos_download_plan(
+                args.namespace, args.saos_variant, encoding,
+                text_encoding=args.t5_encoding, ae_encoding=args.ae_encoding,
+            )
+        else:
+            plan = build_sat_large_download_plan(
+                args.namespace, sat_model, encoding,
+                text_encoding=args.t5_encoding, ae_encoding=args.ae_encoding,
+            )
     else:
         encoding = args.encoding or "f16"
         text_encoding = args.t5_encoding or TEXT_ENCODER_DEFAULT.lower()
@@ -129,9 +140,10 @@ def main():
             print("        Fine-grained Hugging Face tokens must include repo.content.read for the org/user that owns the repo.", file=sys.stderr)
             raise
     if args.sat:
-        print(f"[done] SAOS {args.saos_variant} ({encoding}) -> {args.out}/")
-        print(f"run: saos-generate --model {args.saos_variant} --models-dir {args.out} "
-              "--prompt \"...\" --out audio.wav")
+        sat_model = canonical_sat_model(args.sat_model)
+        selection = args.saos_variant if sat_model == "saos" else sat_model
+        print(f"[done] SAT {selection} ({encoding}) -> {args.out}/")
+        print("Use the optional SAT pipeline or CLI with the downloaded component paths.")
     else:
         suffix = " + training base" if args.training_base else ""
         print(f"[done] {args.variant} ({encoding}){suffix} -> {args.out}/")

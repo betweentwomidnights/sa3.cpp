@@ -1,9 +1,11 @@
 #include "sampling.h"
 #include "sat/dit.h"
+#include "sat/foundation_timing.h"
 #include "sat/model_spec.h"
 #include "sat/model_paths.h"
 #include "sat/oobleck.h"
 #include "sat/pipeline.h"
+#include "sat/profiles.h"
 #include "sat/t5.h"
 #include "wav.h"
 
@@ -255,6 +257,16 @@ int main() {
                     sa3::sat::saos_oobleck_relative_path("q8_0") ==
                     "stable-audio-open-small-oobleck-v1.0-Q8_0.gguf",
                     "canonical shared SAOS component filenames");
+    fails += expect(sa3::sat::sat_large_dit_relative_path("sao1", "q5_k_m") ==
+                        "stable-audio-open-1.0-dit-1.1B-v1.0-Q5_K_M.gguf" &&
+                    sa3::sat::sat_large_dit_relative_path("foundation", "q4_k_m") ==
+                        "foundation-1-dit-1.1B-v1.0-Q4_K_M.gguf",
+                    "canonical large SAT DiT filenames");
+    fails += expect(sa3::sat::sat_t5_128_relative_path("F16") ==
+                        "t5-base-encoder-128tok-0.1B-v1.0-F16.gguf" &&
+                    sa3::sat::sat_oobleck_relative_path("Q8_0") ==
+                        "stable-audio-open-oobleck-v1.0-Q8_0.gguf",
+                    "canonical shared large SAT component filenames");
 
     const sa3::sat::ModelSpec saos = sa3::sat::stable_audio_open_small();
     std::string why;
@@ -283,6 +295,51 @@ int main() {
                     "Foundation follows stable-audio-tools floor division for latent frames");
     fails += expect(sa3::sat::weight_topology_compatible(sao1, foundation, &why),
                     "Foundation is weight-topology compatible with SAO 1.0");
+
+    // Match RoyalCities' Foundation UI exactly: the audio crop follows the musical
+    // duration, while seconds_total and the generated canvas round up independently.
+    struct TimingCase { int bars, bpm, samples, seconds_total, frames; };
+    constexpr TimingCase timing_cases[] = {
+        {4, 100, 423360, 10, 216}, {4, 110, 384873, 9, 194},
+        {4, 120, 352800, 8, 173},  {4, 128, 330750, 8, 173},
+        {4, 130, 325662, 8, 173},  {4, 140, 302400, 7, 151},
+        {4, 150, 282240, 7, 151},  {8, 100, 846720, 20, 431},
+        {8, 110, 769745, 18, 388}, {8, 120, 705600, 16, 345},
+        {8, 128, 661500, 15, 323}, {8, 130, 651323, 15, 323},
+        {8, 140, 604800, 14, 302}, {8, 150, 564480, 13, 280},
+    };
+    for (const TimingCase& expected : timing_cases) {
+        const sa3::sat::FoundationTiming timing =
+            sa3::sat::resolve_foundation_timing(expected.bars, expected.bpm);
+        fails += expect(timing.output_samples == expected.samples &&
+                        timing.conditioning_seconds_total == expected.seconds_total &&
+                        timing.latent_frames == expected.frames,
+                        "Foundation trained BPM/bar timing table");
+    }
+    fails += expect(sa3::sat::kFoundationBpms.size() == 7 &&
+                    sa3::sat::kFoundationBpms.back() == 150,
+                    "Foundation trained BPM set includes 150");
+    bool rejected_bad_bars = false, rejected_bad_bpm = false;
+    try { (void)sa3::sat::resolve_foundation_timing(6, 128); }
+    catch (const std::invalid_argument&) { rejected_bad_bars = true; }
+    try { (void)sa3::sat::resolve_foundation_timing(4, 125); }
+    catch (const std::invalid_argument&) { rejected_bad_bpm = true; }
+    fails += expect(rejected_bad_bars && rejected_bad_bpm,
+                    "Foundation timing rejects untrained geometry");
+    sa3::sat::GenerateParams foundation_params;
+    foundation_params.prompt = "warm tape-saturated breakbeat loop";
+    const sa3::sat::FoundationTiming applied =
+        sa3::sat::apply_foundation_timing(foundation_params, 4, 128);
+    sa3::sat::apply_foundation_royalcities_sampler(foundation_params);
+    fails += expect(foundation_params.prompt ==
+                        "warm tape-saturated breakbeat loop, 4 Bars, 128 BPM" &&
+                    foundation_params.output_samples == applied.output_samples &&
+                    foundation_params.frames == 173 && foundation_params.seconds_total == 8.0f,
+                    "Foundation profile applies prompt and independent generation geometry");
+    fails += expect(foundation_params.sampler == sa3::sat::Sampler::Dpmpp3mSde &&
+                    foundation_params.sigma_min == 0.01f &&
+                    foundation_params.sigma_max == 100.0f,
+                    "Foundation RoyalCities sampler profile");
 
     // A finetune may change inference defaults without changing any loadable tensor shape.
     sa3::sat::ModelSpec finetune = saos;

@@ -108,6 +108,9 @@ build needs cmake + a c++17 compiler (Visual Studio 2022 on windows). cuda needs
 Toolkit; vulkan needs the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home); metal is macOS-only.
 backend + packaging details: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) ·
 [docs/VULKAN.md](docs/VULKAN.md) · [docs/METAL.md](docs/METAL.md) · [docs/HIP.md](docs/HIP.md).
+The opt-in classic stable-audio-tools family is documented in
+[docs/STABLE_AUDIO_OPEN_SMALL.md](docs/STABLE_AUDIO_OPEN_SMALL.md) and
+[docs/STABLE_AUDIO_OPEN_1.md](docs/STABLE_AUDIO_OPEN_1.md); it is excluded from default builds.
 there's also a small HTTP server (`./server.sh` / `server.cmd`) — see [docs/SERVER.md](docs/SERVER.md).
 native adapter training is documented in [docs/TRAINING.md](docs/TRAINING.md), with measured backend
 and PyTorch comparisons in [docs/TRAINING_BENCHMARKS.md](docs/TRAINING_BENCHMARKS.md).

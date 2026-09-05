@@ -38,7 +38,7 @@ change those settings while retaining loadable tensor shapes.
 - `src/sat/model_paths.h`: SAOS-specific published filenames and local model resolution.
   SAT remains the runtime umbrella; this catalog intentionally does not claim future
   SAO 1.0 or Foundation-1 repositories.
-- `tools/saos-generate.cpp`: isolated experimental command-line and timing driver.
+- `tools/saos-generate.cpp`: SAOS-specific command-line driver over the shared SAT library.
   It is a thin frontend over `sa3::sat::Pipeline` and does not add SAOS branches to
   `sa3_pipeline.h` or the existing public API.
 
@@ -85,7 +85,7 @@ cmake -S . -B build-saos -DSA3_BUILD_SAT=ON
 cmake --build build-saos --config Release --target saos-generate
 ```
 
-This also creates the `sa3_saos` static-library target. An embedding application can
+This also creates the `sa3_sat` static-library target. An embedding application can
 link that component directly and consume tightly packed planar float audio from
 `sa3::sat::Pipeline::generate`; it does not need to invoke or link the CLI.
 

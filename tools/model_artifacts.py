@@ -29,6 +29,12 @@ SAOS_VARIANTS = ("arc", "kickbass", "jerry-grunge")
 SAOS_ENCODINGS = ("F16", "Q8_0", "Q5_K_M", "Q4_K_M")
 SAOS_DEFAULT_ENCODING = "F16"
 
+SAT_LARGE_MODELS = ("stable-audio-open-1.0", "foundation-1")
+SAT_LARGE_REPOS = {
+    "stable-audio-open-1.0": "stable-audio-open-1.0-GGUF",
+    "foundation-1": "foundation-1-GGUF",
+}
+
 # Encodings the DiT and SAME are published in. The conditioner and tokenizer are always F32 --
 # those two really are small (a 793 KiB conditioner, a 14 MiB vocab), so there is nothing to gain.
 FLOAT_ENCODINGS = ("F16", "F32")
@@ -212,4 +218,53 @@ def build_saos_download_plan(namespace, variant="arc", encoding=SAOS_DEFAULT_ENC
         f"{namespace}/{SAOS_REPO}",
         [saos_dit_filename(variant, enc), saos_t5_filename(text_enc),
          saos_oobleck_filename(ae_enc)],
+    )]
+
+
+def canonical_sat_model(model):
+    value = model.lower().replace("_", "-")
+    if value in ("sao1", "sao-1", "sao-1.0", "stable-audio-open-1"):
+        return "stable-audio-open-1.0"
+    if value in ("foundation", "foundation1"):
+        return "foundation-1"
+    return value
+
+
+def sat_large_dit_filename(model, encoding):
+    model = canonical_sat_model(model)
+    enc = encoding.upper()
+    if model not in SAT_LARGE_MODELS:
+        raise ValueError(f"unknown SAT model: {model}")
+    if enc not in SAOS_ENCODINGS:
+        raise ValueError(f"unsupported SAT encoding: {encoding}")
+    return f"{model}-dit-1.1B-{VERSION}-{enc}.gguf"
+
+
+def sat_t5_128_filename(encoding):
+    enc = encoding.upper()
+    if enc not in SAOS_ENCODINGS:
+        raise ValueError(f"unsupported SAT T5 encoding: {encoding}")
+    return f"t5-base-encoder-128tok-0.1B-{VERSION}-{enc}.gguf"
+
+
+def sat_oobleck_filename(encoding):
+    enc = encoding.upper()
+    if enc not in SAOS_ENCODINGS:
+        raise ValueError(f"unsupported SAT Oobleck encoding: {encoding}")
+    return f"stable-audio-open-oobleck-{VERSION}-{enc}.gguf"
+
+
+def build_sat_large_download_plan(namespace, model, encoding=SAOS_DEFAULT_ENCODING,
+                                  text_encoding=None, ae_encoding=None):
+    """Return one self-contained SAO 1.0 or Foundation-1 repository bundle."""
+    model = canonical_sat_model(model)
+    if model not in SAT_LARGE_MODELS:
+        raise ValueError(f"unknown SAT model: {model}")
+    enc = encoding.upper()
+    text_enc = (text_encoding or enc).upper()
+    ae_enc = (ae_encoding or enc).upper()
+    return [(
+        f"{namespace}/{SAT_LARGE_REPOS[model]}",
+        [sat_large_dit_filename(model, enc), sat_t5_128_filename(text_enc),
+         sat_oobleck_filename(ae_enc)],
     )]

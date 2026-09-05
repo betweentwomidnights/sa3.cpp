@@ -14,8 +14,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 from model_artifacts import (TEXT_ENCODER_ENCODINGS, build_download_plan,
-                             build_saos_download_plan, dit_filename, dit_identity,
-                             saos_dit_filename, text_encoder_filename)
+                             build_saos_download_plan, build_sat_large_download_plan,
+                             dit_filename, dit_identity, saos_dit_filename,
+                             sat_large_dit_filename, sat_oobleck_filename,
+                             sat_t5_128_filename, text_encoder_filename)
 from stage_training_base_repos import notice_text
 
 
@@ -39,6 +41,30 @@ class ModelArtifactsTest(unittest.TestCase):
         self.assertEqual(plan[0][0], "thepatch/stable-audio-open-small-GGUF")
         self.assertEqual(len(plan[0][1]), 3)
         self.assertTrue(all("F16" in name for name in plan[0][1]))
+
+    def test_large_sat_repositories_are_separate_and_self_contained(self):
+        for model, repo in (
+            ("stable-audio-open-1.0", "stable-audio-open-1.0-GGUF"),
+            ("foundation-1", "foundation-1-GGUF"),
+        ):
+            with self.subTest(model=model):
+                plan = build_sat_large_download_plan("thepatch", model)
+                self.assertEqual(plan[0][0], f"thepatch/{repo}")
+                self.assertEqual(plan[0][1], [
+                    sat_large_dit_filename(model, "Q5_K_M"),
+                    sat_t5_128_filename("Q5_K_M"),
+                    sat_oobleck_filename("Q5_K_M"),
+                ])
+
+    def test_large_sat_alias_and_canonical_filenames(self):
+        self.assertEqual(
+            sat_large_dit_filename("sao1", "q4_k_m"),
+            "stable-audio-open-1.0-dit-1.1B-v1.0-Q4_K_M.gguf",
+        )
+        self.assertEqual(
+            sat_large_dit_filename("foundation", "f16"),
+            "foundation-1-dit-1.1B-v1.0-F16.gguf",
+        )
 
     def test_training_base_identity_is_unambiguous(self):
         identity = dit_identity("medium", training_base=True)
@@ -195,6 +221,28 @@ class ModelArtifactsTest(unittest.TestCase):
             sys.executable, "tools/download_models.py", "--sat", "--sat-model", "saos",
             "--saos-variant", "jerry-grunge", "--dry-run", "--out", "test-models",
         ])
+
+    def test_python_downloader_foundation_plan(self):
+        result = subprocess.run([
+            sys.executable, "tools/download_models.py", "--sat", "--sat-model",
+            "foundation-1", "--encoding", "q4_k_m", "--dry-run", "--out",
+            "test-models",
+        ], cwd=REPO_ROOT, check=True, text=True, capture_output=True)
+        output = result.stdout.replace("\\", "/")
+        self.assertEqual(output.count("[plan]"), 3)
+        self.assertIn("thepatch/foundation-1-GGUF/resolve/main/", output)
+        self.assertIn("foundation-1-dit-1.1B-v1.0-Q4_K_M.gguf", output)
+        self.assertIn("t5-base-encoder-128tok-0.1B-v1.0-Q4_K_M.gguf", output)
+        self.assertIn("stable-audio-open-oobleck-v1.0-Q4_K_M.gguf", output)
+
+    def test_python_downloader_sao1_alias_plan(self):
+        result = subprocess.run([
+            sys.executable, "tools/download_models.py", "--sat", "--sat-model", "sao1",
+            "--dry-run", "--out", "test-models",
+        ], cwd=REPO_ROOT, check=True, text=True, capture_output=True)
+        output = result.stdout.replace("\\", "/")
+        self.assertIn("thepatch/stable-audio-open-1.0-GGUF/resolve/main/", output)
+        self.assertIn("stable-audio-open-1.0-dit-1.1B-v1.0-Q5_K_M.gguf", output)
 
     def test_shell_downloader_saos_plan(self):
         bash = shutil.which("bash")

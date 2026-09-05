@@ -1,4 +1,4 @@
-// saos-generate -- thin CLI over the optional sa3_saos pipeline component.
+// saos-generate -- SAOS-specific thin CLI over the optional sa3_sat component.
 #include "sat/pipeline.h"
 #include "sat/model_paths.h"
 #include "wav.h"
@@ -57,6 +57,7 @@ static void print_help() {
         "  --negative-prompt T   negative text conditioning\n"
         "  --seconds-start N     timeline offset conditioning (SAO 1.0 family)\n"
         "  --seconds N           output duration, up to 11 seconds (default 11)\n"
+        "  --seconds-total N     override learned duration conditioning (advanced)\n"
         "  --sampler NAME        auto, pingpong, euler, dpmpp, dpmpp-2m-sde, or dpmpp-3m-sde\n"
         "  --steps N             denoising steps\n"
         "  --cfg-scale N         classifier-free guidance scale\n"
@@ -115,6 +116,7 @@ static int run(int argc, char** argv) {
         else if (!strcmp(argv[i], "--negative-prompt") && i + 1 < argc) params.negative_prompt = argv[++i];
         else if (!strcmp(argv[i], "--seconds-start") && i + 1 < argc) params.seconds_start = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) params.seconds = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--seconds-total") && i + 1 < argc) params.seconds_total = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--cfg-scale") && i + 1 < argc) params.cfg_scale = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--sigma-min") && i + 1 < argc) params.sigma_min = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--sigma-max") && i + 1 < argc) params.sigma_max = (float)atof(argv[++i]);

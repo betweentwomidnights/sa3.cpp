@@ -132,9 +132,11 @@ void Pipeline::load(PipelinePaths paths) {
 GenerateResult Pipeline::generate(const GenerateParams& params) const {
     if (paths_.dit.empty() || paths_.autoencoder.empty())
         throw std::runtime_error("SAT pipeline is not loaded");
-    if (params.frames < 1 || params.seconds <= 0.0f || params.steps < 0 ||
+    if (params.frames < 1 || params.seconds <= 0.0f || params.seconds_total < 0.0f ||
+        params.steps < 0 ||
         params.output_samples < 0 || !std::isfinite(params.cfg_scale) ||
-        !std::isfinite(params.seconds_start) || !std::isfinite(params.sigma_min) ||
+        !std::isfinite(params.seconds_start) || !std::isfinite(params.seconds_total) ||
+        !std::isfinite(params.sigma_min) ||
         !std::isfinite(params.sigma_max) || !std::isfinite(params.sigma_rho) ||
         !std::isfinite(params.sde_eta) || !(params.sigma_rho > 0.0f) ||
         !(params.sde_eta >= 0.0f))
@@ -148,6 +150,8 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
         throw std::invalid_argument("native SAT conditioning requires T5 and a prompt");
 
     GenerateResult result;
+    result.seconds_total = params.seconds_total > 0.0f
+        ? params.seconds_total : params.seconds;
     const double total_start = now_s();
     std::vector<PromptEncoding> encoded;
     if (!conditioning_override) {
@@ -206,7 +210,8 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
                 timing_cross.insert(timing_cross.end(), start_condition.begin(),
                                     start_condition.end());
             }
-            std::vector<float> total_condition = seconds_total_condition(dit, params.seconds);
+            std::vector<float> total_condition =
+                seconds_total_condition(dit, result.seconds_total);
             result.global_conditioning.insert(result.global_conditioning.end(),
                                                total_condition.begin(),
                                                total_condition.end());

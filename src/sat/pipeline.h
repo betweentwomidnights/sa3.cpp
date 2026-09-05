@@ -32,7 +32,8 @@ struct GenerateParams {
     std::string prompt;
     std::string negative_prompt;
     float seconds_start = 0.0f;
-    float seconds = 11.0f;
+    float seconds = 11.0f;          // requested/cropped output duration
+    float seconds_total = 0.0f;     // conditioner value; <=0 uses seconds
     int frames = 256;
     int steps = 0;                 // 0: objective-specific default
     int output_samples = 0;        // 0: seconds * model sample rate
@@ -80,6 +81,7 @@ struct GenerateResult {
     float sigma_max = 0.0f;
     float sigma_rho = 0.0f;
     float sde_eta = 0.0f;
+    float seconds_total = 0.0f;
     Sampler sampler = Sampler::Auto;
     std::string objective;
     GenerateTiming timing;
