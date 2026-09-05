@@ -30,6 +30,7 @@ else()
     set(SA3_BUILD_TOOLS_DEFAULT ON)
 endif()
 option(SA3_BUILD_TOOLS "Build the CLI tools and tests" ${SA3_BUILD_TOOLS_DEFAULT})
+option(SA3_BUILD_SAOS "Build the experimental Stable Audio Open Small runner and tests" OFF)
 option(SA3_STATIC "Build libsa3 as a static library (for embedding in an app binary)" OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     # An iOS app links a static archive or an embedded framework; a bare .dylib is not signable
@@ -151,6 +152,13 @@ target_link_libraries(sa3-dit PRIVATE sa3)
 add_executable(sa3-textmusic tools/sa3-textmusic.cpp)
 target_link_libraries(sa3-textmusic PRIVATE sa3)
 
+if(SA3_BUILD_SAOS)
+    # Experimental classic stable-audio-tools runner. Kept independent of the SA3
+    # pipeline so SAOS/Foundation support does not add model-family conditionals there.
+    add_executable(saos-generate tools/saos-generate.cpp)
+    target_link_libraries(saos-generate PRIVATE sa3)
+endif()
+
 add_executable(sa3-tokenize tools/sa3-tokenize.cpp)
 target_link_libraries(sa3-tokenize PRIVATE sa3)
 
@@ -260,6 +268,11 @@ target_include_directories(sa3-latents-cache-test PRIVATE ${CMAKE_CURRENT_SOURCE
 add_executable(sa3-set-wide-row-test tests/set_wide_row_test.cpp)
 target_link_libraries(sa3-set-wide-row-test PRIVATE sa3)
 
+if(SA3_BUILD_SAOS)
+    add_executable(sa3-sat-sampling-test tests/sat_sampling_test.cpp)
+    target_link_libraries(sa3-sat-sampling-test PRIVATE sa3)
+endif()
+
 if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     add_test(NAME sa3-train-config-test COMMAND sa3-train-config-test)
@@ -282,10 +295,26 @@ if(BUILD_TESTING)
     add_test(NAME sa3-lora-quant-merge-test COMMAND sa3-lora-quant-merge-test)
     add_test(NAME sa3-latents-cache-test COMMAND sa3-latents-cache-test)
     add_test(NAME sa3-set-wide-row-test COMMAND sa3-set-wide-row-test)
+    if(SA3_BUILD_SAOS)
+        add_test(NAME sa3-sat-sampling-test COMMAND sa3-sat-sampling-test)
+    endif()
     if(Python3_Interpreter_FOUND)
         add_test(NAME sa3-model-artifacts-test
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_artifacts_test.py")
+        if(SA3_BUILD_SAOS)
+            add_test(NAME sa3-sat-oobleck-converter-test
+                     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_oobleck_converter_test.py")
+            add_test(NAME sa3-sat-dit-converter-test
+                     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_dit_converter_test.py")
+            add_test(NAME sa3-sat-t5-converter-test
+                     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_t5_converter_test.py")
+        endif()
         set_tests_properties(sa3-model-artifacts-test PROPERTIES LABELS "non-gpu;tooling")
+        if(SA3_BUILD_SAOS)
+            set_tests_properties(sa3-sat-oobleck-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
+            set_tests_properties(sa3-sat-dit-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
+            set_tests_properties(sa3-sat-t5-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
+        endif()
     endif()
     set_tests_properties(
         sa3-train-config-test sa3-train-dataset-test sa3-train-model-paths-test
@@ -295,6 +324,9 @@ if(BUILD_TESTING)
         sa3-train-prompt-test sa3-train-inpaint-test
         sa3-dit-lin-functional-test sa3-latents-cache-test
         PROPERTIES LABELS "non-gpu;training;lora")
+    if(SA3_BUILD_SAOS)
+        set_tests_properties(sa3-sat-sampling-test PROPERTIES LABELS "non-gpu;sat")
+    endif()
 endif()
 
 endif() # SA3_BUILD_TOOLS

@@ -239,6 +239,30 @@ struct GgufModel {
         if (i < 0) throw gguf_error("missing key: " + std::string(k));
         return gguf_get_val_f32(gguf, i);
     }
+    bool boolean(const char* k) const {
+        int i = gguf_find_key(gguf, k);
+        if (i < 0) throw gguf_error("missing key: " + std::string(k));
+        if (gguf_get_kv_type(gguf, i) != GGUF_TYPE_BOOL)
+            throw gguf_error("key is not bool: " + std::string(k));
+        return gguf_get_val_bool(gguf, i);
+    }
+    std::string string(const char* k) const {
+        int i = gguf_find_key(gguf, k);
+        if (i < 0) throw gguf_error("missing key: " + std::string(k));
+        if (gguf_get_kv_type(gguf, i) != GGUF_TYPE_STRING)
+            throw gguf_error("key is not string: " + std::string(k));
+        return gguf_get_val_str(gguf, i);
+    }
+    std::vector<int32_t> i32s(const char* k) const {
+        int i = gguf_find_key(gguf, k);
+        if (i < 0) throw gguf_error("missing key: " + std::string(k));
+        if (gguf_get_kv_type(gguf, i) != GGUF_TYPE_ARRAY ||
+            gguf_get_arr_type(gguf, i) != GGUF_TYPE_INT32)
+            throw gguf_error("key is not an i32 array: " + std::string(k));
+        const size_t n = gguf_get_arr_n(gguf, i);
+        const int32_t* p = static_cast<const int32_t*>(gguf_get_arr_data(gguf, i));
+        return std::vector<int32_t>(p, p + n);
+    }
     // read a single-element tensor's value to the host
     float scalar(const std::string& n) const {
         float v = 0.0f;
