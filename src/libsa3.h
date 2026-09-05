@@ -125,6 +125,31 @@ enum {
     SA3_INIT_AUDIO_INPAINT = 2
 };
 
+/* Continuation source splicing. Defaults mirror gary4local (0.2 s mask overlap, 30 ms equal-power
+ * crossfade, RMS gain match on) — see docs/CONTINUATION.md. Leave `set = 0` (the zero-initialized
+ * default) to use those plus any SA3_CONTINUE_* env overrides. Set `set = 1` to drive it
+ * per-request, including the old un-spliced behaviour (`splice = 0`).
+ *
+ * Splice is ON at `set = 0`, the way loudness normalization already is: a zero-initialized request
+ * today gets gary4local's +2 dB normalize and -0.3 dB limiter rather than raw output, because the
+ * library's position is that its defaults are the tuned ones. This is the same kind of thing.
+ *
+ * Continuation regenerates a window over source audio that has round-tripped through the
+ * autoencoder, so the region the model was told to KEEP still comes back carrying the codec's
+ * artefacts — and each continuation compounds the last one's. The splice pastes the original
+ * samples back over that region after decode and before loudness shaping, which takes the audio
+ * off that treadmill entirely and takes the pressure off decoder/encoder LoRAs.
+ *
+ * Env overrides (set = 0 only): SA3_CONTINUE_SPLICE_SOURCE, SA3_CONTINUE_MASK_OVERLAP,
+ * SA3_CONTINUE_SPLICE_XFADE, SA3_CONTINUE_SPLICE_GAIN_MATCH. */
+typedef struct {
+    int   set;                  /* 0 = library defaults; 1 = use the fields below */
+    int   splice;               /* bool: restore the source head after decode */
+    float mask_overlap;         /* s of source the model regenerates; <0 -> 0.2. keeps >= 50 ms */
+    float xfade;                /* s of equal-power crossfade at the seam; <0 -> 0.03 */
+    int   gain_match;           /* bool: RMS-match the restored head, clamped to [0.25, 4.0] */
+} sa3_splice;
+
 /* Optional audio input for sa3_generate_ex(). `samples` is PLANAR float audio laid out as
  * samples[ch * n_samp + sample] at sample_rate Hz. The pipeline resamples to 44.1 kHz internally.
  *
@@ -135,6 +160,15 @@ enum {
  *   Inpainting/continuation. Requires a local-conditioning DiT. The window [inpaint_start,
  *   inpaint_end) is in seconds; audio outside the window is kept, and inpaint_end can extend the
  *   total output past the supplied source audio.
+ *
+ *   NOTE — with splicing on (the default; see sa3_splice on sa3_request_ex), `inpaint_start` means
+ *   "where the source ends and the continuation should musically begin", and the library owns the
+ *   mechanics from there: it pulls the sampler's window back by `mask_overlap` so the model
+ *   regenerates the handoff rather than butting against a hard boundary, then splices the source
+ *   back up to that same pulled-back point. This is the ONE place turning the splice on changes
+ *   what an existing field means — a caller passing inpaint_start = source duration (the usual
+ *   continuation shape) gets the improvement without changing its call. Set `mask_overlap = 0` for
+ *   literally the window you asked for.
  */
 typedef struct {
     int          mode;
@@ -165,6 +199,12 @@ typedef struct {
     int decode_overlap;
     sa3_cancel_cb should_cancel;
     void* cancel_user;
+    /* Continuation source splicing; set=0 -> gary4local defaults. Ignored unless
+     * init_audio.mode == SA3_INIT_AUDIO_INPAINT. It describes the audio in init_audio rather than
+     * the request, but it lives here because NEW FIELDS GO AT THE END: sa3_init_audio sits by
+     * value above, so growing it would shift every field below it for a caller compiled against
+     * the old header, where an appended field costs them nothing. */
+    sa3_splice splice;
 } sa3_request_ex;
 
 /* Decoded audio. samples is PLANAR by channel: samples[c * n_samp + s]. Free with sa3_free_audio(). */
@@ -187,6 +227,55 @@ SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* ou
 
 /* Extended generate with raw init audio for audio2audio and inpaint/continuation. */
 SA3_API int sa3_generate_ex(sa3_context* ctx, const sa3_request_ex* req, sa3_audio* out, char* err, int err_len);
+
+/* Metadata for the most recent generation on a context.
+ *
+ * Everything computed after the sampler used to die at the ABI: sa3_audio returns samples, n_samp,
+ * n_ch, sample_rate and seed, so a client had no way to learn what the loudness stage measured or
+ * whether the splice fired. This is that channel.
+ *
+ * `size` is the whole point of the shape. Set out->size = sizeof(sa3_meta) before calling; the
+ * library fills min(your size, its own) and writes back how much it actually filled. Fields get
+ * APPENDED here forever — an older client passes a smaller size and gets the prefix it understands,
+ * a newer client against an older library sees a smaller size written back and knows the tail is
+ * untouched. Check the returned `size` before reading a field you are not sure the library has.
+ *
+ * Zero-initialize the struct: what the library does not fill stays zero either way. */
+typedef struct {
+    uint32_t size;                      /* in: sizeof(sa3_meta); out: bytes the library filled */
+
+    uint64_t seed;
+
+    /* Loudness — what it measured, and what it applied. The *_set flags distinguish "the stage ran
+     * and the value is 1.0" from "the stage was disabled and never ran". */
+    float decoded_peak;
+    int   peak_normalize_gain_set;
+    float peak_normalize_gain;
+    int   limiter_limited_fraction_set;
+    float limiter_limited_fraction;
+    int   safety_gain_set;
+    float safety_gain;
+    float final_peak;
+    float latent_factor;
+
+    /* Continuation splice. All zero when the request was not an inpaint, or the splice was off. */
+    int   splice_applied;
+    float splice_end_seconds;
+    float splice_xfade_applied;
+    float splice_gain;
+    float mask_start_seconds;           /* what the sampler used, AFTER the overlap pullback */
+    float mask_overlap_applied;         /* the pullback it actually got, after clamping */
+} sa3_meta;
+
+/* Fill `out` with metadata for the most recent successful generation on this context. Returns 0 on
+ * success, non-zero if ctx/out is NULL, out->size is too small to hold even `size`, or no
+ * generation has completed on this context yet.
+ *
+ * It is a getter tied to the previous call rather than an out-param on sa3_generate_ex(), which is
+ * what keeps sa3_audio and sa3_generate_ex ABI-frozen while this struct grows. "Most recent" is
+ * unambiguous because a context is NOT reentrant (see the banner) — serialize per context, and read
+ * the meta before the next generate on it. */
+SA3_API int sa3_last_meta(sa3_context* ctx, sa3_meta* out);
 
 /* Release the sample buffer allocated by sa3_generate(). */
 SA3_API void sa3_free_audio(sa3_audio* audio);
