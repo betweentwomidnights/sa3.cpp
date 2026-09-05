@@ -28,6 +28,13 @@ struct FoundationRandomPrompt {
     std::string variant;
 };
 
+struct FoundationRandomControls {
+    int bars = 4;
+    int bpm = 128;
+    std::string key_root = "C";
+    std::string key_mode = "minor";
+};
+
 namespace foundation_prompt_detail {
 
 using Weighted = std::pair<const char*, int>;
@@ -325,6 +332,22 @@ inline FoundationPromptMode parse_foundation_prompt_mode(const std::string& valu
 
 inline const char* foundation_prompt_mode_name(FoundationPromptMode mode) {
     return mode == FoundationPromptMode::Mix ? "mix" : "standard";
+}
+
+// Keep musical-control selection on a stream separate from descriptor selection.
+// Consequently, locking a BPM or key does not unexpectedly change the generated timbre.
+inline FoundationRandomControls randomize_foundation_controls(uint64_t seed) {
+    static constexpr int bpms[] = {100, 110, 120, 128, 130, 140, 150};
+    static constexpr const char* roots[] = {
+        "A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#",
+    };
+    std::mt19937_64 rng(seed ^ UINT64_C(0xd9e4c7b31a62580f));
+    FoundationRandomControls result;
+    result.bars = std::uniform_int_distribution<int>(0, 1)(rng) ? 8 : 4;
+    result.bpm = bpms[std::uniform_int_distribution<size_t>(0, sizeof(bpms) / sizeof(bpms[0]) - 1)(rng)];
+    result.key_root = roots[std::uniform_int_distribution<size_t>(0, sizeof(roots) / sizeof(roots[0]) - 1)(rng)];
+    result.key_mode = std::uniform_int_distribution<int>(0, 1)(rng) ? "minor" : "major";
+    return result;
 }
 
 inline FoundationRandomPrompt randomize_foundation_prompt(

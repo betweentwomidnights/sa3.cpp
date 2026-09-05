@@ -103,14 +103,16 @@ void print_help() {
         "  --out FILE            output WAV (default MODEL-ggml.wav; --wav is an alias)\n"
         "  --peak-normalize      normalize the output WAV peak\n\n"
         "Foundation-1 (model-specific):\n"
-        "  --bars N              4 or 8 (default 4)\n"
-        "  --bpm N               100, 110, 120, 128, 130, 140, or 150 (default 128)\n"
-        "  --key-root NOTE       C..B, including sharps/flats (default C)\n"
-        "  --key-mode MODE       major or minor (default minor)\n"
+        "  --bars N              4 or 8 (manual default 4)\n"
+        "  --bpm N               100, 110, 120, 128, 130, 140, or 150 (manual default 128)\n"
+        "  --key-root NOTE       C..B, including sharps/flats (manual default C)\n"
+        "  --key-mode MODE       major or minor (manual default minor)\n"
         "  --foundation-profile P  royalcities (default) or gary\n"
         "  --randomize           generate and render a structured Foundation prompt\n"
         "  --randomize-mode M    standard/M1 (default) or mix/T1\n"
         "  --family NAME         lock --randomize to one Foundation instrument family\n"
+        "With --randomize, every omitted Foundation value is randomized; supplied values\n"
+        "act as locks. Without it, --prompt is the manual descriptor override.\n"
         "Foundation derives its exact crop, seconds_total, and latent frames from bars/BPM;\n"
         "--seconds, --seconds-total, --frames, and --samples are rejected for this model.\n\n"
         "Low-level/debug:\n"
@@ -311,6 +313,14 @@ int run(int argc, char** argv) {
     std::optional<sa3::sat::FoundationTiming> foundation_timing;
     std::optional<sa3::sat::FoundationRandomPrompt> randomized;
     if (family == ModelFamily::Foundation) {
+        if (o.randomize) {
+            const sa3::sat::FoundationRandomControls controls =
+                sa3::sat::randomize_foundation_controls(params.seed);
+            if (!o.bars_set) o.bars = controls.bars;
+            if (!o.bpm_set) o.bpm = controls.bpm;
+            if (!o.key_root_set) o.key_root = controls.key_root;
+            if (!o.key_mode_set) o.key_mode = controls.key_mode;
+        }
         if (!sa3::sat::is_foundation_bar_count(o.bars) || !sa3::sat::is_foundation_bpm(o.bpm))
             (void)sa3::sat::resolve_foundation_timing(o.bars, o.bpm); // standardized diagnostics
         if (!valid_key_root(o.key_root))

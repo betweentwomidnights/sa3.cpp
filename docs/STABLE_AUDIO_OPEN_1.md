@@ -88,6 +88,11 @@ selection too, and the command reports the exact prompt, seed, variant, musical 
 and output path. This is deliberately one generate operation rather than a separate
 randomization endpoint.
 
+Every omitted Foundation control is randomized: bars, BPM, key root, key mode, family,
+and descriptor structure. Supplying any of those options locks only that value. Without
+`--randomize`, `--prompt` is the manual descriptor override and the selected/default
+timing and key suffixes are appended automatically.
+
 ```powershell
 sat-generate --model foundation-1 --randomize --randomize-mode mix `
   --family Synth --bars 4 --bpm 128 --key-root F# --key-mode minor --seed 42

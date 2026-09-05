@@ -352,6 +352,16 @@ int main() {
     fails += expect(!random_a.description.empty() && random_a.description == random_b.description &&
                     random_a.variant == "M1",
                     "Foundation random prompts are deterministic from the audio seed");
+    const sa3::sat::FoundationRandomControls controls_a =
+        sa3::sat::randomize_foundation_controls(42);
+    const sa3::sat::FoundationRandomControls controls_b =
+        sa3::sat::randomize_foundation_controls(42);
+    fails += expect(controls_a.bars == controls_b.bars && controls_a.bpm == controls_b.bpm &&
+                    controls_a.key_root == controls_b.key_root &&
+                    controls_a.key_mode == controls_b.key_mode &&
+                    sa3::sat::is_foundation_bar_count(controls_a.bars) &&
+                    sa3::sat::is_foundation_bpm(controls_a.bpm),
+                    "Foundation omitted controls randomize deterministically on the trained grid");
     const sa3::sat::FoundationRandomPrompt synth_mix =
         sa3::sat::randomize_foundation_prompt(7, sa3::sat::FoundationPromptMode::Mix, "synth");
     fails += expect(synth_mix.family == "Synth" && synth_mix.variant == "T1" &&

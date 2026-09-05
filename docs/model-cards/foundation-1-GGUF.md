@@ -63,6 +63,9 @@ prints the exact prompt, seed, key, musical geometry, and output path. Use
 or `--foundation-profile gary` to A/B the gary4local fallback sampler. Run
 `sat-generate --help` for the complete model-specific option list.
 
+Any omitted bars, BPM, key, or family value is randomized; explicitly supplied values
+act as locks. Without `--randomize`, pass `--prompt` as a manual descriptor override.
+
 ## Sources and licensing
 
 - Foundation-1 source revision: `d3160956fa13a8f861d3f608ed24075d44e98554`.
