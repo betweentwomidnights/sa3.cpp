@@ -251,4 +251,158 @@ inline void apply_audio_loudness(std::vector<float>& audio, const LoudnessParams
     }
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// Continuation source splicing.
+//
+// Continuation regenerates an inpaint window over source audio that has made a full round trip
+// through the autoencoder, so the region the model was told to KEEP still comes back with the
+// encoder/decoder's artefacts — and every continuation compounds them. Pasting the original
+// samples back over that region removes the round trip from the kept audio entirely.
+//
+// Two halves, and the second is useless without the first: the mask is pulled back so the model
+// regenerates the handoff instead of butting against a hard boundary, and the source is then
+// restored up to that same pulled-back point. One number, computed once, used by both — which is
+// the property that makes the seam land where the crossfade expects it.
+//
+// Ported from gary4local's sa3 service (splice_continuation_source / continuation_mask_bounds),
+// including its degenerate cases, so a knob learned there transfers verbatim.
+
+// Real source always kept, so a continuation from a very short clip still conditions on something.
+inline constexpr float kMinContinuationSourceSeconds = 0.05f;
+
+struct SpliceParams {
+    bool  enabled      = true;
+    float mask_overlap = 0.2f;    // s of source the model regenerates before the mask start
+    float xfade        = 0.03f;   // s of equal-power crossfade at the seam
+    bool  gain_match   = true;    // RMS-match the restored head to the model's level
+};
+
+struct SpliceMeta {
+    bool  applied              = false;
+    float splice_end_seconds   = 0.0f;
+    float xfade_applied        = 0.0f;
+    float gain                 = 1.0f;
+    float mask_start_seconds   = 0.0f;   // what the sampler used, after the overlap pullback
+    float mask_overlap_applied = 0.0f;
+};
+
+inline bool env_bool(const char* name, bool fallback) {
+    const char* text = std::getenv(name);
+    if (!text) return fallback;
+    std::string s = lower_ascii_copy(text);
+    const size_t a = s.find_first_not_of(" \t\r\n");
+    const size_t b = s.find_last_not_of(" \t\r\n");
+    s = a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+    return !(s.empty() || s == "0" || s == "false" || s == "no" || s == "off");
+}
+
+inline SpliceParams splice_defaults_from_env() {
+    SpliceParams p;
+    p.enabled      = env_bool("SA3_CONTINUE_SPLICE_SOURCE", p.enabled);
+    p.mask_overlap = std::max(0.0f, env_float("SA3_CONTINUE_MASK_OVERLAP", p.mask_overlap));
+    p.xfade        = env_float("SA3_CONTINUE_SPLICE_XFADE", p.xfade);
+    p.gain_match   = env_bool("SA3_CONTINUE_SPLICE_GAIN_MATCH", p.gain_match);
+    return p;
+}
+
+inline bool validate_splice_params(const SpliceParams& p, std::string& err) {
+    if (!std::isfinite(p.mask_overlap) || p.mask_overlap < 0.0f) {
+        err = "mask_overlap must be finite and >= 0";
+        return false;
+    }
+    if (!std::isfinite(p.xfade) || p.xfade < 0.0f) {
+        err = "xfade must be finite and >= 0";
+        return false;
+    }
+    return true;
+}
+
+// Pull the mask start back into the source by `requested_overlap`, always leaving at least
+// kMinContinuationSourceSeconds of real source ahead of it.
+inline void continuation_mask_bounds(float source_duration, float requested_overlap,
+                                     float& out_overlap, float& out_mask_start) {
+    const float max_overlap = std::max(0.0f, source_duration - kMinContinuationSourceSeconds);
+    out_overlap = std::min(max_overlap, std::max(0.0f, requested_overlap));
+    out_mask_start = std::max(0.0f, source_duration - out_overlap);
+}
+
+// Restore `source` over [0, mask_start) of `audio`, equal-power crossfading into the model's audio
+// over the last `params.xfade` seconds. Both buffers are PLANAR; `source` carries its own stride so
+// a padded generation buffer can be spliced from directly, and its own channel count so a mono
+// source conforms the way the reference does (downmix, then repeat).
+//
+// Call BEFORE any loudness shaping: the seam then gets the same normalize and limiter as the audio
+// on either side of it, rather than a joint between two differently-shaped signals.
+inline void splice_continuation_source(std::vector<float>& audio, int audio_n, int n_ch,
+                                       const float* source, int source_n, int source_stride,
+                                       int source_n_ch, float mask_start_seconds, int sample_rate,
+                                       const SpliceParams& params, SpliceMeta& meta) {
+    meta.mask_start_seconds = mask_start_seconds;
+    if (!params.enabled || !source || source_n <= 0 || source_n_ch <= 0) return;
+    if (audio_n <= 0 || n_ch <= 0 || sample_rate <= 0 || mask_start_seconds <= 0.0f) return;
+    if (audio.size() < (size_t)audio_n * n_ch || source_stride < source_n) return;
+
+    // The source is what bounds this: a caller may ask to keep more than it supplied.
+    long long splice_end = std::llround((double)mask_start_seconds * (double)sample_rate);
+    splice_end = std::min(splice_end, (long long)source_n);
+    splice_end = std::min(splice_end, (long long)audio_n);
+    if (splice_end <= 0) return;
+
+    // Channel conform, matching the reference: same count passes through, a mono source repeats,
+    // and anything else downmixes to mono first.
+    const bool direct = source_n_ch == n_ch;
+    const bool mono_src = source_n_ch == 1;
+    auto src_at = [&](int c, long long s) -> float {
+        if (direct)   return source[(size_t)c * source_stride + s];
+        if (mono_src) return source[s];
+        float sum = 0.0f;
+        for (int sc = 0; sc < source_n_ch; sc++) sum += source[(size_t)sc * source_stride + s];
+        return sum / (float)source_n_ch;
+    };
+
+    long long xf = std::max(0LL, std::llround((double)params.xfade * (double)sample_rate));
+    const int xfade = (int)std::min(xf, splice_end / 2);
+    const long long hard_end = splice_end - xfade;
+
+    float gain = 1.0f;
+    if (params.gain_match) {
+        double ss_src = 0.0, ss_model = 0.0;
+        for (int c = 0; c < n_ch; c++) {
+            const float* out_ch = audio.data() + (size_t)c * audio_n;
+            for (long long s = 0; s < splice_end; s++) {
+                const double sv = src_at(c, s);   ss_src   += sv * sv;
+                const double av = out_ch[s];      ss_model += av * av;
+            }
+        }
+        const double count = (double)n_ch * (double)splice_end;
+        const float source_rms = (float)std::sqrt(ss_src / count);
+        const float model_rms  = (float)std::sqrt(ss_model / count);
+        // A silent source has no level to match; leave it alone rather than dividing by ~0.
+        if (source_rms > 1e-6f && model_rms > 1e-6f)
+            gain = std::min(4.0f, std::max(0.25f, model_rms / source_rms));
+    }
+
+    constexpr double kHalfPi = 1.5707963267948966;
+    for (int c = 0; c < n_ch; c++) {
+        float* out_ch = audio.data() + (size_t)c * audio_n;
+        for (long long s = 0; s < hard_end; s++) out_ch[s] = src_at(c, s) * gain;
+        // xfade == 1 is degenerate — a single point at phase 0 would be pure source, not a
+        // crossfade — so the reference keeps the model's sample there. Match it.
+        if (xfade > 1) {
+            for (int i = 0; i < xfade; i++) {
+                const double phase = kHalfPi * (double)i / (double)(xfade - 1);
+                const long long s = hard_end + i;
+                out_ch[s] = src_at(c, s) * gain * (float)std::cos(phase)
+                          + out_ch[s] * (float)std::sin(phase);
+            }
+        }
+    }
+
+    meta.applied            = true;
+    meta.splice_end_seconds = (float)((double)splice_end / (double)sample_rate);
+    meta.xfade_applied      = (float)((double)xfade / (double)sample_rate);
+    meta.gain               = gain;
+}
+
 } // namespace sa3

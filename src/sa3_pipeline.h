@@ -602,6 +602,12 @@ struct GenParams {
     // normalize decoded audio to +2 dB peak, then catch hot LoRAs with a gentle -0.3 dB limiter.
     LoudnessParams loudness;
 
+    // Continuation source splicing (inpaint + init audio only; see audio_post.h). Defaults mirror
+    // gary4local and are ON: inpaint_start is read as "where the source ends", the mask is pulled
+    // back into the source by mask_overlap, and after decode the source is pasted back over
+    // everything up to that same point. Set enabled = false for the old, un-spliced behaviour.
+    SpliceParams splice;
+
     // Residency for THIS request (see the header banner). Default true = resident (keep models loaded
     // for the next request — the right default when a server/lib is reused). Set false for frugal
     // early-free: fits long-form on small VRAM at the cost of a reload next request. The one-shot CLI
@@ -623,6 +629,7 @@ struct GenResult {
     int n_ch = 2;
     int sample_rate = 44100;
     LoudnessMeta loudness;
+    SpliceMeta splice;
 };
 
 // Holds the loaded models for the life of the process. Move-only (owns the backend + buffers).
@@ -832,6 +839,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
 
     // ---------- init audio: pad + derive output T (overrides params.frames) ----------
     std::vector<float> init_audio; int init_L = 0;
+    int init_src_n = 0;    // valid samples in init_audio; init_L is the padded stride, not this
     if (has_init) {
         int n_samp = params.init_n_samp; const int n_ch = params.init_n_ch;
         // resample the init source to the model rate (44.1 kHz) if the caller passed another rate.
@@ -853,11 +861,28 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         init_L = ((want + mult - 1) / mult) * mult;
         init_audio.assign((size_t)init_L * n_ch, 0.0f);
         const int copy = std::min(n_samp, init_L);
+        init_src_n = copy;
         for (int c = 0; c < n_ch; c++)
             memcpy(&init_audio[(size_t)c*init_L], &raw[(size_t)c*n_samp], copy * sizeof(float));
         frames = init_L / ds;
         printf("%s: init %.2fs -> output T=%d (%.2fs)\n",
                inpaint ? "inpaint" : "audio2audio", (float)n_samp/44100.0f, frames, (float)init_L/44100.0f);
+    }
+
+    // ---------- continuation splice: where the mask starts, decided once ----------
+    // With the splice on, inpaint_start means "where the source ends and the continuation should
+    // musically begin". Pull the sampler's window back into the source from there so the model
+    // regenerates the handoff instead of butting against a hard boundary, and remember the pulled
+    // back point: the splice restores the source up to exactly it after decode. Both halves reading
+    // the same number is what makes the seam land where the crossfade expects it.
+    SpliceMeta splice_meta;
+    float mask_start = inpaint_start;
+    const bool splice_source = inpaint && has_init && params.splice.enabled && inpaint_start > 0.0f;
+    if (splice_source) {
+        continuation_mask_bounds(inpaint_start, params.splice.mask_overlap,
+                                 splice_meta.mask_overlap_applied, mask_start);
+        printf("continue: mask pulled back %.3fs to %.3fs (source %.3fs), splicing on decode\n",
+               splice_meta.mask_overlap_applied, mask_start, inpaint_start);
     }
 
     // text2music: an odd latent frame count trips the SAME chunked-attention reshape (hard
@@ -1155,7 +1180,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     std::vector<float> localb;
     if (inpaint) {
         auto ceil_div = [](int a, int b){ return (a + b - 1) / b; };
-        const int sa = (int)(inpaint_start * 44100.0f);
+        const int sa = (int)(mask_start * 44100.0f);
         const int ea = inpaint_end < 0 ? T*ds : (int)(inpaint_end * 44100.0f);
         const int f0 = std::max(0, std::min(T, ceil_div(sa, ds)));
         const int f1 = std::max(f0, std::min(T, ceil_div(ea, ds)));
@@ -1485,6 +1510,13 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             memcpy(&tr[(size_t)c*out_n_samp], &ab[(size_t)c*n_samp], (size_t)copy_n*sizeof(float));
         ab = std::move(tr);
     }
+    if (splice_source)
+        splice_continuation_source(ab, out_n_samp, n_ch, init_audio.data(), init_src_n, init_L,
+                                   n_ch, mask_start, 44100, params.splice, splice_meta);
+    if (splice_meta.applied)
+        printf("continue splice: kept 0-%.3fs, xfade %.0fms, gain %.3f\n",
+               splice_meta.splice_end_seconds, splice_meta.xfade_applied * 1000.0f, splice_meta.gain);
+
     apply_audio_loudness(ab, params.loudness, loudness_meta);
 
     if (params.on_progress) params.on_progress({"done", steps, steps, 1.0f});
@@ -1495,6 +1527,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     r.n_ch = n_ch;
     r.sample_rate = 44100;
     r.loudness = loudness_meta;
+    r.splice = splice_meta;
     return r;
 }
 

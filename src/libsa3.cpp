@@ -21,6 +21,9 @@ struct sa3_context {
     std::string adapters_dir;
     int cpu_threads = 0;
     std::string device;  // remembered so the frugal-reload path keeps the same backend
+    // Everything computed after the sampler, for sa3_last_meta(). size stays 0 until the first
+    // successful generate, which is how the getter knows there is nothing to report yet.
+    sa3_meta last_meta{};
 };
 
 static void set_err(char* err, int n, const std::string& m) {
@@ -103,6 +106,7 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
         } else {
             p.loudness = sa3::loudness_defaults_from_env();   // gary4local defaults + SA3_* env overrides
         }
+        p.splice = sa3::splice_defaults_from_env();           // ditto, SA3_CONTINUE_* (req_ex may override)
 
         if (req_ex) {
             std::string ierr;
@@ -114,6 +118,18 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
             if (req_ex->decode_chunk_size > 0) {
                 p.decode_chunk_size = req_ex->decode_chunk_size;
                 p.decode_overlap = req_ex->decode_overlap > 0 ? req_ex->decode_overlap : 32;
+            }
+            if (req_ex->splice.set) {              // per-request splice (incl. the old behaviour: splice=0)
+                sa3::SpliceParams sp;
+                sp.enabled    = req_ex->splice.splice != 0;
+                sp.gain_match = req_ex->splice.gain_match != 0;
+                // 0 is a meaningful value for both (no pullback / no crossfade), so only a negative
+                // falls back to the default rather than the usual 0-means-default convention.
+                sp.mask_overlap = req_ex->splice.mask_overlap >= 0.0f ? req_ex->splice.mask_overlap : sp.mask_overlap;
+                sp.xfade        = req_ex->splice.xfade        >= 0.0f ? req_ex->splice.xfade        : sp.xfade;
+                std::string serr;
+                if (!sa3::validate_splice_params(sp, serr)) { set_err(err, err_len, "splice: " + serr); return 6; }
+                p.splice = sp;
             }
             if (req_ex->should_cancel) {
                 const sa3_cancel_cb cb = req_ex->should_cancel;
@@ -143,6 +159,26 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
         std::memcpy(out->samples, r.samples.data(), n * sizeof(float));
         out->n_samp = r.n_samp; out->n_ch = r.n_ch; out->sample_rate = r.sample_rate;
         out->seed = p.seed;
+
+        sa3_meta m{};
+        m.size = (uint32_t)sizeof(sa3_meta);
+        m.seed = p.seed;
+        m.decoded_peak                = r.loudness.decoded_peak;
+        m.peak_normalize_gain_set     = r.loudness.peak_normalize_gain_set ? 1 : 0;
+        m.peak_normalize_gain         = r.loudness.peak_normalize_gain;
+        m.limiter_limited_fraction_set= r.loudness.limiter_limited_fraction_set ? 1 : 0;
+        m.limiter_limited_fraction    = r.loudness.limiter_limited_fraction;
+        m.safety_gain_set             = r.loudness.safety_gain_set ? 1 : 0;
+        m.safety_gain                 = r.loudness.safety_gain;
+        m.final_peak                  = r.loudness.final_peak;
+        m.latent_factor               = r.loudness.latent_factor;
+        m.splice_applied              = r.splice.applied ? 1 : 0;
+        m.splice_end_seconds          = r.splice.splice_end_seconds;
+        m.splice_xfade_applied        = r.splice.xfade_applied;
+        m.splice_gain                 = r.splice.gain;
+        m.mask_start_seconds          = r.splice.mask_start_seconds;
+        m.mask_overlap_applied        = r.splice.mask_overlap_applied;
+        ctx->last_meta = m;
         return 0;
     } catch (const std::exception& e) { set_err(err, err_len, e.what()); return 10; }
       catch (...)                     { set_err(err, err_len, "unknown error"); return 10; }
@@ -203,11 +239,26 @@ SA3_API void sa3_free_audio(sa3_audio* a) {
     if (a && a->samples) { std::free(a->samples); a->samples = nullptr; a->n_samp = 0; }
 }
 
+// Copy back only what BOTH sides know about: min(the caller's size, ours). A caller on an older
+// header gets the prefix it understands; one on a newer header sees a smaller size written back and
+// knows the tail it declared is untouched. This is what lets sa3_meta grow forever without an ABI
+// break, and without a new entry point per revision.
+SA3_API int sa3_last_meta(sa3_context* ctx, sa3_meta* out) {
+    if (!ctx || !out) return 1;
+    const uint32_t want = out->size;
+    if (want < sizeof(uint32_t)) return 2;              // too small to even carry the size back
+    if (ctx->last_meta.size == 0) return 3;             // no generation has completed on this ctx
+    const uint32_t n = want < sizeof(sa3_meta) ? want : (uint32_t)sizeof(sa3_meta);
+    std::memcpy(out, &ctx->last_meta, n);
+    out->size = n;
+    return 0;
+}
+
 SA3_API void sa3_unload(sa3_context* ctx) { if (ctx) ctx->pipe.reset(); }   // drop models; keep ctx
 
 SA3_API void sa3_free(sa3_context* ctx) { delete ctx; }
 
-SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 4"; }
+SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 5"; }
 
 SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path,
                              const char* out_gguf_path, char* err, int err_len) {
