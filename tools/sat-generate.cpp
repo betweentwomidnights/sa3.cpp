@@ -93,7 +93,7 @@ void print_help() {
         "  --seconds N           requested output duration (SAOS/SAO 1.0)\n"
         "  --seconds-total N     learned duration conditioning override (advanced)\n"
         "  --sampler NAME        auto, pingpong, euler, dpmpp, dpmpp-2m-sde, dpmpp-3m-sde\n"
-        "  --steps N             denoising steps\n"
+        "  --steps N             denoising steps (V-prediction models require at least 2)\n"
         "  --cfg-scale N         classifier-free guidance scale\n"
         "  --sigma-min N         V-prediction minimum sigma\n"
         "  --sigma-max N         V-prediction maximum sigma\n"
@@ -101,7 +101,7 @@ void print_help() {
         "  --sde-eta N           SDE noise strength (default 1)\n"
         "  --seed N              audio seed; also makes --randomize reproducible\n"
         "  --out FILE            output WAV (default MODEL-ggml.wav; --wav is an alias)\n"
-        "  --peak-normalize      normalize the output WAV peak\n\n"
+        "  --peak-normalize      normalize the decoded peak before writing the int16 WAV\n\n"
         "Backend environment:\n"
         "  SA3_DEVICE=metal      select Metal (GPU is selected automatically when available)\n"
         "  SA3_DEVICE=cpu        force CPU; SA3_THREADS controls CPU threads\n\n"
@@ -114,6 +114,8 @@ void print_help() {
         "  --randomize           generate and render a structured Foundation prompt\n"
         "  --randomize-mode M    standard/M1 (default) or mix/T1\n"
         "  --family NAME         lock --randomize to one Foundation instrument family\n"
+        "                        Synth, Keys, Bass, Bowed Strings, Mallet, Wind, Guitar,\n"
+        "                        Brass, Vocal, or Plucked Strings (case-insensitive)\n"
         "With --randomize, every omitted Foundation value is randomized; supplied values\n"
         "act as locks. Without it, --prompt is the manual descriptor override.\n"
         "Foundation derives its exact crop, seconds_total, and latent frames from bars/BPM;\n"
@@ -361,6 +363,8 @@ int run(int argc, char** argv) {
     if (o.frames) params.frames = *o.frames;
     if (o.steps) params.steps = *o.steps;
     if (o.samples) params.output_samples = *o.samples;
+    if (family != ModelFamily::Saos && params.steps < 2)
+        throw std::runtime_error("V-prediction sampling requires at least two steps");
     if (family != ModelFamily::Foundation && !o.frames && (o.seconds || o.samples)) {
         const double wanted_samples = o.samples ? (double)*o.samples : (double)params.seconds * 44100.0;
         params.frames = (int)std::ceil(wanted_samples / 2048.0);
@@ -419,11 +423,15 @@ int run(int argc, char** argv) {
         write_f32(o.dump_conditioning_prefix + ".global.f32", result.global_conditioning);
     }
     if (!o.latent_path.empty()) write_f32(o.latent_path, result.latent);
+    float peak = 0.0f;
+    for (float sample : result.audio) peak = std::max(peak, std::fabs(sample));
     if (o.peak_normalize) {
-        float peak = 0.0f;
-        for (float sample : result.audio) peak = std::max(peak, std::fabs(sample));
         if (peak > 0.0f) for (float& sample : result.audio) sample /= peak;
         std::printf("peak normalized from %.6f\n", peak);
+    } else if (peak > 1.0f) {
+        std::fprintf(stderr,
+                     "warning: decoded peak %.6f exceeds 0 dBFS; the int16 WAV will clip "
+                     "(pass --peak-normalize)\n", peak);
     }
     sa3::write_wav_planar(o.output, result.audio.data(), result.samples,
                           result.channels, result.sample_rate);

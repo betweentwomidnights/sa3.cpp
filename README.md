@@ -72,6 +72,21 @@ SA3_DEVICE=metal build-saos/bin/sat-generate --model arc \
 See [docs/STABLE_AUDIO_OPEN_SMALL.md](docs/STABLE_AUDIO_OPEN_SMALL.md) for finetunes,
 samplers, explicit component paths, conversion, and quantization results.
 
+Stable Audio Open 1.0 and Foundation-1 use the same optional build. Their
+self-contained bundles are downloaded with the Python helper (F16 is the default):
+
+```bash
+python3 -m pip install -U "huggingface_hub"
+python3 tools/download_models.py --sat --sat-model foundation-1
+SA3_DEVICE=metal build-saos/bin/sat-generate --model foundation-1 \
+  --randomize --bars 4 --bpm 128 --seed 42 --out foundation.wav
+```
+
+Pass `--sat-model sao1` to the downloader and `--model sao1` to `sat-generate`
+for Stable Audio Open 1.0. See
+[docs/STABLE_AUDIO_OPEN_1.md](docs/STABLE_AUDIO_OPEN_1.md) for timing controls,
+Foundation prompt randomization, named profiles, and quantization results.
+
 updating an existing checkout across the one-time ggml URL migration:
 
 ```bash

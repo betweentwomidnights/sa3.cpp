@@ -4,6 +4,27 @@ Stable Audio Open 1.0 and Foundation-1 use the optional classic
 stable-audio-tools (`SA3_BUILD_SAT`) pipeline introduced for Stable Audio Open
 Small. They do not require a second inference implementation.
 
+## Build, download, and generate
+
+The large SAT families use the same opt-in build and `sat-generate` frontend as
+SAOS. F16 is the downloader and runtime default:
+
+```bash
+cmake -S . -B build-sat -DSA3_BUILD_SAT=ON -DSA3_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-sat --target sat-generate
+python3 -m pip install -U "huggingface_hub"
+python3 tools/download_models.py --sat --sat-model foundation-1
+SA3_DEVICE=metal build-sat/bin/sat-generate --model foundation-1 \
+  --randomize --bars 4 --bpm 128 --seed 42 --out foundation.wav
+```
+
+Omit `-DSA3_METAL=ON` and `SA3_DEVICE=metal` for a CPU build. Stable Audio Open
+1.0 uses `--sat-model sao1` when downloading and `--model sao1` when generating.
+Pass `--encoding q5_k_m` to both commands for Foundation's recommended compact
+tier; it is an opt-in memory tradeoff, not the default. Use `--peak-normalize`
+when a decoded checkpoint output exceeds 0 dBFS; the CLI warns before the int16
+WAV writer would otherwise clip it.
+
 ## Component reuse
 
 The two checkpoints have the same loadable topology: a 24-layer, width-1536
@@ -98,6 +119,10 @@ sat-generate --model foundation-1 --randomize --randomize-mode mix `
   --family Synth --bars 4 --bpm 128 --key-root F# --key-mode minor --seed 42
 ```
 
+Valid family locks are Synth, Keys, Bass, Bowed Strings, Mallet, Wind, Guitar,
+Brass, Vocal, and Plucked Strings. Matching is case-insensitive; quote names
+that contain spaces.
+
 ## Publication layout
 
 SAO 1.0 and Foundation-1 are packaged as separate, self-contained repositories:
@@ -167,6 +192,36 @@ F16 is the runtime and downloader default. Q8 is the conservative high-fidelity
 quantized tier; Foundation Q5 is the recommended compact balance, while SAO 1.0's
 larger measured trajectory drift makes Q8 its conservative quantized choice.
 
-## Remaining gates
+## Apple M4 Metal validation
 
-1. Validate the stacked SAOS and SAO 1.0/Foundation changes on Metal.
+The stacked branch was validated on an Apple M4 with a 10-core GPU and 32 GiB
+of unified memory, using the pinned GGML revision `19c5421c`, AppleClang 17,
+and a Release build with `SA3_BUILD_SAT=ON` and `SA3_METAL=ON`. The complete
+configured suite passed 29/29 tests; the focused SAT/model-artifact subset
+passed 9/9 with the converter dependencies installed.
+
+The default all-F16 Foundation bundle completed two matched 4-bar/128-BPM
+RoyalCities renders at seed 42. Both produced the exact 330,750-sample stereo
+crop (7.500 s), used 173 latent frames and `seconds_total=8`, and were
+byte-identical. Total time was 55.700/56.048 s, denoising was 52.178/53.173 s,
+and decode was 2.460/2.250 s. Maximum RSS was approximately 2.10 GiB.
+
+The matching all-Q5 bundle completed in 62.616 s at approximately 0.82 GiB
+maximum RSS. On this M4, Q5 therefore cut memory by about 61 percent but was
+about 12 percent slower than F16. Against the F16 render it measured 0.526 raw
+waveform, 0.924 RMS-envelope, and 0.973 log-magnitude cosine. This supports F16
+as the default and Q5 as an explicitly selected compact tier.
+
+A three-step all-F16 CPU/Metal comparison measured 0.99649 raw-waveform,
+0.999964 RMS-envelope, and 0.99687 log-magnitude cosine. The Metal path took
+3.967 s versus 11.389 s on eight CPU threads. A three-step Gary-profile smoke
+also exercised DPM++ 2M SDE successfully. Finally, the longest Foundation
+boundary (8 bars/100 BPM) completed on Metal with 431 frames,
+`seconds_total=20`, and the exact 846,720-sample stereo crop (19.200 s).
+
+The default all-F16 Stable Audio Open 1.0 profile also completed its full
+100-step, 11-second render: 75.920 s total, 71.510 s denoising, 3.360 s decode,
+and approximately 2.09 GiB maximum RSS. The decoded peak was 2.026, so the raw
+int16 output clipped; rerunning with `--peak-normalize` produced the same
+deterministic trajectory without a clipped plateau. `sat-generate` now warns
+when an unnormalized decoded peak exceeds 0 dBFS.
