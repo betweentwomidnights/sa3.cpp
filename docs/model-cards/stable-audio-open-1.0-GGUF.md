@@ -21,7 +21,7 @@ GGUF repository.
 
 | Tier | Complete bundle | Guidance |
 | --- | ---: | --- |
-| F16 | 2,377 MiB | reference |
+| F16 | 2,377 MiB | reference and runtime default |
 | Q8_0 | 1,296 MiB | conservative high fidelity |
 | Q5_K_M | 922 MiB | compact |
 | Q4_K_M | 832 MiB | smallest footprint |

@@ -306,8 +306,11 @@ if(BUILD_TESTING)
         add_test(NAME sa3-sat-cli-model-option-test COMMAND sat-generate --model arc --randomize)
         add_test(NAME sa3-sat-cli-foundation-duration-test
                  COMMAND sat-generate --model foundation-1 --prompt test --seconds 4)
+        add_test(NAME sa3-sat-cli-saos-duration-test
+                 COMMAND sat-generate --model arc --prompt test --seconds 12)
         set_tests_properties(sa3-sat-cli-model-option-test
-                             sa3-sat-cli-foundation-duration-test PROPERTIES WILL_FAIL TRUE)
+                             sa3-sat-cli-foundation-duration-test
+                             sa3-sat-cli-saos-duration-test PROPERTIES WILL_FAIL TRUE)
     endif()
     if(Python3_Interpreter_FOUND)
         add_test(NAME sa3-model-artifacts-test
@@ -339,6 +342,7 @@ if(BUILD_TESTING)
         set_tests_properties(sa3-sat-sampling-test sa3-sat-cli-help-test
                              sa3-sat-cli-model-option-test
                              sa3-sat-cli-foundation-duration-test
+                             sa3-sat-cli-saos-duration-test
                              PROPERTIES LABELS "non-gpu;sat")
     endif()
 endif()

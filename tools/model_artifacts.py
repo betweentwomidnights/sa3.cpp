@@ -27,7 +27,7 @@ SHARED_REPO = "t5gemma-b-b-ul2-GGUF"
 SAOS_REPO = "stable-audio-open-small-GGUF"
 SAOS_VARIANTS = ("arc", "kickbass", "jerry-grunge")
 SAOS_ENCODINGS = ("F16", "Q8_0", "Q5_K_M", "Q4_K_M")
-SAOS_DEFAULT_ENCODING = "F16"
+SAT_DEFAULT_ENCODING = "F16"
 
 SAT_LARGE_MODELS = ("stable-audio-open-1.0", "foundation-1")
 SAT_LARGE_REPOS = {
@@ -208,7 +208,7 @@ def saos_oobleck_filename(encoding):
     return f"stable-audio-open-small-oobleck-{VERSION}-{enc}.gguf"
 
 
-def build_saos_download_plan(namespace, variant="arc", encoding=SAOS_DEFAULT_ENCODING,
+def build_saos_download_plan(namespace, variant="arc", encoding=SAT_DEFAULT_ENCODING,
                              text_encoding=None, ae_encoding=None):
     """Return the single-repository SAOS/finetune download plan."""
     enc = encoding.upper()
@@ -254,7 +254,7 @@ def sat_oobleck_filename(encoding):
     return f"stable-audio-open-oobleck-{VERSION}-{enc}.gguf"
 
 
-def build_sat_large_download_plan(namespace, model, encoding=SAOS_DEFAULT_ENCODING,
+def build_sat_large_download_plan(namespace, model, encoding=SAT_DEFAULT_ENCODING,
                                   text_encoding=None, ae_encoding=None):
     """Return one self-contained SAO 1.0 or Foundation-1 repository bundle."""
     model = canonical_sat_model(model)

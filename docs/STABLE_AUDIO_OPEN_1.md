@@ -163,8 +163,9 @@ showed the same roughly 10–15 percent quantized speed improvement.
 
 These paired metrics measure divergence from one F16 trajectory, not absolute
 audio quality. All tiers passed listening tests and remain publication candidates.
-Q8 is the conservative high-fidelity tier; Foundation Q5 is the recommended balance,
-while SAO 1.0's larger measured trajectory drift makes Q8 its conservative default.
+F16 is the runtime and downloader default. Q8 is the conservative high-fidelity
+quantized tier; Foundation Q5 is the recommended compact balance, while SAO 1.0's
+larger measured trajectory drift makes Q8 its conservative quantized choice.
 
 ## Remaining gates
 

@@ -11,7 +11,7 @@ namespace sa3::sat {
 
 inline constexpr const char* kSaosPublishedRepo = "thepatch/stable-audio-open-small-GGUF";
 inline constexpr const char* kDefaultSaosVariant = "arc";
-inline constexpr const char* kDefaultSaosEncoding = "F16";
+inline constexpr const char* kDefaultSatEncoding = "F16";
 inline constexpr const char* kSao1PublishedRepo = "thepatch/stable-audio-open-1.0-GGUF";
 inline constexpr const char* kFoundationPublishedRepo = "thepatch/foundation-1-GGUF";
 

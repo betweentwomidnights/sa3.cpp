@@ -27,7 +27,7 @@ struct Options {
     sa3::sat::PipelinePaths paths;
     std::string model = sa3::sat::kDefaultSaosVariant;
     std::string models_dir;
-    std::string encoding = sa3::sat::kDefaultSaosEncoding;
+    std::string encoding = sa3::sat::kDefaultSatEncoding;
     std::string t5_encoding;
     std::string ae_encoding;
     std::string prompt;
@@ -82,7 +82,7 @@ void print_help() {
         "  foundation-1 | foundation        RoyalCities Foundation finetune\n\n"
         "Model files:\n"
         "  --models-dir DIR      root directory (default $SA3_MODELS_DIR or ./models)\n"
-        "  --encoding TYPE       DiT/T5/Oobleck tier: F16, Q8_0, Q5_K_M, Q4_K_M\n"
+        "  --encoding TYPE       DiT/T5/Oobleck tier: F16 (default), Q8_0, Q5_K_M, Q4_K_M\n"
         "  --t5-encoding TYPE    override the T5 tier\n"
         "  --ae-encoding TYPE    override the Oobleck tier\n"
         "  --dit/--t5/--ae FILE  load explicit component paths\n\n"
@@ -102,6 +102,9 @@ void print_help() {
         "  --seed N              audio seed; also makes --randomize reproducible\n"
         "  --out FILE            output WAV (default MODEL-ggml.wav; --wav is an alias)\n"
         "  --peak-normalize      normalize the output WAV peak\n\n"
+        "Backend environment:\n"
+        "  SA3_DEVICE=metal      select Metal (GPU is selected automatically when available)\n"
+        "  SA3_DEVICE=cpu        force CPU; SA3_THREADS controls CPU threads\n\n"
         "Foundation-1 (model-specific):\n"
         "  --bars N              4 or 8 (manual default 4)\n"
         "  --bpm N               100, 110, 120, 128, 130, 140, or 150 (manual default 128)\n"
@@ -287,6 +290,8 @@ void validate_family_options(const Options& o, ModelFamily family) {
     if (family == ModelFamily::Foundation &&
         (o.seconds || o.seconds_total || o.frames || o.samples))
         throw std::runtime_error("Foundation-1 derives duration and frames from --bars/--bpm; raw duration overrides are not allowed");
+    if (family == ModelFamily::Saos && o.seconds && *o.seconds > 11.0f)
+        throw std::runtime_error("--seconds must be no greater than 11 for SAOS");
     if (o.randomize && !o.prompt.empty())
         throw std::runtime_error("--randomize and --prompt are mutually exclusive");
     if ((o.randomize_mode_set || o.family_hint_set) && !o.randomize)

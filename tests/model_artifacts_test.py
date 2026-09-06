@@ -42,7 +42,7 @@ class ModelArtifactsTest(unittest.TestCase):
         self.assertEqual(len(plan[0][1]), 3)
         self.assertTrue(all("F16" in name for name in plan[0][1]))
 
-    def test_large_sat_repositories_are_separate_and_self_contained(self):
+    def test_large_sat_f16_bundles_are_separate_and_self_contained_by_default(self):
         for model, repo in (
             ("stable-audio-open-1.0", "stable-audio-open-1.0-GGUF"),
             ("foundation-1", "foundation-1-GGUF"),
@@ -51,9 +51,9 @@ class ModelArtifactsTest(unittest.TestCase):
                 plan = build_sat_large_download_plan("thepatch", model)
                 self.assertEqual(plan[0][0], f"thepatch/{repo}")
                 self.assertEqual(plan[0][1], [
-                    sat_large_dit_filename(model, "Q5_K_M"),
-                    sat_t5_128_filename("Q5_K_M"),
-                    sat_oobleck_filename("Q5_K_M"),
+                    sat_large_dit_filename(model, "F16"),
+                    sat_t5_128_filename("F16"),
+                    sat_oobleck_filename("F16"),
                 ])
 
     def test_large_sat_alias_and_canonical_filenames(self):
@@ -242,7 +242,7 @@ class ModelArtifactsTest(unittest.TestCase):
         ], cwd=REPO_ROOT, check=True, text=True, capture_output=True)
         output = result.stdout.replace("\\", "/")
         self.assertIn("thepatch/stable-audio-open-1.0-GGUF/resolve/main/", output)
-        self.assertIn("stable-audio-open-1.0-dit-1.1B-v1.0-Q5_K_M.gguf", output)
+        self.assertIn("stable-audio-open-1.0-dit-1.1B-v1.0-F16.gguf", output)
 
     def test_shell_downloader_saos_plan(self):
         bash = shutil.which("bash")
@@ -253,6 +253,7 @@ class ModelArtifactsTest(unittest.TestCase):
             "jerry-grunge", "--dry-run", "--out", "test-models",
         ])
 
+    @unittest.skipIf(os.name == "nt", "POSIX shell filesystem semantics")
     def test_shell_downloader_skips_complete_saos_bundle(self):
         bash = shutil.which("bash")
         if not bash:
@@ -275,6 +276,21 @@ class ModelArtifactsTest(unittest.TestCase):
             "cmd.exe", "/d", "/c", str(REPO_ROOT / "models.cmd"), "--sat", "--sat-model",
             "saos", "--saos-variant", "jerry-grunge", "--dry-run", "--out", "test-models",
         ])
+
+    @unittest.skipUnless(os.name == "nt", "Windows command script")
+    def test_cmd_downloader_skips_complete_saos_bundle(self):
+        plan = build_saos_download_plan("thepatch", "arc")
+        with tempfile.TemporaryDirectory() as tmp:
+            for filename in plan[0][1]:
+                path = Path(tmp, filename)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            result = subprocess.run(
+                ["cmd.exe", "/d", "/c", str(REPO_ROOT / "models.cmd"),
+                 "--sat", "--out", tmp], cwd=REPO_ROOT,
+                check=True, text=True, capture_output=True,
+            )
+        self.assertEqual(result.stdout.count("[skip]"), 3)
 
     # models.sh stays a RELATIVE path: shutil.which("bash") may resolve to the WSL shim in
     # WindowsApps, whose filesystem namespace has no C:\ — an absolute Windows path fails there

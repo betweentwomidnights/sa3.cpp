@@ -63,9 +63,9 @@ the all-F16 reference bundle; pass `--encoding q5_k_m` for the recommended compa
 
 ```bash
 cmake -S . -B build-saos -DSA3_BUILD_SAT=ON -DSA3_METAL=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-saos --target saos-generate
+cmake --build build-saos --target sat-generate
 ./models.sh --sat
-SA3_DEVICE=metal build-saos/bin/saos-generate --model arc \
+SA3_DEVICE=metal build-saos/bin/sat-generate --model arc \
   --prompt "A short, beautiful piano riff in C minor" --seconds 11 --out saos.wav
 ```
 

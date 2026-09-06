@@ -21,9 +21,9 @@ Each encoding is a complete three-file bundle:
 
 | Tier | Complete bundle | Guidance |
 | --- | ---: | --- |
-| F16 | 2,377 MiB | reference |
+| F16 | 2,377 MiB | reference and runtime default |
 | Q8_0 | 1,296 MiB | conservative high fidelity |
-| Q5_K_M | 922 MiB | recommended default |
+| Q5_K_M | 922 MiB | recommended compact tier |
 | Q4_K_M | 832 MiB | smallest footprint |
 
 All quantized tensors passed the per-tensor 0.990 cosine gate. Matched CUDA renders

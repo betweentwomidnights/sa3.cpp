@@ -242,8 +242,8 @@ static int test_oobleck_metadata() {
 int main() {
     int fails = 0;
 
-    fails += expect(std::string(sa3::sat::kDefaultSaosEncoding) == "F16",
-                    "SAOS catalog defaults to the reference F16 bundle");
+    fails += expect(std::string(sa3::sat::kDefaultSatEncoding) == "F16",
+                    "SAT catalogs default to the reference F16 bundles");
     fails += expect(sa3::sat::saos_dit_relative_path("arc", "q5_k_m") ==
                     "stable-audio-open-small-dit-0.3B-v1.0-Q5_K_M.gguf",
                     "canonical SAOS ARC filename");

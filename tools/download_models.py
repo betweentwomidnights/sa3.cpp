@@ -20,7 +20,7 @@ The published default namespace is ``thepatch``; override it with --namespace.
 """
 import argparse, importlib.util, os, sys
 
-from model_artifacts import (ENCODINGS, SAOS_DEFAULT_ENCODING, SAOS_ENCODINGS, SAOS_VARIANTS,
+from model_artifacts import (ENCODINGS, SAT_DEFAULT_ENCODING, SAOS_ENCODINGS, SAOS_VARIANTS,
                              TEXT_ENCODER_DEFAULT, TEXT_ENCODER_ENCODINGS, VARIANTS,
                              build_download_plan, build_saos_download_plan,
                              build_sat_large_download_plan, canonical_sat_model)
@@ -80,7 +80,7 @@ def main():
     if args.sat:
         if args.training_base:
             ap.error("--training-base applies to SA3, not --sat")
-        encoding = args.encoding or SAOS_DEFAULT_ENCODING.lower()
+        encoding = args.encoding or SAT_DEFAULT_ENCODING.lower()
         if encoding.upper() not in SAOS_ENCODINGS:
             ap.error(f"SAT does not publish {encoding}; choose f16, q8_0, q5_k_m, or q4_k_m")
         for option, value in (("--t5-encoding", args.t5_encoding),
