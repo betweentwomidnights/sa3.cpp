@@ -49,7 +49,7 @@ static void print_help() {
         "Published SAOS models (from thepatch/stable-audio-open-small-GGUF):\n"
         "  --model NAME          arc (default), kickbass, or jerry-grunge\n"
         "  --models-dir DIR      model directory (default $SA3_MODELS_DIR or ./models)\n"
-        "  --encoding TYPE       DiT/T5/Oobleck tier (default q5_k_m)\n"
+        "  --encoding TYPE       f16 (default), q8_0, q5_k_m, or q4_k_m\n"
         "  --t5-encoding TYPE    override the T5 tier\n"
         "  --ae-encoding TYPE    override the Oobleck tier\n\n"
         "Generation:\n"
@@ -62,6 +62,9 @@ static void print_help() {
         "  --seed N              random seed\n"
         "  --out FILE            output WAV (default saos-ggml.wav; --wav is an alias)\n"
         "  --peak-normalize      normalize the output WAV peak\n\n"
+        "Backend environment:\n"
+        "  SA3_DEVICE=metal      select Metal (GPU is selected automatically when available)\n"
+        "  SA3_DEVICE=cpu        force CPU; SA3_THREADS controls CPU threads\n\n"
         "Auto defaults come from the GGUF: ARC uses pingpong/8 steps/CFG 1; ordinary\n"
         "SAOS finetunes use Euler/50 steps/CFG 4. Explicit flags override them.\n\n"
         "Low-level/debug:\n"
@@ -121,13 +124,15 @@ static int run(int argc, char** argv) {
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc)
             params.seed = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--peak-normalize")) peak_normalize = true;
-        else if (!strcmp(argv[i], "--help")) {
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             print_help();
             return 0;
         } else {
             throw std::runtime_error(std::string("unknown/incomplete argument: ") + argv[i]);
         }
     }
+    if (params.seconds > 11.0f)
+        throw std::invalid_argument("--seconds must be no greater than 11 for SAOS");
     const int explicit_paths = !paths.dit.empty() + !paths.t5.empty() + !paths.autoencoder.empty();
     if (explicit_paths == 0) {
         if (t5_encoding.empty()) t5_encoding = encoding;

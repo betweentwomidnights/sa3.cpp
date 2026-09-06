@@ -5,7 +5,8 @@
 #                    [--t5-encoding f16|f32|q8_0] [--ae-encoding f16|f32|q4_k_m|q5_k_m|q8_0]
 #                    [--training-base] [--namespace <hf-user>] [--out DIR] [--dry-run]
 #        ./models.sh --sat [--sat-model saos] [--saos-variant arc|kickbass|jerry-grunge]
-#   default: medium f16 DiT, f32 autoencoder, into ./models
+#                    [--encoding f16|q8_0|q5_k_m|q4_k_m]
+#   defaults: SA3 medium/f16 DiT + f32 autoencoder; SAOS ARC/all-F16; into ./models
 #
 # Grabs one variant's DiT at the chosen encoding, its autoencoder (SAME) at --ae-encoding, the
 # (always-F32) conditioner, plus the shared T5Gemma encoder + tokenizer. --training-base also grabs
@@ -64,20 +65,25 @@ case "$OUT" in
 esac
 
 sat_dl() {   # sat_dl <repo> <filename>
-  local repo="$1" file="$2" dst="$OUT/$2"
+  local repo="$1" file="$2" dst="$OUT/$2" part="$OUT/$2.part"
   mkdir -p "$(dirname "$dst")"
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "[plan] https://huggingface.co/$repo/resolve/main/$file -> $dst"
     return
   fi
-  if [ -f "$dst" ]; then echo "[check/resume] $file"; else echo "[download] $repo/$file"; fi
-  curl -fL --retry 3 --continue-at - -o "$dst" "https://huggingface.co/$repo/resolve/main/$file"
+  if [ -f "$dst" ]; then
+    echo "[skip] $file"
+    return
+  fi
+  if [ -f "$part" ]; then echo "[resume] $file"; else echo "[download] $repo/$file"; fi
+  curl -fL --retry 3 --continue-at - -o "$part" "https://huggingface.co/$repo/resolve/main/$file"
+  mv "$part" "$dst"
 }
 
 if [ "$SAT" -eq 1 ]; then
   [ "$TRAINING_BASE" -eq 0 ] || { echo "--training-base applies to SA3, not --sat" >&2; exit 2; }
   [ "$SAT_MODEL" = "saos" ] || { echo "unknown --sat-model '$SAT_MODEL' (currently: saos)" >&2; exit 2; }
-  [ "$ENCODING_SET" -eq 1 ] || ENCODING="q5_k_m"
+  [ "$ENCODING_SET" -eq 1 ] || ENCODING="f16"
   [ "$T5_ENCODING_SET" -eq 1 ] || T5_ENCODING="$ENCODING"
   [ "$AE_ENCODING_SET" -eq 1 ] || AE_ENCODING="$ENCODING"
   case "$ENCODING" in f16|F16) ENC=F16;; q8_0|Q8_0) ENC=Q8_0;; q5_k_m|Q5_K_M) ENC=Q5_K_M;; q4_k_m|Q4_K_M) ENC=Q4_K_M;; *) echo "unsupported SAOS encoding '$ENCODING'" >&2; exit 2;; esac
@@ -137,16 +143,21 @@ mkdir -p "$OUT"
 dl() {   # dl <repo> <filename>
   local repo="$1" file="$2"
   local dst="$OUT/$file"
+  local part="$dst.part"
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "[plan] https://huggingface.co/$repo/resolve/main/$file -> $dst"
     return
   fi
   if [ -f "$dst" ]; then
-    echo "[check/resume] $file"
+    echo "[skip] $file"
+    return
+  elif [ -f "$part" ]; then
+    echo "[resume] $file"
   else
     echo "[download] $repo/$file"
   fi
-  curl -fL --retry 3 --continue-at - -o "$dst" "https://huggingface.co/$repo/resolve/main/$file"
+  curl -fL --retry 3 --continue-at - -o "$part" "https://huggingface.co/$repo/resolve/main/$file"
+  mv "$part" "$dst"
 }
 
 dl "$VAR_REPO" "$BASE-dit-$DIT_SIZE-v1.0-$ENC.gguf"

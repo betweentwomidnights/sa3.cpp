@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 rem Download the sa3.cpp GGUF model set from HuggingFace (public repos) with curl.exe - no Python.
 rem Usage: models.cmd [--variant medium^|small-music^|small-sfx] [--encoding TYPE] ...
 rem        models.cmd --sat [--sat-model saos] [--saos-variant arc^|kickbass^|jerry-grunge] [--encoding TYPE] ...
-rem   default: medium f16 DiT, f32 autoencoder, into .\models
+rem   defaults: SA3 medium/f16 DiT + f32 autoencoder; SAOS ARC/all-F16; into .\models
 
 set "VARIANT=medium"
 set "ENCODING=f16"
@@ -116,7 +116,7 @@ if /I not "%SAT_MODEL%"=="saos" (
     echo unknown --sat-model "%SAT_MODEL%" ^(currently: saos^) 1>&2
     exit /b 2
 )
-if "%ENCODING_SET%"=="0" set "ENCODING=q5_k_m"
+if "%ENCODING_SET%"=="0" set "ENCODING=f16"
 if "%T5_ENCODING_SET%"=="0" set "T5_ENCODING=%ENCODING%"
 if "%AE_ENCODING_SET%"=="0" set "AE_ENCODING=%ENCODING%"
 set "ENC="
@@ -153,24 +153,29 @@ echo [done] SAOS %SAOS_VARIANT% ^(%ENC%^) -^> %OUT%\
 exit /b 0
 
 :help
-echo Usage: models.cmd [SA3 options] or --sat [--sat-model saos] [--saos-variant arc^|kickbass^|jerry-grunge] [--encoding TYPE] [--out DIR] [--dry-run]
+echo Usage: models.cmd [SA3 options] or --sat [--sat-model saos] [--saos-variant arc^|kickbass^|jerry-grunge] [--encoding f16^|q8_0^|q5_k_m^|q4_k_m] [--out DIR] [--dry-run]
 exit /b 0
 
 :dl
 set "DST=%OUT%\%~2"
+set "PART=%DST%.part"
 for %%D in ("%DST%") do if not exist "%%~dpD" mkdir "%%~dpD"
 if "%DRY_RUN%"=="1" (
     echo [plan] https://huggingface.co/%~1/resolve/main/%~2 -^> %DST%
     exit /b 0
 )
 if exist "%DST%" (
-    echo [check/resume] %~2
+    echo [skip] %~2
+    exit /b 0
+) else if exist "%PART%" (
+    echo [resume] %~2
 ) else (
     echo [download] %~1/%~2
 )
-curl.exe -fL --retry 3 --continue-at - -o "%DST%" "https://huggingface.co/%~1/resolve/main/%~2"
+curl.exe -fL --retry 3 --continue-at - -o "%PART%" "https://huggingface.co/%~1/resolve/main/%~2"
 if errorlevel 1 (
     echo [error] failed to download %~1/%~2
     exit /b 1
 )
+move /Y "%PART%" "%DST%" >nul
 exit /b 0

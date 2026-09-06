@@ -27,7 +27,7 @@ SHARED_REPO = "t5gemma-b-b-ul2-GGUF"
 SAOS_REPO = "stable-audio-open-small-GGUF"
 SAOS_VARIANTS = ("arc", "kickbass", "jerry-grunge")
 SAOS_ENCODINGS = ("F16", "Q8_0", "Q5_K_M", "Q4_K_M")
-SAOS_DEFAULT_ENCODING = "Q5_K_M"
+SAOS_DEFAULT_ENCODING = "F16"
 
 # Encodings the DiT and SAME are published in. The conditioner and tokenizer are always F32 --
 # those two really are small (a 793 KiB conditioner, a 14 MiB vocab), so there is nothing to gain.

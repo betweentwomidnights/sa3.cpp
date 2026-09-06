@@ -58,6 +58,20 @@ sa3-generate --model small-music --duration 12 --prompt "upbeat funk groove with
 sa3-generate --model medium --lora kev --lora keygen --prompt "neo-classical lofi hiphop 90bpm C# minor" --out song.wav
 ```
 
+Stable Audio Open Small is an optional, separately built component. Its default download is
+the all-F16 reference bundle; pass `--encoding q5_k_m` for the recommended compact tier:
+
+```bash
+cmake -S . -B build-saos -DSA3_BUILD_SAT=ON -DSA3_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-saos --target saos-generate
+./models.sh --sat
+SA3_DEVICE=metal build-saos/bin/saos-generate --model arc \
+  --prompt "A short, beautiful piano riff in C minor" --seconds 11 --out saos.wav
+```
+
+See [docs/STABLE_AUDIO_OPEN_SMALL.md](docs/STABLE_AUDIO_OPEN_SMALL.md) for finetunes,
+samplers, explicit component paths, conversion, and quantization results.
+
 updating an existing checkout across the one-time ggml URL migration:
 
 ```bash

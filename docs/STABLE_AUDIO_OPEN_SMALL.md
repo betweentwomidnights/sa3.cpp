@@ -93,20 +93,21 @@ For CUDA, add `-DSA3_CUDA=ON` to the configure command. `SA3_BUILD_SAT` creates 
 component even when `SA3_BUILD_TOOLS=OFF`; the latter only controls whether the
 `saos-generate` frontend and focused test executables are also created.
 
-Download the recommended all-Q5 SAOS bundle and generate with the catalog resolver:
+Download the reference all-F16 SAOS bundle and generate with the catalog resolver:
 
-```powershell
-python tools/download_models.py --sat --sat-model saos --saos-variant arc
-saos-generate --model arc --prompt "A short, beautiful piano riff in C minor" `
+```bash
+./models.sh --sat --sat-model saos --saos-variant arc
+saos-generate --model arc --prompt "A short, beautiful piano riff in C minor" \
   --seconds 11 --out saos.wav
 ```
 
 Use `--saos-variant kickbass` or `jerry-grunge` when downloading a finetune, then pass
 the same name to `saos-generate --model`. The downloader defaults are scoped by family:
-ordinary no-flag usage still downloads SA3 medium/F16, while `--sat` selects SAOS Q5_K_M
-for the DiT, T5, and Oobleck. `--encoding`, `--t5-encoding`, and `--ae-encoding` can
+ordinary no-flag usage still downloads SA3 medium/F16, while `--sat` selects SAOS F16
+for the DiT, T5, and Oobleck. `--encoding q5_k_m`, `--t5-encoding`, and `--ae-encoding` can
 override those tiers independently. `SA3_MODELS_DIR` or `--models-dir` changes the
-catalog root.
+catalog root. On Windows use `models.cmd` with the same flags; the Python alternative is
+`python3 tools/download_models.py --sat ...`.
 
 The explicit component path form remains available for conversion and parity work:
 
@@ -198,10 +199,10 @@ The shared artifacts were also isolated:
   the all-Q4 render by just 0.999541 raw-waveform and 0.999949 RMS-envelope cosine.
   The extra 59 MiB therefore does not recover the upstream Q4 trajectory drift.
 
-Publish F16, Q8_0, Q5_K_M, and Q4_K_M components. Label Q5_K_M as the recommended
-download: it is only 37 MiB larger than an all-Q4 bundle, while staying robust across
-both objectives. Q8_0 is the near-transparent tier, F16 is the reference tier, and
-Q4_K_M is the space-first tier. CUDA load time falls substantially with quantization;
+Publish F16, Q8_0, Q5_K_M, and Q4_K_M components. Default to the F16 reference bundle;
+label Q5_K_M as the recommended quantized download because it is only 37 MiB larger than
+an all-Q4 bundle while staying robust across both objectives. Q8_0 is the near-transparent
+tier, and Q4_K_M is the space-first tier. CUDA load time falls substantially with quantization;
 end-to-end time improved by roughly 10–15% in back-to-back 11-second runs, while
 denoising speed on this relatively small DiT was close enough to treat as backend- and
 thermal-state-dependent rather than promise a fixed speedup.

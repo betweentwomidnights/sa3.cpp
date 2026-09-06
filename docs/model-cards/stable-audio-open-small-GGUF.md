@@ -32,11 +32,12 @@ all three components unless you have a reason to mix them.
 | --- | ---: | --- |
 | F16 | 1,010 MiB | reference |
 | Q8_0 | 569 MiB | near-transparent |
-| Q5_K_M | 416 MiB | recommended default |
+| Q5_K_M | 416 MiB | recommended quantized tier |
 | Q4_K_M | 379 MiB | smallest footprint |
 
 Matched 11-second renders validated all four tiers on ARC, KickBass, and Jerry Grunge.
-Q5_K_M was consistently robust and is only 37 MiB larger than the all-Q4 bundle.
+F16 is the runtime and downloader default. Q5_K_M was consistently robust and is the
+recommended opt-in quantized tier; it is only 37 MiB larger than the all-Q4 bundle.
 
 ## Download and run
 

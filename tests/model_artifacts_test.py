@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -33,11 +34,11 @@ class ModelArtifactsTest(unittest.TestCase):
             "finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-F16.gguf",
         )
 
-    def test_saos_q5_bundle_is_self_contained(self):
+    def test_saos_f16_bundle_is_the_self_contained_default(self):
         plan = build_saos_download_plan("thepatch", "jerry-grunge")
         self.assertEqual(plan[0][0], "thepatch/stable-audio-open-small-GGUF")
         self.assertEqual(len(plan[0][1]), 3)
-        self.assertTrue(all("Q5_K_M" in name for name in plan[0][1]))
+        self.assertTrue(all("F16" in name for name in plan[0][1]))
 
     def test_training_base_identity_is_unambiguous(self):
         identity = dit_identity("medium", training_base=True)
@@ -183,11 +184,11 @@ class ModelArtifactsTest(unittest.TestCase):
         self.assertEqual(output.count("[plan]"), 3)
         self.assertIn("thepatch/stable-audio-open-small-GGUF/resolve/main/", output)
         self.assertIn(
-            "finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-Q5_K_M.gguf",
+            "finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-F16.gguf",
             output,
         )
-        self.assertIn("t5-base-encoder-0.1B-v1.0-Q5_K_M.gguf", output)
-        self.assertIn("stable-audio-open-small-oobleck-v1.0-Q5_K_M.gguf", output)
+        self.assertIn("t5-base-encoder-0.1B-v1.0-F16.gguf", output)
+        self.assertIn("stable-audio-open-small-oobleck-v1.0-F16.gguf", output)
 
     def test_python_downloader_saos_plan(self):
         self.assert_saos_downloader_plan([
@@ -203,6 +204,22 @@ class ModelArtifactsTest(unittest.TestCase):
             bash, "models.sh", "--sat", "--sat-model", "saos", "--saos-variant",
             "jerry-grunge", "--dry-run", "--out", "test-models",
         ])
+
+    def test_shell_downloader_skips_complete_saos_bundle(self):
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not installed")
+        plan = build_saos_download_plan("thepatch", "arc")
+        with tempfile.TemporaryDirectory() as tmp:
+            for filename in plan[0][1]:
+                path = Path(tmp, filename)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            result = subprocess.run(
+                [bash, "models.sh", "--sat", "--out", tmp], cwd=REPO_ROOT,
+                check=True, text=True, capture_output=True,
+            )
+        self.assertEqual(result.stdout.count("[skip]"), 3)
 
     @unittest.skipUnless(os.name == "nt", "Windows command script")
     def test_cmd_downloader_saos_plan(self):

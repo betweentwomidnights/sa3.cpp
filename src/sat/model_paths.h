@@ -11,7 +11,7 @@ namespace sa3::sat {
 
 inline constexpr const char* kSaosPublishedRepo = "thepatch/stable-audio-open-small-GGUF";
 inline constexpr const char* kDefaultSaosVariant = "arc";
-inline constexpr const char* kDefaultSaosEncoding = "Q5_K_M";
+inline constexpr const char* kDefaultSaosEncoding = "F16";
 
 inline std::string normalize_encoding(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -82,7 +82,11 @@ inline bool resolve_saos_model(const std::string& models_dir,
     paths->autoencoder = (root / std::filesystem::path(ae)).string();
     for (const auto& path : {paths->dit, paths->t5, paths->autoencoder}) {
         if (!std::filesystem::is_regular_file(path)) {
-            if (error) *error = "missing " + path + " (run: python tools/download_models.py --sat --saos-variant " + canonical_saos_variant(variant) + ")";
+            if (error) *error = "missing " + path +
+                " (download SAOS with --saos-variant " + canonical_saos_variant(variant) +
+                " --encoding " + normalize_encoding(dit_encoding) +
+                " --t5-encoding " + normalize_encoding(t5_encoding) +
+                " --ae-encoding " + normalize_encoding(ae_encoding) + ")";
             return false;
         }
     }

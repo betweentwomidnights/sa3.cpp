@@ -57,7 +57,7 @@ def main():
     ap.add_argument("--variant", default="medium", choices=list(VARIANTS))
     all_encodings = sorted({e.lower() for e in ENCODINGS + SAOS_ENCODINGS})
     ap.add_argument("--encoding", default=None, choices=all_encodings,
-                    help="DiT encoding (default: SA3 f16; SAOS q5_k_m)")
+                    help="DiT encoding (default: f16 for both SA3 and SAOS)")
     ap.add_argument("--ae-encoding", dest="ae_encoding", default=None,
                     choices=[e.lower() for e in ENCODINGS],
                     help="autoencoder encoding, on its own axis from --encoding "
