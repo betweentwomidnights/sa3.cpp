@@ -308,9 +308,15 @@ if(BUILD_TESTING)
                  COMMAND sat-generate --model foundation-1 --prompt test --seconds 4)
         add_test(NAME sa3-sat-cli-saos-duration-test
                  COMMAND sat-generate --model arc --prompt test --seconds 12)
+        add_test(NAME sa3-sat-cli-loudness-validation-test
+                 COMMAND sat-generate --model arc --prompt test --limiter-knee 0)
+        add_test(NAME sa3-sat-cli-vpred-steps-test
+                 COMMAND sat-generate --model sao1 --prompt test --steps 1)
         set_tests_properties(sa3-sat-cli-model-option-test
                              sa3-sat-cli-foundation-duration-test
-                             sa3-sat-cli-saos-duration-test PROPERTIES WILL_FAIL TRUE)
+                             sa3-sat-cli-saos-duration-test
+                             sa3-sat-cli-loudness-validation-test
+                             sa3-sat-cli-vpred-steps-test PROPERTIES WILL_FAIL TRUE)
     endif()
     if(Python3_Interpreter_FOUND)
         add_test(NAME sa3-model-artifacts-test
@@ -343,6 +349,8 @@ if(BUILD_TESTING)
                              sa3-sat-cli-model-option-test
                              sa3-sat-cli-foundation-duration-test
                              sa3-sat-cli-saos-duration-test
+                             sa3-sat-cli-loudness-validation-test
+                             sa3-sat-cli-vpred-steps-test
                              PROPERTIES LABELS "non-gpu;sat")
     endif()
 endif()

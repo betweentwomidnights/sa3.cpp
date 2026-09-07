@@ -141,6 +141,11 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
         !std::isfinite(params.sde_eta) || !(params.sigma_rho > 0.0f) ||
         !(params.sde_eta >= 0.0f))
         throw std::invalid_argument("invalid SAT generation geometry");
+    LoudnessParams loudness = params.loudness;
+    normalize_loudness_params(loudness);
+    std::string loudness_error;
+    if (!validate_loudness_params(loudness, loudness_error))
+        throw std::invalid_argument("invalid SAT loudness settings: " + loudness_error);
     const bool conditioning_override = !params.cross_conditioning.empty() ||
                                        !params.global_conditioning.empty();
     if (conditioning_override && (params.cross_conditioning.empty() ||
@@ -150,6 +155,7 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
         throw std::invalid_argument("native SAT conditioning requires T5 and a prompt");
 
     GenerateResult result;
+    result.loudness = make_loudness_meta(loudness);
     result.seconds_total = params.seconds_total > 0.0f
         ? params.seconds_total : params.seconds;
     const double total_start = now_s();
@@ -435,6 +441,7 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
     for (int channel = 0; channel < result.channels; ++channel)
         std::copy_n(decoded.data() + (size_t)channel * decoded_samples, result.samples,
                     result.audio.data() + (size_t)channel * result.samples);
+    apply_audio_loudness(result.audio, loudness, result.loudness);
     result.timing.total_s = now_s() - total_start;
     return result;
 }

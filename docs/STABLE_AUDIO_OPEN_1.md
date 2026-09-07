@@ -21,9 +21,9 @@ SA3_DEVICE=metal build-sat/bin/sat-generate --model foundation-1 \
 Omit `-DSA3_METAL=ON` and `SA3_DEVICE=metal` for a CPU build. Stable Audio Open
 1.0 uses `--sat-model sao1` when downloading and `--model sao1` when generating.
 Pass `--encoding q5_k_m` to both commands for Foundation's recommended compact
-tier; it is an opt-in memory tradeoff, not the default. Use `--peak-normalize`
-when a decoded checkpoint output exceeds 0 dBFS; the CLI warns before the int16
-WAV writer would otherwise clip it.
+tier; it is an opt-in memory tradeoff, not the default. SAT uses the same default
+peak-normalization and soft-knee limiter as SA3. Use
+`--no-peak-normalize --no-limiter` only when raw decoder output is required.
 
 ## Component reuse
 
@@ -222,6 +222,7 @@ boundary (8 bars/100 BPM) completed on Metal with 431 frames,
 The default all-F16 Stable Audio Open 1.0 profile also completed its full
 100-step, 11-second render: 75.920 s total, 71.510 s denoising, 3.360 s decode,
 and approximately 2.09 GiB maximum RSS. The decoded peak was 2.026, so the raw
-int16 output clipped; rerunning with `--peak-normalize` produced the same
-deterministic trajectory without a clipped plateau. `sat-generate` now warns
-when an unnormalized decoded peak exceeds 0 dBFS.
+int16 output clipped; rerunning with peak normalization produced the same
+deterministic trajectory without a clipped plateau. The subsequent shared
+SA3/SAT loudness integration now handles this by default while retaining an
+explicit fully raw path.

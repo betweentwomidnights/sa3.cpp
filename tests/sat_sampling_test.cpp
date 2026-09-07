@@ -28,6 +28,33 @@ static bool near(float a, float b, float eps = 1.0e-6f) {
     return std::fabs(a - b) <= eps;
 }
 
+static int test_shared_loudness() {
+    int fails = 0;
+    sa3::sat::GenerateParams defaults;
+    fails += expect(defaults.loudness.peak_normalize_enabled && defaults.loudness.limiter_enabled,
+                    "SAT generation shares the SA3 loudness defaults");
+
+    std::vector<float> audio{0.25f, -0.5f, 0.125f};
+    sa3::LoudnessMeta meta = sa3::make_loudness_meta(defaults.loudness);
+    sa3::apply_audio_loudness(audio, defaults.loudness, meta);
+    fails += expect(near(meta.decoded_peak, 0.5f) && meta.peak_normalize_gain_set,
+                    "shared loudness records decoded peak and normalization gain");
+    fails += expect(meta.limiter_limited_fraction_set &&
+                    meta.final_peak <= sa3::db_to_linear(defaults.loudness.limiter_ceiling_db) + 1.0e-6f,
+                    "shared limiter keeps SAT audio under its ceiling");
+
+    sa3::LoudnessParams raw;
+    raw.peak_normalize_enabled = false;
+    raw.limiter_enabled = false;
+    std::vector<float> raw_audio{2.0f, -0.5f};
+    sa3::LoudnessMeta raw_meta = sa3::make_loudness_meta(raw);
+    sa3::apply_audio_loudness(raw_audio, raw, raw_meta);
+    fails += expect(near(raw_audio[0], 2.0f) && near(raw_meta.final_peak, 2.0f) &&
+                    !raw_meta.peak_normalize_gain_set && !raw_meta.limiter_limited_fraction_set,
+                    "disabling both stages preserves exact raw SAT audio");
+    return fails;
+}
+
 static int test_t5_graph_shape() {
     int fails = 0;
     sa3::sat::T5EncoderConfig c;
@@ -242,6 +269,7 @@ static int test_oobleck_metadata() {
 int main() {
     int fails = 0;
 
+    fails += test_shared_loudness();
     fails += expect(std::string(sa3::sat::kDefaultSatEncoding) == "F16",
                     "SAT catalogs default to the reference F16 bundles");
     fails += expect(sa3::sat::saos_dit_relative_path("arc", "q5_k_m") ==

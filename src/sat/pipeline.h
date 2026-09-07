@@ -1,6 +1,7 @@
 // sat/pipeline.h -- reusable Stable Audio Tools text-to-audio orchestration.
 #pragma once
 
+#include "audio_post.h"
 #include "sat/model_spec.h"
 
 #include <cstdint>
@@ -44,6 +45,8 @@ struct GenerateParams {
     float sde_eta = 1.0f;
     uint64_t seed = 1234;
     Sampler sampler = Sampler::Auto;
+    // Shared post-decode SA3 loudness controls. Latent fields are currently no-ops for SAT.
+    LoudnessParams loudness;
 
     // Optional deterministic/parity inputs. Supplying cross/global bypasses T5.
     std::vector<float> cross_conditioning;
@@ -84,6 +87,7 @@ struct GenerateResult {
     float seconds_total = 0.0f;
     Sampler sampler = Sampler::Auto;
     std::string objective;
+    LoudnessMeta loudness;
     GenerateTiming timing;
 };
 

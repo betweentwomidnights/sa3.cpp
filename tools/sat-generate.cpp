@@ -66,7 +66,7 @@ struct Options {
     bool randomize_mode_set = false;
     bool family_hint_set = false;
     bool randomize = false;
-    bool peak_normalize = false;
+    sa3::LoudnessParams loudness = sa3::loudness_defaults_from_env();
 };
 
 void print_help() {
@@ -100,8 +100,16 @@ void print_help() {
         "  --sigma-rho N         V-prediction schedule curvature (default 1)\n"
         "  --sde-eta N           SDE noise strength (default 1)\n"
         "  --seed N              audio seed; also makes --randomize reproducible\n"
-        "  --out FILE            output WAV (default MODEL-ggml.wav; --wav is an alias)\n"
-        "  --peak-normalize      normalize the decoded peak before writing the int16 WAV\n\n"
+        "  --out FILE            output WAV (default MODEL-ggml.wav; --wav is an alias)\n\n"
+        "Output loudness (shared with sa3-generate):\n"
+        "  --peak-normalize-db N peak target in dBFS (default +2)\n"
+        "  --no-peak-normalize   disable peak normalization\n"
+        "  --limiter-ceiling-db N  limiter ceiling in dBFS (default -0.3)\n"
+        "  --no-limiter          disable the limiter\n"
+        "  --limiter-knee N      soft-knee fraction in (0, 1] (default 0.8)\n"
+        "Use --no-peak-normalize --no-limiter for raw decoded audio. The same\n"
+        "SA3_PEAK_NORMALIZE_DB, SA3_LIMITER_CEILING_DB, and SA3_LIMITER_KNEE\n"
+        "environment overrides apply.\n\n"
         "Backend environment:\n"
         "  SA3_DEVICE=metal      select Metal (GPU is selected automatically when available)\n"
         "  SA3_DEVICE=cpu        force CPU; SA3_THREADS controls CPU threads\n\n"
@@ -219,7 +227,18 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--randomize-mode") { o.randomize_mode = require_value(argc, argv, i); o.randomize_mode_set = true; }
         else if (arg == "--family") { o.family_hint = require_value(argc, argv, i); o.family_hint_set = true; }
         else if (arg == "--randomize") o.randomize = true;
-        else if (arg == "--peak-normalize") o.peak_normalize = true;
+        else if (arg == "--peak-normalize-db") {
+            o.loudness.peak_normalize_enabled = true;
+            o.loudness.peak_normalize_db = parse_float(require_value(argc, argv, i), "--peak-normalize-db");
+        }
+        else if (arg == "--no-peak-normalize") o.loudness.peak_normalize_enabled = false;
+        else if (arg == "--limiter-ceiling-db") {
+            o.loudness.limiter_enabled = true;
+            o.loudness.limiter_ceiling_db = parse_float(require_value(argc, argv, i), "--limiter-ceiling-db");
+        }
+        else if (arg == "--no-limiter") o.loudness.limiter_enabled = false;
+        else if (arg == "--limiter-knee")
+            o.loudness.limiter_knee = parse_float(require_value(argc, argv, i), "--limiter-knee");
         else throw std::runtime_error("unknown argument: " + arg + " (run --help)");
     }
     return o;
@@ -307,11 +326,16 @@ int run(int argc, char** argv) {
     std::string model;
     const ModelFamily family = classify_model(o.model, model);
     validate_family_options(o, family);
+    sa3::normalize_loudness_params(o.loudness);
+    std::string loudness_error;
+    if (!sa3::validate_loudness_params(o.loudness, loudness_error))
+        throw std::runtime_error("invalid loudness settings: " + loudness_error);
     if (o.t5_encoding.empty()) o.t5_encoding = o.encoding;
     if (o.ae_encoding.empty()) o.ae_encoding = o.encoding;
     if (o.output.empty()) o.output = model + "-ggml.wav";
 
     sa3::sat::GenerateParams params;
+    params.loudness = o.loudness;
     params.prompt = o.prompt;
     params.negative_prompt = o.negative_prompt;
     if (o.seed) params.seed = *o.seed;
@@ -363,7 +387,7 @@ int run(int argc, char** argv) {
     if (o.frames) params.frames = *o.frames;
     if (o.steps) params.steps = *o.steps;
     if (o.samples) params.output_samples = *o.samples;
-    if (family != ModelFamily::Saos && params.steps < 2)
+    if (family != ModelFamily::Saos && o.steps && *o.steps == 1)
         throw std::runtime_error("V-prediction sampling requires at least two steps");
     if (family != ModelFamily::Foundation && !o.frames && (o.seconds || o.samples)) {
         const double wanted_samples = o.samples ? (double)*o.samples : (double)params.seconds * 44100.0;
@@ -423,16 +447,6 @@ int run(int argc, char** argv) {
         write_f32(o.dump_conditioning_prefix + ".global.f32", result.global_conditioning);
     }
     if (!o.latent_path.empty()) write_f32(o.latent_path, result.latent);
-    float peak = 0.0f;
-    for (float sample : result.audio) peak = std::max(peak, std::fabs(sample));
-    if (o.peak_normalize) {
-        if (peak > 0.0f) for (float& sample : result.audio) sample /= peak;
-        std::printf("peak normalized from %.6f\n", peak);
-    } else if (peak > 1.0f) {
-        std::fprintf(stderr,
-                     "warning: decoded peak %.6f exceeds 0 dBFS; the int16 WAV will clip "
-                     "(pass --peak-normalize)\n", peak);
-    }
     sa3::write_wav_planar(o.output, result.audio.data(), result.samples,
                           result.channels, result.sample_rate);
     const double audio_seconds = (double)result.samples / result.sample_rate;
@@ -444,6 +458,13 @@ int run(int argc, char** argv) {
     if (result.objective == "v")
         std::printf("sigma: min=%.6g max=%.6g rho=%.6g eta=%.6g\n",
                     result.sigma_min, result.sigma_max, result.sigma_rho, result.sde_eta);
+    std::printf("loudness: decoded_peak=%.6f final_peak=%.6f",
+                result.loudness.decoded_peak, result.loudness.final_peak);
+    if (result.loudness.peak_normalize_gain_set)
+        std::printf(" peak_gain=%.6f", result.loudness.peak_normalize_gain);
+    if (result.loudness.limiter_limited_fraction_set)
+        std::printf(" limited=%.4f%%", 100.0f * result.loudness.limiter_limited_fraction);
+    std::printf("\n");
     const sa3::sat::GenerateTiming& t = result.timing;
     std::printf("benchmark: conditioning=%.3fs dit_load=%.3fs dit_build_alloc=%.3fs denoise=%.3fs "
                 "step_median_warm=%.1fms ae_load=%.3fs ae_build_alloc=%.3fs decode=%.3fs "

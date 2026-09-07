@@ -136,12 +136,12 @@ python tools/convert_sat_dit.py --src finetune.ckpt --config finetune_config.jso
   --out finetune-dit-f16.gguf --model-id my-saos-finetune
 sat-generate --model arc --t5 t5-base-encoder-f16.gguf --dit finetune-dit-f16.gguf `
   --ae saos-oobleck-f16.gguf --prompt "..." --sampler dpmpp --steps 40 `
-  --cfg-scale 4 --seconds 11 --peak-normalize --out finetune.wav
+  --cfg-scale 4 --seconds 11 --out finetune.wav
 ```
 
-Peak normalization is a CLI presentation option matching Gary's current service;
-the reusable component returns unclipped planar float samples so embedding applications
-retain control over loudness and limiting.
+The reusable SAT component uses the same default peak normalization and soft-knee limiter
+as SA3. Embedding applications can override the shared `LoudnessParams`; use
+`--no-peak-normalize --no-limiter` in the CLI when exact raw decoder output is required.
 
 ## Full-checkpoint validation
 
