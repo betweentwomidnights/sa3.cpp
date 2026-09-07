@@ -14,6 +14,7 @@ build-ios-dev/
 build-metal/
 build-metal-noblas/
 build-all/
+build-audit*/
 # Standalone ggml builds, for running the fork's own test-backend-ops
 build-ggml-tests*/
 *.o
