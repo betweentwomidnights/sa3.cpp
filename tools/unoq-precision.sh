@@ -11,7 +11,7 @@ results=${SA3_UNOQ_RESULTS:-/home/arduino/sa3-experiments}
 mkdir -p -- "$results"
 run=$(mktemp -d "$results/precision-$mode-$device-XXXXXX")
 printf 'Artifacts: %s\n' "$run"
-export LD_LIBRARY_PATH=/home/arduino/mesa26/root/usr/lib/aarch64-linux-gnu
+export LD_LIBRARY_PATH="${SA3_UNOQ_OPENCL_LIBRARY_DIR:-$build/ggml/src/ggml-opencl}:/home/arduino/mesa26/root/usr/lib/aarch64-linux-gnu"
 export OCL_ICD_VENDORS=/etc/OpenCL/vendors
 export LIBCLC_PATH=/home/arduino/mesa26/root/usr/lib/clc
 export RUSTICL_FEATURES=intel
@@ -33,6 +33,9 @@ cd -- "$run"
     sha256sum "$build/bin/test-backend-ops" "$repo/ggml/src/ggml-opencl/ggml-opencl.cpp" \
         "$repo/ggml/src/ggml-opencl/kernels/mul_mat_f16_f32.cl"
 } > source-state.txt
+sha256sum "${SA3_UNOQ_OPENCL_LIBRARY_DIR:-$build/ggml/src/ggml-opencl}/libggml-opencl.so" \
+    "$repo/ggml/src/ggml-opencl/kernels/mul_mm_q4_k_f32_l4_lm.cl" \
+    "$repo/ggml/src/ggml-opencl/kernels/mul_mm_q6_k_f32_l4_lm.cl" >> source-state.txt
 ulimit -c 0
 set +e
 /usr/bin/time -v timeout --signal=TERM --kill-after=10s 300s \

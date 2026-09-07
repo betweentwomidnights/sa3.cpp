@@ -16,7 +16,7 @@ results=${SA3_UNOQ_RESULTS:-/home/arduino/sa3-experiments}
 mkdir -p -- "$results"
 run=$(mktemp -d "$results/generate-$device-$dit-$ae-$t5-XXXXXX")
 printf 'Artifacts: %s\n' "$run"
-export LD_LIBRARY_PATH=/home/arduino/mesa26/root/usr/lib/aarch64-linux-gnu
+export LD_LIBRARY_PATH="${SA3_UNOQ_OPENCL_LIBRARY_DIR:-$build/ggml/src/ggml-opencl}:/home/arduino/mesa26/root/usr/lib/aarch64-linux-gnu"
 export OCL_ICD_VENDORS=/etc/OpenCL/vendors
 export LIBCLC_PATH=/home/arduino/mesa26/root/usr/lib/clc
 export RUSTICL_FEATURES=intel
@@ -38,6 +38,9 @@ cd -- "$run"
     git -C "$repo/ggml" diff --stat
     sha256sum "$build/bin/sa3-generate" "$repo/src/sa3_pipeline.h"
 } > source-state.txt
+sha256sum "${SA3_UNOQ_OPENCL_LIBRARY_DIR:-$build/ggml/src/ggml-opencl}/libggml-opencl.so" \
+    "$repo/ggml/src/ggml-opencl/kernels/mul_mm_q4_k_f32_l4_lm.cl" \
+    "$repo/ggml/src/ggml-opencl/kernels/mul_mm_q6_k_f32_l4_lm.cl" >> source-state.txt
 git -C "$repo" diff --binary > source.patch
 git -C "$repo/ggml" diff --binary > ggml-source.patch
 ulimit -c 0

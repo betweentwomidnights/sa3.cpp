@@ -30,7 +30,10 @@ cd -- "$run"
         "$repo/ggml/src/ggml-opencl/ggml-opencl.cpp"
     grep -E 'GGML_OPENCL|SA3_OPENCL|CMAKE_BUILD_TYPE:' "$build/CMakeCache.txt"
 } > source-state.txt
-export LD_LIBRARY_PATH=/home/arduino/mesa26/root/usr/lib/aarch64-linux-gnu
+sha256sum "${SA3_UNOQ_OPENCL_LIBRARY_DIR:-$build/ggml/src/ggml-opencl}/libggml-opencl.so" \
+    "$repo/ggml/src/ggml-opencl/kernels/mul_mm_q4_k_f32_l4_lm.cl" \
+    "$repo/ggml/src/ggml-opencl/kernels/mul_mm_q6_k_f32_l4_lm.cl" >> source-state.txt
+export LD_LIBRARY_PATH="${SA3_UNOQ_OPENCL_LIBRARY_DIR:-$build/ggml/src/ggml-opencl}:/home/arduino/mesa26/root/usr/lib/aarch64-linux-gnu"
 export OCL_ICD_VENDORS=/etc/OpenCL/vendors
 export LIBCLC_PATH=/home/arduino/mesa26/root/usr/lib/clc
 export RUSTICL_FEATURES=intel

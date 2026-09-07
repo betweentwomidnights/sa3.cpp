@@ -24,6 +24,11 @@ End-to-end `small-music` Q4 and F16 smoke generations have completed on an UNO Q
 finite, non-silent 44.1 kHz stereo WAV. This is a correctness milestone, not yet a fast inference
 path.
 
+The September 6 experimental update reduces the four-second/one-step Q4 run from 154.98 to
+123.07 seconds wall time, and from 94.63 to 64.59 seconds combined stage compute. Output remains
+bit-identical. The final section below records kernel tuning, attention batching, regression
+checks, and reproduction artifacts. The CPU remains faster on this workload.
+
 The tested board is Debian 13 on AArch64 with 3.6 GiB system RAM. Its physical Adreno 702 is
 available at `/dev/dri/renderD128`; the login user must be in the `render` group. Both the system
 Mesa 25.2.6 Turnip driver and a user-local Mesa 26.2.1 Turnip driver expose only Vulkan 1.0 for the
@@ -568,3 +573,133 @@ Next work should focus on the remaining GEMM device time and avoiding startup's 
 loads. Neither a metadata-only loader nor a Hexagon/Vulkan implementation is included here.
 Keep F16 as an accuracy reference, Q4 as the compact baseline, and medium as a separate validation
 target. The experimental GPU path still does not beat the CPU.
+
+### September 6: K-quant occupancy and batched attention
+
+The Windows experiment now lives in `C:/dev/sa3-unoq-experimental`, a separate worktree on the
+existing experimental branch. The main `C:/dev/sa3.cpp` checkout is doing unrelated work.
+The board remains `/home/arduino/sa3.cpp`. No driver, clock/governor, asynchronous queue,
+model precision, or model-residency setting was changed for these measurements.
+
+The earlier four-second profile attributed 72.48 s of its 80.54 s device execution to Q4_K/Q6_K
+GEMM. The new Rusticl tile keeps the 32x32 output shape but uses 64 work-items, a 2x8 register tile
+(16 accumulators per thread), and BK=16 (4 KiB local storage). A required workgroup attribute makes
+the launch geometry explicit to the compiler. The host dispatch and kernel limits are checked
+together; non-Rusticl tile settings retain their prior values.
+
+`tools/unoq-gemm-probe.cpp` compiles individual Q4/Q6 kernels without rebuilding GGML or loading a
+model. Its fixed 768x256x768 unit-weight check must return exactly K for every output; it is a
+timing/geometry probe, not a replacement for randomized GGML tests. It reports kernel workgroup
+limits, local/private memory, and six device-event timings (first is warmup). Explicit TM/TN/BK
+arguments allow controlled experiments. `SA3_PROBE_K_UNROLL=1..16` additionally tests loop unrolling.
+
+```bash
+c++ -O2 -std=c++17 tools/unoq-gemm-probe.cpp -lOpenCL -o build-opencl-profile/bin/unoq-gemm-probe
+# Use the Mesa environment described above; keep a timeout around experimental kernels.
+timeout 30s build-opencl-profile/bin/unoq-gemm-probe q4 ggml/src/ggml-opencl/kernels/mul_mm_q4_k_f32_l4_lm.cl
+timeout 30s build-opencl-profile/bin/unoq-gemm-probe q6 ggml/src/ggml-opencl/kernels/mul_mm_q6_k_f32_l4_lm.cl
+```
+
+Accumulator-loop unrolling alone left T5 near 1.19 s. Geometry experiments found approximately
+55 ms Q4 and 69 ms Q6 versus 75 ms and 99 ms with the earlier geometry. Larger per-thread tiles,
+128-thread variants, and interleaved row/column ownership were slower; several variants reported
+private-memory allocation. Explicit K-loop unrolling did not produce a meaningful further gain.
+The retained layout uses adjacent output rows/columns and preserves the K accumulation sequence.
+Shader diagnostics used Mesa's IR3/Freedreno debug facilities; diagnostic runs are separate from
+model timings ([Mesa environment reference](https://docs.mesa3d.org/envvars.html)).
+
+With just the K-quant change, one-layer Q4 T5 decreased from 1.189–1.192 s to 0.908–0.909 s, with
+**bit-identical** hidden states. Artifacts: `textenc-safe-L1-S256-lcj89g` (fresh old-library baseline),
+`textenc-safe-L1-S256-Ngs5AD` (K-quant candidate). All 22 filtered operator tests passed with forced
+32-column splitting (`precision-test-GPUOpenCL-HRTwGR`).
+
+The F16/F32 small tile now launches attention heads/blocks in the third work dimension rather than
+one host submission per batch. Explicit byte strides retain 4D broadcasting and permuted views.
+Batch starts are global across splits. `GGML_OPENCL_RUSTICL_GEMM_MAX_BATCHES` defaults to 64 and must
+be a positive integer; 1 is useful for a serialized-batch comparison. The approximate 500 MFLOP
+budget further limits batches and columns. This remains a heuristic, not a universal watchdog
+guarantee. Safe per-dispatch queue completion remains enabled.
+
+All 22 operator tests also passed with **both** maximum columns 32 and maximum batches 3, exercising
+partial batch groups that cross the 4D batch boundary (`precision-test-GPUOpenCL-lUHBIw`). The
+combined candidate's T5 test was 0.928–0.929 s (`textenc-safe-L1-S256-RlN58t`), a small regression
+versus the K-only candidate; batching's benefit is primarily in the much larger decoder batch count.
+
+The combined four-second/one-step Q4 generation (`...-tJPdoI`) completed in 124.90 s process wall
+time. T5/DiT/decoder compute was 11.69/30.36/22.02 s, versus 14.49/41.95/37.60 s in the earlier
+`...-4UBcH6` reference. Conditioning, latent and all 360,448 decoded floats were **bit-identical**;
+the WAV is stereo 44.1 kHz with 176,400 frames. Peak RSS was 516900 KiB, with no swap.
+The profile shrank from 18,345 to 2,961 kernel events; F32 matrix calls alone fell from 15,808 to 424.
+Their device time increased from 3.14 to 4.68 s, but inclusive queue-finish time fell from 11.48 to
+4.96 s. Maximum event duration was 111.00 ms, and no new driver hang/recovery was logged.
+
+All four experiment runners now hash the loaded OpenCL library and both K-quant kernel sources.
+`SA3_UNOQ_OPENCL_LIBRARY_DIR` selects an alternate directory containing `libggml-opencl.so` and its
+SONAME symlink for direct old/new comparisons. The preserved pre-change library is under
+`/home/arduino/sa3-experiments/september6-baseline-library`; its SHA256 is
+`4219bae46e46c4ec050690aaa49ed010a02dd7d5800144bd497fcc8dfea19ea8`.
+When selecting it, current source hashes describe the checkout while the library hash identifies
+the executed checkpoint (ggml `e7589a63`).
+
+A fresh old-library replay (`generate-gpu-q4_k_m-q4_k_m-q4_k_m_opencl-BklrxJ`) confirmed the
+comparison under the current board conditions:
+
+| Four-second, one-step Q4 run | Previous library | K64 + batched float | Reduction |
+|---|---:|---:|---:|
+| T5 compute | 14.370 s | 11.691 s | 19% |
+| DiT compute | 41.545 s | 30.356 s | 27% |
+| Decode compute | 38.713 s | 22.022 s | 43% |
+| Combined compute | 94.628 s | 64.069 s | 32% |
+| Process wall time | 154.98 s | 124.90 s | 19% |
+
+These process times still include roughly a minute outside the stage compute timers. Avoiding
+redundant initialization/model loading remains useful future work. Against the earlier matched
+four-thread CPU run (20.46 s combined compute, 26.27 s wall), GPU inference remains slower.
+
+The isolated precision benchmark exposed a regression in the first batched shader: large
+single-matrix F16/F32 GEMMs rose to 153.63/152.09 ms (`precision-perf-GPUOpenCL-jhVzCJ`), while
+Q4/Q6 improved to 56.05/69.90 ms. The final implementation therefore compiles separate single-matrix
+and batched float kernels, removing batch indexing at compile time for matrices without batches.
+This avoids making dense F16/F32 operations pay for the attention batch path. The earlier
+`...-tJPdoI` timing above describes the initial combined candidate, before this specialization.
+
+The specialized implementation passes the same 22 randomized cases with columns limited to 32
+and batches to 3 (`precision-test-GPUOpenCL-2R2FOz`). The standalone probe also builds with
+`-Wall -Wextra -Werror` and rejects tile settings whose cooperative loaders cannot cover the
+local arrays safely. All four shell runners pass syntax checks.
+
+The final precision run (`precision-perf-GPUOpenCL-DduUT8`, 332 repetitions per type) confirms
+that specialization removes the regression:
+
+| 768x256x768 GEMM | Earlier candidate | Final candidate |
+|---|---:|---:|
+| Q4_K | 79.27 ms | 56.58 ms |
+| Q6_K | 101.79 ms | 69.98 ms |
+| F16 | 89.74 ms | 88.33 ms |
+| F32 | 88.23 ms | 87.79 ms |
+
+The earlier column is `precision-perf-GPUOpenCL-QTlyos` from September 2. The fresh standalone
+probes and T5 old-library replay also support the K-quant improvement; tiny float timing changes
+should be treated as noise rather than a new float arithmetic optimization.
+
+The fixed-latent F16 decoder check (`codec-gpu-F16-Ld5UHV`, one restored-input repetition) completed
+in 3.052 s compute. All three taps were finite and bit-identical to the earlier corrected F16 GPU
+reference `codec-gpu-F16-KLIYPy`. This validates the unchanged float arithmetic separately from
+the Q4 full-model comparison.
+
+Final chunked generation (`generate-gpu-q4_k_m-q4_k_m-q4_k_m_opencl-6smYsl`, four seconds, chunk
+32/overlap 16) completed in 134.84 s wall, with 32.912 s decode compute versus the earlier
+56.027 s. Conditioning, latent and all decoded floats were bit-identical to the fresh monolithic
+old-library reference. The graph buffer remains 26,665,472 bytes; peak RSS was 517892 KiB and no
+swap occurred. The profile contains 3,505 kernel events with a maximum of 115.01 ms per event.
+The graph-memory advantage is retained, while overlap still increases compute versus monolithic
+decoding. This remains a four-second, one-step diagnostic rather than a music-quality assessment.
+
+Final monolithic generation (`generate-gpu-q4_k_m-q4_k_m-q4_k_m_opencl-y7EoQU`) completed in
+**123.07 s wall**, with T5/DiT/decode compute **11.743/30.618/22.226 s** (64.588 s combined).
+Against the fresh old-library replay, that is 21% less process time, 32% less compute, and 43%
+less decoder compute. Peak RSS was 517520 KiB, with no swap. Conditioning, latent and all decoded
+floats were finite and bit-identical to both the old-library monolithic run and the final chunked
+run. Its valid profile has 2,961 kernel events, including 424 batched float GEMMs; the maximum
+device duration is 111.02 ms. No new driver hang/recovery was logged during final validation.
+The final backend also passes the non-profiling C++ syntax check (`k64-nonprofile-syntax.log`).
