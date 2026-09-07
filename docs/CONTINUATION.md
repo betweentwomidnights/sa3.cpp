@@ -95,9 +95,11 @@ asked for, or `splice = 0` (`--no-splice`) for the old behaviour outright.
 
 the env names are the ones gary4local already uses, so a knob learned there transfers verbatim.
 
-from C, `sa3_splice` on `sa3_request_ex` mirrors `sa3_loudness`: leave `set = 0` for the defaults
-plus any env overrides, or set `set = 1` to drive it per-request -- including the old un-spliced
-behaviour with `splice = 0`, exactly as a caller asks for raw audio today.
+from C, use the size-tagged `sa3_request_v2` and call `sa3_generate_v2`. its `sa3_splice` mirrors
+`sa3_loudness`: leave `set = 0` for the defaults plus any env overrides, or set `set = 1` to drive
+it per-request -- including the old un-spliced behaviour with `splice = 0`, exactly as a caller
+asks for raw audio today. the older `sa3_request_ex` remains byte-for-byte ABI compatible and uses
+the defaults/env overrides.
 
 from the CLI:
 

@@ -3,7 +3,7 @@
  *   sa3_init -> sa3_generate (with a progress callback) -> use samples -> sa3_free_audio -> sa3_free.
  *   usage: sa3-libtest ["prompt"] [out.wav] [cpu_threads]
  *
- * It then continues that clip through sa3_generate_ex to exercise the continuation splice, and
+ * It then continues that clip through sa3_generate_v2 to exercise the continuation splice, and
  * reads sa3_last_meta twice — once with a full struct, once with a deliberately undersized one,
  * which is the only thing that tests the `size` contract at all.
  */
@@ -124,21 +124,22 @@ int main(int argc, char** argv) {
     sa3_free_audio(&audio);
 
     const float src_seconds = (float)src_n / (float)src_sr;
-    sa3_request_ex rx;
+    sa3_request_v2 rx;
     memset(&rx, 0, sizeof rx);
-    rx.request = req;
-    rx.init_audio.mode = SA3_INIT_AUDIO_INPAINT;
-    rx.init_audio.samples = src;
-    rx.init_audio.n_samp = src_n;
-    rx.init_audio.n_ch = src_ch;
-    rx.init_audio.sample_rate = src_sr;
-    rx.init_audio.inpaint_start = src_seconds;
-    rx.init_audio.inpaint_end = src_seconds + 6.0f;   /* six more seconds of music */
+    rx.size = (uint32_t)sizeof rx;
+    rx.request.request = req;
+    rx.request.init_audio.mode = SA3_INIT_AUDIO_INPAINT;
+    rx.request.init_audio.samples = src;
+    rx.request.init_audio.n_samp = src_n;
+    rx.request.init_audio.n_ch = src_ch;
+    rx.request.init_audio.sample_rate = src_sr;
+    rx.request.init_audio.inpaint_start = src_seconds;
+    rx.request.init_audio.inpaint_end = src_seconds + 6.0f;   /* six more seconds of music */
 
     sa3_audio cont;
     memset(&cont, 0, sizeof cont);
-    rc = sa3_generate_ex(ctx, &rx, &cont, err, (int)sizeof err);
-    if (rc != 0) { fprintf(stderr, "sa3_generate_ex failed (%d): %s\n", rc, err); free(src); sa3_free(ctx); return 1; }
+    rc = sa3_generate_v2(ctx, &rx, &cont, err, (int)sizeof err);
+    if (rc != 0) { fprintf(stderr, "sa3_generate_v2 failed (%d): %s\n", rc, err); free(src); sa3_free(ctx); return 1; }
 
     memset(&meta, 0, sizeof meta);
     meta.size = (uint32_t)sizeof meta;

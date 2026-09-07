@@ -1,8 +1,8 @@
 /* libsa3 — a tiny C ABI over the sa3 generation pipeline, for embedding SA3 directly in a host
  * (e.g. a JUCE / IPlug2 plugin) without spawning the CLI or the HTTP server.
  *
- * Lifecycle:   sa3_init() -> sa3_generate()/sa3_generate_ex() [* N] -> sa3_free()
- * Ownership:   sa3_generate()/sa3_generate_ex() allocate sa3_audio.samples; release it with
+ * Lifecycle:   sa3_init() -> sa3_generate()/sa3_generate_ex()/sa3_generate_v2() [* N] -> sa3_free()
+ * Ownership:   generation calls allocate sa3_audio.samples; release it with
  *              sa3_free_audio() (same
  *              allocator/CRT as the library — do NOT free() it yourself across a DLL boundary).
  * Threading:   a context is NOT reentrant — serialize sa3_generate() calls per context.
@@ -161,7 +161,7 @@ typedef struct {
  *   inpaint_end) is in seconds; audio outside the window is kept, and inpaint_end can extend the
  *   total output past the supplied source audio.
  *
- *   NOTE — with splicing on (the default; see sa3_splice on sa3_request_ex), `inpaint_start` means
+ *   NOTE — with splicing on (the default; see sa3_splice on sa3_request_v2), `inpaint_start` means
  *   "where the source ends and the continuation should musically begin", and the library owns the
  *   mechanics from there: it pulls the sampler's window back by `mask_overlap` so the model
  *   regenerates the handoff rather than butting against a hard boundary, then splices the source
@@ -199,13 +199,17 @@ typedef struct {
     int decode_overlap;
     sa3_cancel_cb should_cancel;
     void* cancel_user;
-    /* Continuation source splicing; set=0 -> gary4local defaults. Ignored unless
-     * init_audio.mode == SA3_INIT_AUDIO_INPAINT. It describes the audio in init_audio rather than
-     * the request, but it lives here because NEW FIELDS GO AT THE END: sa3_init_audio sits by
-     * value above, so growing it would shift every field below it for a caller compiled against
-     * the old header, where an appended field costs them nothing. */
-    sa3_splice splice;
 } sa3_request_ex;
+
+/* Size-tagged request for options added after sa3_request_ex was published. Keep sa3_request_ex
+ * frozen: an older caller allocates only its historical size, so a newer library cannot safely
+ * inspect an appended tail. `size` makes this request append-only in both directions. */
+typedef struct {
+    uint32_t       size;                 /* set to sizeof(sa3_request_v2) */
+    sa3_request_ex request;
+    /* Ignored unless request.init_audio.mode == SA3_INIT_AUDIO_INPAINT. set=0 uses defaults. */
+    sa3_splice     splice;
+} sa3_request_v2;
 
 /* Decoded audio. samples is PLANAR by channel: samples[c * n_samp + s]. Free with sa3_free_audio(). */
 typedef struct {
@@ -227,6 +231,9 @@ SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* ou
 
 /* Extended generate with raw init audio for audio2audio and inpaint/continuation. */
 SA3_API int sa3_generate_ex(sa3_context* ctx, const sa3_request_ex* req, sa3_audio* out, char* err, int err_len);
+
+/* Size-tagged generation request. Use this for per-request continuation-splice controls. */
+SA3_API int sa3_generate_v2(sa3_context* ctx, const sa3_request_v2* req, sa3_audio* out, char* err, int err_len);
 
 /* Metadata for the most recent generation on a context.
  *

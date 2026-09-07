@@ -6,6 +6,7 @@
 #include "train_job.h"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -63,7 +64,8 @@ static bool apply_init_audio(const sa3_init_audio& in, sa3::GenParams& p, std::s
 }
 
 static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3_request_ex* req_ex,
-                             sa3_audio* out, char* err, int err_len) {
+                             const sa3_splice* splice_override, sa3_audio* out,
+                             char* err, int err_len) {
     if (!ctx || !req || !out) { set_err(err, err_len, "null argument"); return 1; }
     out->samples = nullptr; out->n_samp = 0; out->n_ch = 0; out->sample_rate = 0; out->seed = 0;
     try {
@@ -119,14 +121,14 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
                 p.decode_chunk_size = req_ex->decode_chunk_size;
                 p.decode_overlap = req_ex->decode_overlap > 0 ? req_ex->decode_overlap : 32;
             }
-            if (req_ex->splice.set) {              // per-request splice (incl. the old behaviour: splice=0)
+            if (splice_override && splice_override->set) { // per-request splice (incl. old behaviour: splice=0)
                 sa3::SpliceParams sp;
-                sp.enabled    = req_ex->splice.splice != 0;
-                sp.gain_match = req_ex->splice.gain_match != 0;
+                sp.enabled    = splice_override->splice != 0;
+                sp.gain_match = splice_override->gain_match != 0;
                 // 0 is a meaningful value for both (no pullback / no crossfade), so only a negative
                 // falls back to the default rather than the usual 0-means-default convention.
-                sp.mask_overlap = req_ex->splice.mask_overlap >= 0.0f ? req_ex->splice.mask_overlap : sp.mask_overlap;
-                sp.xfade        = req_ex->splice.xfade        >= 0.0f ? req_ex->splice.xfade        : sp.xfade;
+                sp.mask_overlap = splice_override->mask_overlap >= 0.0f ? splice_override->mask_overlap : sp.mask_overlap;
+                sp.xfade        = splice_override->xfade        >= 0.0f ? splice_override->xfade        : sp.xfade;
                 std::string serr;
                 if (!sa3::validate_splice_params(sp, serr)) { set_err(err, err_len, "splice: " + serr); return 6; }
                 p.splice = sp;
@@ -227,12 +229,20 @@ SA3_API sa3_context* sa3_init_ex(const sa3_config_ex* cfg, char* err, int err_le
 }
 
 SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* out, char* err, int err_len) {
-    return sa3_generate_impl(ctx, req, nullptr, out, err, err_len);
+    return sa3_generate_impl(ctx, req, nullptr, nullptr, out, err, err_len);
 }
 
 SA3_API int sa3_generate_ex(sa3_context* ctx, const sa3_request_ex* req, sa3_audio* out, char* err, int err_len) {
     if (!req) { set_err(err, err_len, "null argument"); return 1; }
-    return sa3_generate_impl(ctx, &req->request, req, out, err, err_len);
+    return sa3_generate_impl(ctx, &req->request, req, nullptr, out, err, err_len);
+}
+
+SA3_API int sa3_generate_v2(sa3_context* ctx, const sa3_request_v2* req, sa3_audio* out, char* err, int err_len) {
+    if (!req) { set_err(err, err_len, "null v2 request"); return 1; }
+    const size_t required = offsetof(sa3_request_v2, splice) + sizeof(sa3_splice);
+    if (req->size < required) { set_err(err, err_len, "v2 request size is too small"); return 1; }
+    return sa3_generate_impl(ctx, &req->request.request, &req->request, &req->splice,
+                             out, err, err_len);
 }
 
 SA3_API void sa3_free_audio(sa3_audio* a) {
