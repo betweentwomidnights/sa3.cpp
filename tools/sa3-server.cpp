@@ -661,6 +661,7 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     params.decode_chunk_size = I("decode_chunk_size", 0);
     params.decode_overlap    = I("decode_overlap", 32);
     params.loudness          = sa3::loudness_defaults_from_env();
+    params.splice            = sa3::splice_defaults_from_env();
 
     auto parse_json_float = [&](yyjson_val* v, float& out, const char* key) {
         if (!v) return true;

@@ -59,6 +59,7 @@ int main(int argc, char** argv) {
     float cfg_scale = 1.0f, cfg_rescale = 0.0f, apg_scale = 1.0f, cfg_norm_threshold = 0.0f;
     float cfg_interval_min = 0.0f, cfg_interval_max = 1.0f;
     sa3::LoudnessParams loudness = sa3::loudness_defaults_from_env();
+    sa3::SpliceParams splice = sa3::splice_defaults_from_env();   // continuation splice; SA3_CONTINUE_*
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--model")  && i+1 < argc) model_variant = argv[++i];
         else if (!strcmp(argv[i], "--encoding") && i+1 < argc) encoding = argv[++i];
@@ -135,6 +136,10 @@ int main(int argc, char** argv) {
         }
         else if (!strcmp(argv[i], "--no-limiter")) loudness.limiter_enabled = false;
         else if (!strcmp(argv[i], "--limiter-knee") && i+1 < argc) loudness.limiter_knee = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--no-splice")) splice.enabled = false;
+        else if (!strcmp(argv[i], "--mask-overlap") && i+1 < argc) splice.mask_overlap = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--splice-xfade") && i+1 < argc) splice.xfade = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--no-splice-gain-match")) splice.gain_match = false;
     }
     // --model <variant>: fill the five base ggufs from <models-dir> by the naming convention.
     // Explicit --tok/--t5/--cond/--dit/--same still win (override per-slot).
@@ -203,7 +208,8 @@ int main(int argc, char** argv) {
                         "                     | --tok <f> --t5 <f> --cond <f> --dit <f> --same <f>)\n"
                         "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
                         "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--duration-padding SEC]\n"
-                        "                     [--cfg-scale S [--negative-prompt \"...\"] [--cfg-rescale R] [--cfg-interval min,max] [--apg-scale A] [--cfg-norm-threshold T]] [--out song.wav]\n");
+                        "                     [--cfg-scale S [--negative-prompt \"...\"] [--cfg-rescale R] [--cfg-interval min,max] [--apg-scale A] [--cfg-norm-threshold T]] [--out song.wav]\n"
+                        "                     continuation splice (with --init + --inpaint-start): [--no-splice] [--mask-overlap SEC] [--splice-xfade SEC] [--no-splice-gain-match]\n");
         return 1;
     }
     if (duration_set && frames_set) {
@@ -250,6 +256,11 @@ int main(int argc, char** argv) {
         fprintf(stderr, "invalid loudness settings: %s\n", loudness_err.c_str());
         return 1;
     }
+    std::string splice_err;
+    if (!sa3::validate_splice_params(splice, splice_err)) {
+        fprintf(stderr, "invalid splice settings: %s\n", splice_err.c_str());
+        return 1;
+    }
 
     // ---------- build model paths + the request, then run the shared pipeline ----------
     sa3::ModelPaths paths;
@@ -271,6 +282,7 @@ int main(int argc, char** argv) {
     params.decode_chunk_size = decode_chunk_size;
     params.decode_overlap    = decode_overlap;
     params.loudness          = loudness;
+    params.splice            = splice;
     params.dist_shift        = dist_shift;
     params.ds_p1 = ds_p1; params.ds_p2 = ds_p2; params.ds_p3 = ds_p3; params.ds_p4 = ds_p4;
     params.duration_padding_sec = duration_padding_sec;
