@@ -4,28 +4,6 @@
 > including foundation-1, in the CLI and libsa3. trying to figure out the cleanest way to expose it
 > in the sa3-server right now.**
 
-> **update 8/16/2026 — you can train a lora on a q4 base now, and it actually sounds decent. a
-> 2000-step dora trained on a q4_k_m base came out audibly indistinguishable from the same run on
-> f16, and it trains *faster*, on a base 2.9x smaller. works on cuda, vulkan, metal and cpu.**
->
-> **quantized ggufs are up on huggingface for all three variants — q4_k_m / q5_k_m / q8_0 for the
-> DiT and the autoencoder, plus q4_k_m training bases. `--encoding q4_k_m` gets you the set.**
->
-> **update: `--encoding` now selects the DiT only.** the autoencoder has its own `--ae-encoding`
-> and defaults to f32 — it is the last net the audio crosses, audio2audio crosses it twice per
-> iteration, and it is small enough beside the DiT to be worth the bytes (same-s is 413mb at f32
-> against 72mb at q4_k_m). quantized autoencoders are still there, just ask for one.
->
-> **hoping to update the interfaces and embedded applications for such things shortly.**
-
-> **update 7/17/2026 — Metal backend LoRA training is now implemented via CLI. Training is now
-> validated on CUDA, Vulkan, Metal, and CPU.**
->
-> **i'm still not super happy with training speed using iGPUs. hoping to keep improving that now
-> that the first training path is working across all four backends.**
->
-> **nothing should be different for you at inference time, but plz let me know if any issues surface.**
-
 trying to make this as composable and extensible as i can without over-engineering it too much. my hope is that this might eventually replace the sa3 backend i already use in [gary4local](https://github.com/betweentwomidnights/gary-localhost-installer), and start unifying that application for mac/pc. 
 
 it might also just allow us to embed sa3 directly inside a JUCE/iPlug2 project. see [docs/EMBEDDING.md](docs/EMBEDDING.md).
@@ -62,14 +40,15 @@ sa3-generate --model small-music --duration 12 --prompt "upbeat funk groove with
 sa3-generate --model medium --lora kev --lora keygen --prompt "neo-classical lofi hiphop 90bpm C# minor" --out song.wav
 ```
 
-Stable Audio Open Small is an optional, separately built component. Its default download is
-the all-F16 reference bundle; pass `--encoding q5_k_m` for the recommended compact tier:
+The classic Stable Audio family is an optional component, excluded from ordinary builds. Enable
+`SA3_BUILD_SAT` and build its `sat-generate` CLI explicitly. The default SAOS download is the
+all-F16 reference bundle; pass `--encoding q5_k_m` for the recommended compact tier:
 
 ```bash
-cmake -S . -B build-saos -DSA3_BUILD_SAT=ON -DSA3_METAL=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-saos --target sat-generate
+cmake -S . -B build-sat -DSA3_BUILD_SAT=ON -DSA3_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-sat --target sat-generate
 ./models.sh --sat
-SA3_DEVICE=metal build-saos/bin/sat-generate --model arc \
+SA3_DEVICE=metal build-sat/bin/sat-generate --model arc \
   --prompt "A short, beautiful piano riff in C minor" --seconds 11 --out saos.wav
 ```
 
@@ -82,7 +61,7 @@ self-contained bundles are downloaded with the Python helper (F16 is the default
 ```bash
 python3 -m pip install -U "huggingface_hub"
 python3 tools/download_models.py --sat --sat-model foundation-1
-SA3_DEVICE=metal build-saos/bin/sat-generate --model foundation-1 \
+SA3_DEVICE=metal build-sat/bin/sat-generate --model foundation-1 \
   --randomize --bars 4 --bpm 128 --seed 42 --out foundation.wav
 ```
 
