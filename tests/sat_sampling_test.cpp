@@ -1,9 +1,12 @@
 #include "sampling.h"
 #include "sat/dit.h"
+#include "sat/foundation_prompt.h"
+#include "sat/foundation_timing.h"
 #include "sat/model_spec.h"
 #include "sat/model_paths.h"
 #include "sat/oobleck.h"
 #include "sat/pipeline.h"
+#include "sat/profiles.h"
 #include "sat/t5.h"
 #include "wav.h"
 
@@ -23,6 +26,33 @@ static int expect(bool ok, const char* msg) {
 
 static bool near(float a, float b, float eps = 1.0e-6f) {
     return std::fabs(a - b) <= eps;
+}
+
+static int test_shared_loudness() {
+    int fails = 0;
+    sa3::sat::GenerateParams defaults;
+    fails += expect(defaults.loudness.peak_normalize_enabled && defaults.loudness.limiter_enabled,
+                    "SAT generation shares the SA3 loudness defaults");
+
+    std::vector<float> audio{0.25f, -0.5f, 0.125f};
+    sa3::LoudnessMeta meta = sa3::make_loudness_meta(defaults.loudness);
+    sa3::apply_audio_loudness(audio, defaults.loudness, meta);
+    fails += expect(near(meta.decoded_peak, 0.5f) && meta.peak_normalize_gain_set,
+                    "shared loudness records decoded peak and normalization gain");
+    fails += expect(meta.limiter_limited_fraction_set &&
+                    meta.final_peak <= sa3::db_to_linear(defaults.loudness.limiter_ceiling_db) + 1.0e-6f,
+                    "shared limiter keeps SAT audio under its ceiling");
+
+    sa3::LoudnessParams raw;
+    raw.peak_normalize_enabled = false;
+    raw.limiter_enabled = false;
+    std::vector<float> raw_audio{2.0f, -0.5f};
+    sa3::LoudnessMeta raw_meta = sa3::make_loudness_meta(raw);
+    sa3::apply_audio_loudness(raw_audio, raw, raw_meta);
+    fails += expect(near(raw_audio[0], 2.0f) && near(raw_meta.final_peak, 2.0f) &&
+                    !raw_meta.peak_normalize_gain_set && !raw_meta.limiter_limited_fraction_set,
+                    "disabling both stages preserves exact raw SAT audio");
+    return fails;
 }
 
 static int test_t5_graph_shape() {
@@ -239,8 +269,9 @@ static int test_oobleck_metadata() {
 int main() {
     int fails = 0;
 
-    fails += expect(std::string(sa3::sat::kDefaultSaosEncoding) == "F16",
-                    "SAOS catalog defaults to the reference F16 bundle");
+    fails += test_shared_loudness();
+    fails += expect(std::string(sa3::sat::kDefaultSatEncoding) == "F16",
+                    "SAT catalogs default to the reference F16 bundles");
     fails += expect(sa3::sat::saos_dit_relative_path("arc", "q5_k_m") ==
                     "stable-audio-open-small-dit-0.3B-v1.0-Q5_K_M.gguf",
                     "canonical SAOS ARC filename");
@@ -255,6 +286,16 @@ int main() {
                     sa3::sat::saos_oobleck_relative_path("q8_0") ==
                     "stable-audio-open-small-oobleck-v1.0-Q8_0.gguf",
                     "canonical shared SAOS component filenames");
+    fails += expect(sa3::sat::sat_large_dit_relative_path("sao1", "q5_k_m") ==
+                        "stable-audio-open-1.0-dit-1.1B-v1.0-Q5_K_M.gguf" &&
+                    sa3::sat::sat_large_dit_relative_path("foundation", "q4_k_m") ==
+                        "foundation-1-dit-1.1B-v1.0-Q4_K_M.gguf",
+                    "canonical large SAT DiT filenames");
+    fails += expect(sa3::sat::sat_t5_128_relative_path("F16") ==
+                        "t5-base-encoder-128tok-0.1B-v1.0-F16.gguf" &&
+                    sa3::sat::sat_oobleck_relative_path("Q8_0") ==
+                        "stable-audio-open-oobleck-v1.0-Q8_0.gguf",
+                    "canonical shared large SAT component filenames");
 
     const sa3::sat::ModelSpec saos = sa3::sat::stable_audio_open_small();
     std::string why;
@@ -264,6 +305,102 @@ int main() {
                     "SAOS latent frame count");
     fails += expect(saos.dit.embed_dim == 1024 && saos.dit.depth == 16,
                     "SAOS DiT topology");
+
+    const sa3::sat::ModelSpec sao1 = sa3::sat::stable_audio_open_1();
+    const sa3::sat::ModelSpec foundation = sa3::sat::foundation_1();
+    fails += expect(sa3::sat::validate(sao1, &why) &&
+                    sa3::sat::validate(foundation, &why),
+                    "SAO 1.0 family specs validate");
+    fails += expect(sao1.dit.embed_dim == 1536 && sao1.dit.depth == 24 &&
+                    sao1.dit.num_heads == 24 && !sao1.dit.qk_layer_norm,
+                    "SAO 1.0 classic DiT topology");
+    fails += expect(sao1.conditioner.seconds_start &&
+                    sao1.dit.global_cond_dim == 1536 &&
+                    sao1.text_encoder.max_length == 128,
+                    "SAO 1.0 timing and text conditioning topology");
+    fails += expect(sao1.sample_size == 2097152 && foundation.sample_size == 882000,
+                    "Foundation changes only the published sample window");
+    fails += expect(foundation.sample_size / foundation.oobleck.downsampling_ratio() == 430,
+                    "Foundation follows stable-audio-tools floor division for latent frames");
+    fails += expect(sa3::sat::weight_topology_compatible(sao1, foundation, &why),
+                    "Foundation is weight-topology compatible with SAO 1.0");
+
+    // Match RoyalCities' Foundation UI exactly: the audio crop follows the musical
+    // duration, while seconds_total and the generated canvas round up independently.
+    struct TimingCase { int bars, bpm, samples, seconds_total, frames; };
+    constexpr TimingCase timing_cases[] = {
+        {4, 100, 423360, 10, 216}, {4, 110, 384873, 9, 194},
+        {4, 120, 352800, 8, 173},  {4, 128, 330750, 8, 173},
+        {4, 130, 325662, 8, 173},  {4, 140, 302400, 7, 151},
+        {4, 150, 282240, 7, 151},  {8, 100, 846720, 20, 431},
+        {8, 110, 769745, 18, 388}, {8, 120, 705600, 16, 345},
+        {8, 128, 661500, 15, 323}, {8, 130, 651323, 15, 323},
+        {8, 140, 604800, 14, 302}, {8, 150, 564480, 13, 280},
+    };
+    for (const TimingCase& expected : timing_cases) {
+        const sa3::sat::FoundationTiming timing =
+            sa3::sat::resolve_foundation_timing(expected.bars, expected.bpm);
+        fails += expect(timing.output_samples == expected.samples &&
+                        timing.conditioning_seconds_total == expected.seconds_total &&
+                        timing.latent_frames == expected.frames,
+                        "Foundation trained BPM/bar timing table");
+    }
+    fails += expect(sa3::sat::kFoundationBpms.size() == 7 &&
+                    sa3::sat::kFoundationBpms.back() == 150,
+                    "Foundation trained BPM set includes 150");
+    bool rejected_bad_bars = false, rejected_bad_bpm = false;
+    try { (void)sa3::sat::resolve_foundation_timing(6, 128); }
+    catch (const std::invalid_argument&) { rejected_bad_bars = true; }
+    try { (void)sa3::sat::resolve_foundation_timing(4, 125); }
+    catch (const std::invalid_argument&) { rejected_bad_bpm = true; }
+    fails += expect(rejected_bad_bars && rejected_bad_bpm,
+                    "Foundation timing rejects untrained geometry");
+    sa3::sat::GenerateParams foundation_params;
+    foundation_params.prompt = "warm tape-saturated breakbeat loop";
+    const sa3::sat::FoundationTiming applied =
+        sa3::sat::apply_foundation_timing(foundation_params, 4, 128);
+    sa3::sat::apply_foundation_royalcities_sampler(foundation_params);
+    fails += expect(foundation_params.prompt ==
+                        "warm tape-saturated breakbeat loop, 4 Bars, 128 BPM" &&
+                    foundation_params.output_samples == applied.output_samples &&
+                    foundation_params.frames == 173 && foundation_params.seconds_total == 8.0f,
+                    "Foundation profile applies prompt and independent generation geometry");
+    fails += expect(foundation_params.sampler == sa3::sat::Sampler::Dpmpp3mSde &&
+                    foundation_params.sigma_min == 0.01f &&
+                    foundation_params.sigma_max == 100.0f,
+                    "Foundation RoyalCities sampler profile");
+    fails += expect(sa3::sat::foundation_prompt("warm pad", 8, 120, "F#", "minor") ==
+                        "warm pad, 8 Bars, 120 BPM, F# minor",
+                    "Foundation prompt includes timing and key conditioning");
+
+    const sa3::sat::FoundationRandomPrompt random_a =
+        sa3::sat::randomize_foundation_prompt(42, sa3::sat::FoundationPromptMode::Standard);
+    const sa3::sat::FoundationRandomPrompt random_b =
+        sa3::sat::randomize_foundation_prompt(42, sa3::sat::FoundationPromptMode::Standard);
+    fails += expect(!random_a.description.empty() && random_a.description == random_b.description &&
+                    random_a.variant == "M1",
+                    "Foundation random prompts are deterministic from the audio seed");
+    const sa3::sat::FoundationRandomControls controls_a =
+        sa3::sat::randomize_foundation_controls(42);
+    const sa3::sat::FoundationRandomControls controls_b =
+        sa3::sat::randomize_foundation_controls(42);
+    fails += expect(controls_a.bars == controls_b.bars && controls_a.bpm == controls_b.bpm &&
+                    controls_a.key_root == controls_b.key_root &&
+                    controls_a.key_mode == controls_b.key_mode &&
+                    sa3::sat::is_foundation_bar_count(controls_a.bars) &&
+                    sa3::sat::is_foundation_bpm(controls_a.bpm),
+                    "Foundation omitted controls randomize deterministically on the trained grid");
+    const sa3::sat::FoundationRandomPrompt synth_mix =
+        sa3::sat::randomize_foundation_prompt(7, sa3::sat::FoundationPromptMode::Mix, "synth");
+    fails += expect(synth_mix.family == "Synth" && synth_mix.variant == "T1" &&
+                    synth_mix.description.find("Synth") != std::string::npos,
+                    "Foundation T1 randomizer honors a family lock");
+    bool rejected_family = false;
+    try {
+        (void)sa3::sat::randomize_foundation_prompt(
+            1, sa3::sat::FoundationPromptMode::Standard, "Drums");
+    } catch (const std::invalid_argument&) { rejected_family = true; }
+    fails += expect(rejected_family, "Foundation randomizer rejects unknown family locks");
 
     // A finetune may change inference defaults without changing any loadable tensor shape.
     sa3::sat::ModelSpec finetune = saos;
@@ -355,6 +492,56 @@ int main() {
     fails += expect(sa3::sat::parse_sampler("dpmpp") == sa3::sat::Sampler::Dpmpp &&
                     std::string(sa3::sat::sampler_name(sa3::sat::Sampler::PingPong)) == "pingpong",
                     "SAT sampler names round-trip");
+
+    const std::vector<float> sigmas =
+        sa3::sampling::make_sigma_polyexponential_schedule(3, 0.5f, 50.0f);
+    fails += expect(sigmas.size() == 4 && near(sigmas[0], 50.0f, 1.0e-4f) &&
+                    near(sigmas[1], 5.0f) && near(sigmas[2], 0.5f) && sigmas[3] == 0.0f,
+                    "V-prediction polyexponential schedule matches k-diffusion");
+    const sa3::sampling::VPredictionScalings vc =
+        sa3::sampling::v_prediction_scalings(1.0f);
+    fails += expect(near(vc.skip, 0.5f) && near(vc.output, -std::sqrt(0.5f)) &&
+                    near(vc.input, std::sqrt(0.5f)) && near(vc.timestep, 0.5f),
+                    "V-prediction preconditioning matches k-diffusion");
+    float xv[] = {2.0f, -1.0f};
+    const float vd0[] = {0.5f, -0.25f};
+    const float vn0[] = {0.1f, -0.2f};
+    const float vd1[] = {0.4f, -0.1f};
+    const float vn1[] = {-0.3f, 0.4f};
+    const float vd2s[] = {0.3f, 0.05f};
+    const float vn2[] = {0.2f, 0.1f};
+    const float vd3[] = {0.2f, 0.2f};
+    sa3::sampling::VPredictionDpmppState vs;
+    sa3::sampling::v_dpmpp_3m_sde_step(xv, vd0, vn0, 2, 50.0f, 5.0f, vs);
+    fails += expect(near(xv[0], 1.0124937f) && near(xv[1], -1.2524874f),
+                    "V-prediction DPM++ 3M first update matches reference algebra");
+    sa3::sampling::v_dpmpp_3m_sde_step(xv, vd1, vn1, 2, 5.0f, 0.5f, vs);
+    fails += expect(near(xv[0], 0.1783744f) && near(xv[1], 0.20522625f),
+                    "V-prediction DPM++ 3M second-order update matches reference algebra");
+    sa3::sampling::v_dpmpp_3m_sde_step(xv, vd2s, vn2, 2, 0.5f, 0.05f, vs);
+    fails += expect(near(xv[0], 0.2302312f) && near(xv[1], 0.17428084f),
+                    "V-prediction DPM++ 3M third-order update matches reference algebra");
+    sa3::sampling::v_dpmpp_3m_sde_step(xv, vd3, nullptr, 2, 0.05f, 0.0f, vs);
+    fails += expect(near(xv[0], 0.2f) && near(xv[1], 0.2f),
+                    "V-prediction DPM++ terminal update returns denoised estimate");
+
+    float xv2[] = {2.0f, -1.0f};
+    sa3::sampling::VPredictionDpmppState vs2;
+    sa3::sampling::v_dpmpp_2m_sde_step(xv2, vd0, vn0, 2, 50.0f, 5.0f, vs2);
+    fails += expect(near(xv2[0], 1.0124937f) && near(xv2[1], -1.2524874f),
+                    "V-prediction DPM++ 2M first update matches reference algebra");
+    sa3::sampling::v_dpmpp_2m_sde_step(xv2, vd1, vn1, 2, 5.0f, 0.5f, vs2);
+    fails += expect(near(xv2[0], 0.20737682f) && near(xv2[1], 0.16172261f),
+                    "V-prediction DPM++ 2M multistep update matches reference algebra");
+    sa3::sampling::v_dpmpp_2m_sde_step(xv2, vd3, nullptr, 2, 0.5f, 0.0f, vs2);
+    fails += expect(near(xv2[0], 0.2f) && near(xv2[1], 0.2f),
+                    "V-prediction DPM++ 2M terminal update matches reference algebra");
+
+    fails += expect(sa3::sat::parse_sampler("dpmpp-2m-sde") ==
+                        sa3::sat::Sampler::Dpmpp2mSde &&
+                    sa3::sat::parse_sampler("dpmpp-3m-sde") ==
+                        sa3::sat::Sampler::Dpmpp3mSde,
+                    "V-prediction SDE sampler names round-trip");
 
     bool threw = false;
     try { (void)sa3::sampling::make_rf_logsnr_schedule(0); }

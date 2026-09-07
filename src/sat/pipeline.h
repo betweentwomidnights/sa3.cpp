@@ -1,6 +1,7 @@
 // sat/pipeline.h -- reusable Stable Audio Tools text-to-audio orchestration.
 #pragma once
 
+#include "audio_post.h"
 #include "sat/model_spec.h"
 
 #include <cstdint>
@@ -31,13 +32,21 @@ struct StepProgress {
 struct GenerateParams {
     std::string prompt;
     std::string negative_prompt;
-    float seconds = 11.0f;
+    float seconds_start = 0.0f;
+    float seconds = 11.0f;          // requested/cropped output duration
+    float seconds_total = 0.0f;     // conditioner value; <=0 uses seconds
     int frames = 256;
     int steps = 0;                 // 0: objective-specific default
     int output_samples = 0;        // 0: seconds * model sample rate
     float cfg_scale = -1.0f;       // <0: objective-specific default
+    float sigma_min = -1.0f;       // <0: objective-specific default
+    float sigma_max = -1.0f;       // <0: objective-specific default
+    float sigma_rho = 1.0f;
+    float sde_eta = 1.0f;
     uint64_t seed = 1234;
     Sampler sampler = Sampler::Auto;
+    // Shared post-decode SA3 loudness controls. Latent fields are currently no-ops for SAT.
+    LoudnessParams loudness;
 
     // Optional deterministic/parity inputs. Supplying cross/global bypasses T5.
     std::vector<float> cross_conditioning;
@@ -71,8 +80,14 @@ struct GenerateResult {
     int max_prompt_tokens = 0;
     int steps = 0;
     float cfg_scale = 1.0f;
+    float sigma_min = 0.0f;
+    float sigma_max = 0.0f;
+    float sigma_rho = 0.0f;
+    float sde_eta = 0.0f;
+    float seconds_total = 0.0f;
     Sampler sampler = Sampler::Auto;
     std::string objective;
+    LoudnessMeta loudness;
     GenerateTiming timing;
 };
 

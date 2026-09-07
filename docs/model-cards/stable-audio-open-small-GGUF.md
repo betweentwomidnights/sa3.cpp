@@ -44,8 +44,8 @@ recommended opt-in quantized tier; it is only 37 MiB larger than the all-Q4 bund
 SAOS is not part of the default sa3.cpp build. Enable the optional SAT component:
 
 ```powershell
-cmake -S . -B build-saos -DSA3_BUILD_SAT=ON -DSA3_CUDA=ON
-cmake --build build-saos --config Release --target saos-generate
+cmake -S . -B build-sat -DSA3_BUILD_SAT=ON -DSA3_CUDA=ON
+cmake --build build-sat --config Release --target sat-generate
 python tools/download_models.py --sat --sat-model saos --saos-variant arc
 ```
 
@@ -54,7 +54,7 @@ Then generate directly from the canonical filenames:
 ```powershell
 $env:SA3_DEVICE="cuda"
 $env:SA3_FLASH_ATTN="1"
-saos-generate --model arc --prompt "A short, beautiful piano riff in C minor" `
+sat-generate --model arc --prompt "A short, beautiful piano riff in C minor" `
   --seconds 11 --seed 1234 --out saos.wav
 ```
 
@@ -62,7 +62,7 @@ For a finetune, download and select the same variant name:
 
 ```powershell
 python tools/download_models.py --sat --saos-variant jerry-grunge
-saos-generate --model jerry-grunge `
+sat-generate --model jerry-grunge `
   --prompt "chillhop synth warm bass dusty drums sidechain 90 bpm" `
   --seconds 11 --seed 4242 --out jerry-grunge.wav
 ```

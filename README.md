@@ -1,5 +1,9 @@
 # stable-audio-3 in c++
 
+> **update 9/6/2026 — little bit of scope creep this week...we now support every stable audio model,
+> including foundation-1, in the CLI and libsa3. trying to figure out the cleanest way to expose it
+> in the sa3-server right now.**
+
 > **update 8/16/2026 — you can train a lora on a q4 base now, and it actually sounds decent. a
 > 2000-step dora trained on a q4_k_m base came out audibly indistinguishable from the same run on
 > f16, and it trains *faster*, on a base 2.9x smaller. works on cuda, vulkan, metal and cpu.**
@@ -63,14 +67,29 @@ the all-F16 reference bundle; pass `--encoding q5_k_m` for the recommended compa
 
 ```bash
 cmake -S . -B build-saos -DSA3_BUILD_SAT=ON -DSA3_METAL=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-saos --target saos-generate
+cmake --build build-saos --target sat-generate
 ./models.sh --sat
-SA3_DEVICE=metal build-saos/bin/saos-generate --model arc \
+SA3_DEVICE=metal build-saos/bin/sat-generate --model arc \
   --prompt "A short, beautiful piano riff in C minor" --seconds 11 --out saos.wav
 ```
 
 See [docs/STABLE_AUDIO_OPEN_SMALL.md](docs/STABLE_AUDIO_OPEN_SMALL.md) for finetunes,
 samplers, explicit component paths, conversion, and quantization results.
+
+Stable Audio Open 1.0 and Foundation-1 use the same optional build. Their
+self-contained bundles are downloaded with the Python helper (F16 is the default):
+
+```bash
+python3 -m pip install -U "huggingface_hub"
+python3 tools/download_models.py --sat --sat-model foundation-1
+SA3_DEVICE=metal build-saos/bin/sat-generate --model foundation-1 \
+  --randomize --bars 4 --bpm 128 --seed 42 --out foundation.wav
+```
+
+Pass `--sat-model sao1` to the downloader and `--model sao1` to `sat-generate`
+for Stable Audio Open 1.0. See
+[docs/STABLE_AUDIO_OPEN_1.md](docs/STABLE_AUDIO_OPEN_1.md) for timing controls,
+Foundation prompt randomization, named profiles, and quantization results.
 
 updating an existing checkout across the one-time ggml URL migration:
 
@@ -108,6 +127,9 @@ build needs cmake + a c++17 compiler (Visual Studio 2022 on windows). cuda needs
 Toolkit; vulkan needs the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home); metal is macOS-only.
 backend + packaging details: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) ·
 [docs/VULKAN.md](docs/VULKAN.md) · [docs/METAL.md](docs/METAL.md) · [docs/HIP.md](docs/HIP.md).
+The opt-in classic stable-audio-tools family is documented in
+[docs/STABLE_AUDIO_OPEN_SMALL.md](docs/STABLE_AUDIO_OPEN_SMALL.md) and
+[docs/STABLE_AUDIO_OPEN_1.md](docs/STABLE_AUDIO_OPEN_1.md); it is excluded from default builds.
 there's also a small HTTP server (`./server.sh` / `server.cmd`) — see [docs/SERVER.md](docs/SERVER.md).
 native adapter training is documented in [docs/TRAINING.md](docs/TRAINING.md), with measured backend
 and PyTorch comparisons in [docs/TRAINING_BENCHMARKS.md](docs/TRAINING_BENCHMARKS.md).
@@ -174,6 +196,13 @@ credits:
 LoRA/DoRA training with Stable Audio 3.
 
 [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) was used as a bit of a guide here.
+
+classic stable-audio-tools references:
+
+[Stability AI/stable-audio-tools](https://github.com/Stability-AI/stable-audio-tools) is the original
+PyTorch implementation. [RoyalCities/RC-stable-audio-tools](https://github.com/RoyalCities/RC-stable-audio-tools)
+is the Foundation inference fork, and the original
+[Foundation-1 model card](https://huggingface.co/RoyalCities/Foundation-1) documents the checkpoint.
 
 official upstream repo:
 

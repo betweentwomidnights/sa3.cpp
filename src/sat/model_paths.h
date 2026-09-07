@@ -11,7 +11,9 @@ namespace sa3::sat {
 
 inline constexpr const char* kSaosPublishedRepo = "thepatch/stable-audio-open-small-GGUF";
 inline constexpr const char* kDefaultSaosVariant = "arc";
-inline constexpr const char* kDefaultSaosEncoding = "F16";
+inline constexpr const char* kDefaultSatEncoding = "F16";
+inline constexpr const char* kSao1PublishedRepo = "thepatch/stable-audio-open-1.0-GGUF";
+inline constexpr const char* kFoundationPublishedRepo = "thepatch/foundation-1-GGUF";
 
 inline std::string normalize_encoding(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -59,6 +61,66 @@ inline std::string saos_oobleck_relative_path(const std::string& encoding) {
     const std::string enc = normalize_encoding(encoding);
     if (!is_saos_published_encoding(enc)) return {};
     return "stable-audio-open-small-oobleck-v1.0-" + enc + ".gguf";
+}
+
+inline std::string canonical_sat_large_model(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return c == '_' ? '-' : (char)std::tolower(c);
+    });
+    if (value == "sao1" || value == "sao-1" || value == "sao-1.0" ||
+        value == "stable-audio-open-1") return "stable-audio-open-1.0";
+    if (value == "foundation" || value == "foundation1") return "foundation-1";
+    return value;
+}
+
+inline std::string sat_large_dit_relative_path(const std::string& model,
+                                               const std::string& encoding) {
+    const std::string name = canonical_sat_large_model(model);
+    const std::string enc = normalize_encoding(encoding);
+    if (!is_saos_published_encoding(enc) ||
+        (name != "stable-audio-open-1.0" && name != "foundation-1")) return {};
+    return name + "-dit-1.1B-v1.0-" + enc + ".gguf";
+}
+
+inline std::string sat_t5_128_relative_path(const std::string& encoding) {
+    const std::string enc = normalize_encoding(encoding);
+    if (!is_saos_published_encoding(enc)) return {};
+    return "t5-base-encoder-128tok-0.1B-v1.0-" + enc + ".gguf";
+}
+
+inline std::string sat_oobleck_relative_path(const std::string& encoding) {
+    const std::string enc = normalize_encoding(encoding);
+    if (!is_saos_published_encoding(enc)) return {};
+    return "stable-audio-open-oobleck-v1.0-" + enc + ".gguf";
+}
+
+inline bool resolve_sat_large_model(const std::string& models_dir,
+                                    const std::string& model,
+                                    const std::string& dit_encoding,
+                                    const std::string& t5_encoding,
+                                    const std::string& ae_encoding,
+                                    PipelinePaths* paths,
+                                    std::string* error = nullptr) {
+    if (!paths) return false;
+    const std::string name = canonical_sat_large_model(model);
+    const std::string dit = sat_large_dit_relative_path(name, dit_encoding);
+    const std::string t5 = sat_t5_128_relative_path(t5_encoding);
+    const std::string ae = sat_oobleck_relative_path(ae_encoding);
+    if (dit.empty() || t5.empty() || ae.empty()) {
+        if (error) *error = "unknown SAT model or encoding (models: stable-audio-open-1.0, foundation-1; encodings: f16, q8_0, q5_k_m, q4_k_m)";
+        return false;
+    }
+    const std::filesystem::path root(models_dir);
+    paths->dit = (root / dit).string();
+    paths->t5 = (root / t5).string();
+    paths->autoencoder = (root / ae).string();
+    for (const auto& path : {paths->dit, paths->t5, paths->autoencoder}) {
+        if (!std::filesystem::is_regular_file(path)) {
+            if (error) *error = "missing " + path + " (run: python tools/download_models.py --sat --sat-model " + name + ")";
+            return false;
+        }
+    }
+    return true;
 }
 
 inline bool resolve_saos_model(const std::string& models_dir,

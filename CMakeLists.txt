@@ -136,10 +136,10 @@ target_include_directories(sa3 INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sa3 INTERFACE ggml)
 
 # Optional classic stable-audio-tools component. Kept independent of the CLI
-# switch so an embedding application can link SAOS without building any tools.
+# switch so an embedding application can link the SAT family without building any tools.
 if(SA3_BUILD_SAT)
-    add_library(sa3_saos STATIC src/sat/pipeline.cpp)
-    target_link_libraries(sa3_saos PUBLIC sa3)
+    add_library(sa3_sat STATIC src/sat/pipeline.cpp)
+    target_link_libraries(sa3_sat PUBLIC sa3)
 endif()
 
 # --- tools -----------------------------------------------------------------
@@ -160,8 +160,8 @@ add_executable(sa3-textmusic tools/sa3-textmusic.cpp)
 target_link_libraries(sa3-textmusic PRIVATE sa3)
 
 if(SA3_BUILD_SAT)
-    add_executable(saos-generate tools/saos-generate.cpp)
-    target_link_libraries(saos-generate PRIVATE sa3_saos)
+    add_executable(sat-generate tools/sat-generate.cpp)
+    target_link_libraries(sat-generate PRIVATE sa3_sat)
 endif()
 
 add_executable(sa3-tokenize tools/sa3-tokenize.cpp)
@@ -275,7 +275,7 @@ target_link_libraries(sa3-set-wide-row-test PRIVATE sa3)
 
 if(SA3_BUILD_SAT)
     add_executable(sa3-sat-sampling-test tests/sat_sampling_test.cpp)
-    target_link_libraries(sa3-sat-sampling-test PRIVATE sa3_saos)
+    target_link_libraries(sa3-sat-sampling-test PRIVATE sa3_sat)
 endif()
 
 if(BUILD_TESTING)
@@ -302,6 +302,21 @@ if(BUILD_TESTING)
     add_test(NAME sa3-set-wide-row-test COMMAND sa3-set-wide-row-test)
     if(SA3_BUILD_SAT)
         add_test(NAME sa3-sat-sampling-test COMMAND sa3-sat-sampling-test)
+        add_test(NAME sa3-sat-cli-help-test COMMAND sat-generate --help)
+        add_test(NAME sa3-sat-cli-model-option-test COMMAND sat-generate --model arc --randomize)
+        add_test(NAME sa3-sat-cli-foundation-duration-test
+                 COMMAND sat-generate --model foundation-1 --prompt test --seconds 4)
+        add_test(NAME sa3-sat-cli-saos-duration-test
+                 COMMAND sat-generate --model arc --prompt test --seconds 12)
+        add_test(NAME sa3-sat-cli-loudness-validation-test
+                 COMMAND sat-generate --model arc --prompt test --limiter-knee 0)
+        add_test(NAME sa3-sat-cli-vpred-steps-test
+                 COMMAND sat-generate --model sao1 --prompt test --steps 1)
+        set_tests_properties(sa3-sat-cli-model-option-test
+                             sa3-sat-cli-foundation-duration-test
+                             sa3-sat-cli-saos-duration-test
+                             sa3-sat-cli-loudness-validation-test
+                             sa3-sat-cli-vpred-steps-test PROPERTIES WILL_FAIL TRUE)
     endif()
     if(Python3_Interpreter_FOUND)
         add_test(NAME sa3-model-artifacts-test
@@ -330,7 +345,13 @@ if(BUILD_TESTING)
         sa3-dit-lin-functional-test sa3-latents-cache-test
         PROPERTIES LABELS "non-gpu;training;lora")
     if(SA3_BUILD_SAT)
-        set_tests_properties(sa3-sat-sampling-test PROPERTIES LABELS "non-gpu;sat")
+        set_tests_properties(sa3-sat-sampling-test sa3-sat-cli-help-test
+                             sa3-sat-cli-model-option-test
+                             sa3-sat-cli-foundation-duration-test
+                             sa3-sat-cli-saos-duration-test
+                             sa3-sat-cli-loudness-validation-test
+                             sa3-sat-cli-vpred-steps-test
+                             PROPERTIES LABELS "non-gpu;sat")
     endif()
 endif()
 

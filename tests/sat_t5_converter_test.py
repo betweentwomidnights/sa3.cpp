@@ -46,13 +46,13 @@ def tokenizer():
 
 @unittest.skipIf(DEPENDENCY_ERROR is not None, f"converter dependencies unavailable: {DEPENDENCY_ERROR}")
 class SatT5ConverterTest(unittest.TestCase):
-    def run_fixture(self, state):
+    def run_fixture(self, state, max_length=64):
         td = tempfile.TemporaryDirectory(); root = Path(td.name)
         src, cfg, tok, out = root/"m.safetensors", root/"config.json", root/"tokenizer.json", root/"m.gguf"
         save_file(state, str(src)); cfg.write_text(json.dumps(config()), encoding="utf-8")
         tok.write_text(json.dumps(tokenizer()), encoding="utf-8")
         try:
-            result = convert(src, cfg, tok, out)
+            result = convert(src, cfg, tok, out, max_length=max_length)
         except Exception:
             td.cleanup(); raise
         return td, result, GGUFReader(str(out))
@@ -64,6 +64,12 @@ class SatT5ConverterTest(unittest.TestCase):
         self.assertEqual(result["token_count"], 6)
         self.assertEqual(tensors["te.0.q.weight"].dtype, np.float16)
         self.assertEqual(tensors["te.0.attn_norm.weight"].dtype, np.float32)
+
+    def test_sao1_sequence_length(self):
+        td, _, reader = self.run_fixture(fixture_state(), max_length=128)
+        self.addCleanup(td.cleanup)
+        field = reader.fields["sat.t5.max_length"]
+        self.assertEqual(int(field.parts[field.data[0]][0]), 128)
 
     def test_unknown_encoder_tensor_is_fatal(self):
         sd = fixture_state(); sd["encoder.surprise"] = np.ones(1, np.float32)

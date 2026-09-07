@@ -22,8 +22,11 @@ inline DitSpec dit_spec_from(const GgufModel& m) {
     c.num_heads = (int)m.u32("sat.dit.heads");
     c.cond_token_dim = (int)m.u32("sat.dit.cond_dim");
     c.global_cond_dim = (int)m.u32("sat.dit.global_dim");
-    c.qk_layer_norm = m.string("sat.dit.qk_norm") == "ln";
-    if (!c.qk_layer_norm || c.embed_dim % c.num_heads)
+    const std::string qk_norm = m.string("sat.dit.qk_norm");
+    if (qk_norm != "ln" && qk_norm != "none")
+        throw gguf_error("unsupported classic DiT Q/K normalization");
+    c.qk_layer_norm = qk_norm == "ln";
+    if (c.embed_dim % c.num_heads)
         throw gguf_error("unsupported classic DiT attention geometry");
     return c;
 }
@@ -74,9 +77,9 @@ inline ggml_tensor* classic_dit_block(ggml_context* ctx, const GgufModel& W,
     const int64_t tokens = x->ne[1];
     const int64_t cond_tokens = context->ne[1];
     const float attn_scale = 1.0f / std::sqrt((float)hd);
-    auto slice = [&](ggml_tensor* a, int part, int64_t n) {
-        return ggml_view_2d(ctx, a, width, n, a->nb[1],
-                            (size_t)part * width * sizeof(float));
+    auto slice = [&](ggml_tensor* a, int part, int part_width, int64_t n) {
+        return ggml_view_2d(ctx, a, part_width, n, a->nb[1],
+                            (size_t)part * part_width * sizeof(float));
     };
     auto attend = [&](ggml_tensor* q, ggml_tensor* k, ggml_tensor* v, int64_t nq) {
         ggml_tensor* o = nn::sdpa(ctx, sat_to_attn(ctx, q), sat_to_attn(ctx, k),
@@ -88,11 +91,13 @@ inline ggml_tensor* classic_dit_block(ggml_context* ctx, const GgufModel& W,
     ggml_tensor* h = sat_layer_norm(ctx, x, W.get(p + "pre_norm.gamma"),
                                     W.get(p + "pre_norm.beta"), 1.0e-5f);
     ggml_tensor* qkv = nn::linear(ctx, W.get(p + "self.qkv.weight"), h);
-    ggml_tensor* q = sat_heads(ctx, slice(qkv, 0, tokens), hd, heads, tokens);
-    ggml_tensor* k = sat_heads(ctx, slice(qkv, 1, tokens), hd, heads, tokens);
-    ggml_tensor* v = sat_heads(ctx, slice(qkv, 2, tokens), hd, heads, tokens);
-    q = sat_qk_norm(ctx, W, p + "self.q_norm", q);
-    k = sat_qk_norm(ctx, W, p + "self.k_norm", k);
+    ggml_tensor* q = sat_heads(ctx, slice(qkv, 0, width, tokens), hd, heads, tokens);
+    ggml_tensor* k = sat_heads(ctx, slice(qkv, 1, width, tokens), hd, heads, tokens);
+    ggml_tensor* v = sat_heads(ctx, slice(qkv, 2, width, tokens), hd, heads, tokens);
+    if (c.qk_layer_norm) {
+        q = sat_qk_norm(ctx, W, p + "self.q_norm", q);
+        k = sat_qk_norm(ctx, W, p + "self.k_norm", k);
+    }
     q = nn::rope_neox(ctx, q, pos, rotary_dims, 10000.0f);
     k = nn::rope_neox(ctx, k, pos, rotary_dims, 10000.0f);
     h = nn::linear(ctx, W.get(p + "self.out.weight"), attend(q, k, v, tokens));
@@ -102,12 +107,19 @@ inline ggml_tensor* classic_dit_block(ggml_context* ctx, const GgufModel& W,
     h = sat_layer_norm(ctx, x, W.get(p + "cross_norm.gamma"),
                        W.get(p + "cross_norm.beta"), 1.0e-5f);
     ggml_tensor* qf = nn::linear(ctx, W.get(p + "cross.q.weight"), h);
-    ggml_tensor* kv = nn::linear(ctx, W.get(p + "cross.kv.weight"), context);
+    ggml_tensor* kv_weight = W.get(p + "cross.kv.weight");
+    const int kv_width = (int)kv_weight->ne[1] / 2;
+    if (kv_width <= 0 || kv_width % hd || heads % (kv_width / hd))
+        throw gguf_error("unsupported classic DiT grouped cross-attention geometry");
+    const int kv_heads = kv_width / hd;
+    ggml_tensor* kv = nn::linear(ctx, kv_weight, context);
     q = sat_heads(ctx, qf, hd, heads, tokens);
-    k = sat_heads(ctx, slice(kv, 0, cond_tokens), hd, heads, cond_tokens);
-    v = sat_heads(ctx, slice(kv, 1, cond_tokens), hd, heads, cond_tokens);
-    q = sat_qk_norm(ctx, W, p + "cross.q_norm", q);
-    k = sat_qk_norm(ctx, W, p + "cross.k_norm", k);
+    k = sat_heads(ctx, slice(kv, 0, kv_width, cond_tokens), hd, kv_heads, cond_tokens);
+    v = sat_heads(ctx, slice(kv, 1, kv_width, cond_tokens), hd, kv_heads, cond_tokens);
+    if (c.qk_layer_norm) {
+        q = sat_qk_norm(ctx, W, p + "cross.q_norm", q);
+        k = sat_qk_norm(ctx, W, p + "cross.k_norm", k);
+    }
     h = nn::linear(ctx, W.get(p + "cross.out.weight"), attend(q, k, v, tokens));
     x = ggml_add(ctx, x, h);
 

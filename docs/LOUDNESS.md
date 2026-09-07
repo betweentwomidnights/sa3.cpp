@@ -1,10 +1,11 @@
 # loudness controls
 
-stable audio 3 loras often run hotter than the base model (and the base model even runs hot). nn DAW use this shows up quickly as
+stable audio models often run hotter than the available PCM headroom. stable audio 3 loras
+are a common example, and Stable Audio Open 1.0 can also decode above 0 dBFS. in DAW use this shows up quickly as
 clipping when generated float audio is written back to 16-bit PCM WAV. the practical fix we have
 liked in [gary4local](https://github.com/betweentwomidnights/gary-localhost-installer) is simple: normalize the decoded waveform peak, then catch overs with a gentle limiter.
 
-The defaults in this server mirror the SA3 service in
+The defaults shared by the SA3 and optional SAT pipelines mirror the SA3 service in
 [`gary-localhost-installer`](https://github.com/betweentwomidnights/gary-localhost-installer):
 
 - `peak_normalize_db = 2.0`
@@ -37,4 +38,4 @@ recommendation for v1: keep peak normalization and the limiter as the real loudn
 rescale/shift as advanced compatibility/debug controls, leave them at their no-op defaults, and do not
 put them in the primary UI unless a model or lora clearly benefits from them.
 
-i may just remove those, honestly. 
+i may just remove those, honestly.

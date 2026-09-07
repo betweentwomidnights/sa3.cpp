@@ -17,7 +17,7 @@ class ConversionError(ValueError):
     pass
 
 
-def convert(src, config, tokenizer, out, weight_type="f16"):
+def convert(src, config, tokenizer, out, weight_type="f16", max_length=64):
     cfg = json.loads(Path(config).read_text(encoding="utf-8"))
     tok = json.loads(Path(tokenizer).read_text(encoding="utf-8"))
     if weight_type not in ("f16", "f32"):
@@ -26,6 +26,8 @@ def convert(src, config, tokenizer, out, weight_type="f16"):
     dim, layers = int(cfg["d_model"]), int(cfg["num_layers"])
     heads, head_dim = int(cfg["num_heads"]), int(cfg["d_kv"])
     vocab_size = int(cfg["vocab_size"])
+    if max_length < 1:
+        raise ConversionError("max_length must be positive")
 
     model = tok.get("model", {})
     vocab = model.get("vocab")
@@ -51,7 +53,7 @@ def convert(src, config, tokenizer, out, weight_type="f16"):
     w.add_uint32("sat.t5.relative_buckets", int(cfg["relative_attention_num_buckets"]))
     w.add_uint32("sat.t5.relative_max_distance", 128)
     w.add_float32("sat.t5.eps", float(cfg["layer_norm_epsilon"]))
-    w.add_uint32("sat.t5.max_length", 64)
+    w.add_uint32("sat.t5.max_length", max_length)
     w.add_string("sat.t5.weight_type", weight_type.upper())
     w.add_string("tok.model", "sentencepiece-unigram")
     w.add_array("tok.tokens", tokens)
@@ -111,9 +113,11 @@ def main():
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--out-type", choices=("f16", "f32"), default="f16")
+    ap.add_argument("--max-length", type=int, default=64,
+                    help="token sequence length (64 for SAOS, 128 for SAO 1.0/Foundation)")
     a = ap.parse_args()
     try:
-        r = convert(a.src, a.config, a.tokenizer, a.out, a.out_type)
+        r = convert(a.src, a.config, a.tokenizer, a.out, a.out_type, a.max_length)
     except (ConversionError, OSError, KeyError, json.JSONDecodeError) as exc:
         sys.exit(f"error: {exc}")
     print(f"wrote {r['output']} ({r['tensor_count']} tensors, "
