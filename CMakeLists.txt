@@ -273,6 +273,9 @@ target_include_directories(sa3-latents-cache-test PRIVATE ${CMAKE_CURRENT_SOURCE
 add_executable(sa3-continuation-splice-test tests/continuation_splice_test.cpp)
 target_link_libraries(sa3-continuation-splice-test PRIVATE sa3)
 
+add_executable(sa3-sampling-schedule-test tests/sampling_schedule_test.cpp)
+target_link_libraries(sa3-sampling-schedule-test PRIVATE sa3)
+
 add_executable(sa3-set-wide-row-test tests/set_wide_row_test.cpp)
 target_link_libraries(sa3-set-wide-row-test PRIVATE sa3)
 
@@ -303,6 +306,7 @@ if(BUILD_TESTING)
     add_test(NAME sa3-lora-quant-merge-test COMMAND sa3-lora-quant-merge-test)
     add_test(NAME sa3-latents-cache-test COMMAND sa3-latents-cache-test)
     add_test(NAME sa3-continuation-splice-test COMMAND sa3-continuation-splice-test)
+    add_test(NAME sa3-sampling-schedule-test COMMAND sa3-sampling-schedule-test)
     add_test(NAME sa3-set-wide-row-test COMMAND sa3-set-wide-row-test)
     if(SA3_BUILD_SAT)
         add_test(NAME sa3-sat-sampling-test COMMAND sa3-sat-sampling-test)
@@ -348,6 +352,7 @@ if(BUILD_TESTING)
         sa3-train-prompt-test sa3-train-inpaint-test
         sa3-dit-lin-functional-test sa3-latents-cache-test sa3-continuation-splice-test
         PROPERTIES LABELS "non-gpu;training;lora")
+    set_tests_properties(sa3-sampling-schedule-test PROPERTIES LABELS "non-gpu;sampling")
     if(SA3_BUILD_SAT)
         set_tests_properties(sa3-sat-sampling-test sa3-sat-cli-help-test
                              sa3-sat-cli-model-option-test
