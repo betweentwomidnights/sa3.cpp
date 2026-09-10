@@ -126,6 +126,29 @@ inline void dist_shift_defaults(const std::string& type, float& p1, float& p2, f
     else                     { p1 = 2000.0f; p2 = -6.2f;  p3 = 0.0f;   p4 = 2.0f;   } // LogSNR (medium, rate=0)
 }
 
+// Build the descending rectified-flow schedule for text generation and audio-to-audio. Distribution
+// shift is defined over normalized diffusion time [1, 0]; sigma_max then selects how far into that
+// curve an audio-to-audio request starts. Warping an already-scaled t (the old behaviour) could map
+// the first interior LogSNR step above sigma_max, violating every sampler's next <= current contract.
+inline std::vector<float> make_sa3_schedule(int steps, float sigma_max, int seq_len,
+                                            const std::string& type,
+                                            float p1, float p2, float p3, float p4) {
+    if (steps < 1) throw std::invalid_argument("sampling steps must be positive");
+    if (!(sigma_max > 0.0f && sigma_max <= 1.0f))
+        throw std::invalid_argument("sigma_max must be in (0, 1]");
+
+    std::vector<float> schedule((size_t)steps + 1);
+    schedule.front() = sigma_max;
+    for (int i = 1; i < steps; ++i) {
+        const float normalized_t = 1.0f - (float)i / (float)steps;
+        float warped = dist_shift_warp(type, normalized_t, seq_len, p1, p2, p3, p4);
+        if (!std::isfinite(warped)) warped = normalized_t;
+        schedule[(size_t)i] = std::clamp(sigma_max * warped, 0.0f, schedule[(size_t)i - 1]);
+    }
+    schedule.back() = 0.0f;
+    return schedule;
+}
+
 // Host classifier-free-guidance combine for the rf_denoiser objective, matching models/dit.py
 // 579-619 (the scalar/no-padding-mask case). v_cond/v_uncond are the two velocity predictions and
 // x is the current latent; sigma is the step's t. Writes the guided velocity to v_out. Layout is
@@ -1035,15 +1058,10 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     profile_log(prof, "conditioning", wall_time_s() - t0);
 
     // ---------- schedule (SA3 distribution shift; default = LogSNR rate=0) ----------
-    // Linear t = sigma_max*(1 - i/steps), warped by the selected dist-shift, with endpoints
-    // re-anchored (t[0]=sigma_max, t[steps]=0) exactly as upstream build_schedule does.
-    std::vector<float> sigmas(steps+1);
-    for (int i = 0; i <= steps; i++) {
-        float t_in = sigma_max * (1.0f - (float)i / steps);
-        sigmas[i] = (i == 0) ? sigma_max
-                  : (i == steps) ? 0.0f
-                  : sa3::dist_shift_warp(dist_shift, t_in, eff_frames, ds_p1, ds_p2, ds_p3, ds_p4);
-    }
+    // Warp normalized diffusion time, then scale the curve by sigma_max for audio-to-audio.
+    // Endpoints stay anchored at sigma_max and zero and every step remains descending.
+    std::vector<float> sigmas = sa3::make_sa3_schedule(steps, sigma_max, eff_frames,
+                                                       dist_shift, ds_p1, ds_p2, ds_p3, ds_p4);
 
     // ---------- audio2audio: encode init audio -> latent z_init [latent, T] ----------
     // ---------- route this request's adapters ----------
