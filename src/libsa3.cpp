@@ -244,8 +244,8 @@ void init_v1_struct(T* value) {
 }
 
 template <typename T>
-bool has_v1_size(const T* value) {
-    return value && value->size >= sizeof(T);
+bool has_v1_size(const T* value, uint32_t minimum_size) {
+    return value && value->size >= minimum_size;
 }
 
 void SA3_CALL v1_error_init(sa3_error_v1* error) {
@@ -278,12 +278,12 @@ void SA3_CALL v1_context_config_init(sa3_context_config_v1* config) {
 
 void SA3_CALL v1_audio_view_init(sa3_audio_view_v1* audio) {
     init_v1_struct(audio);
-    if (audio && audio->size >= sizeof(*audio)) audio->layout = SA3_AUDIO_PLANAR_V1;
+    if (audio && audio->size >= SA3_AUDIO_VIEW_V1_MIN_SIZE) audio->layout = SA3_AUDIO_PLANAR_V1;
 }
 
 void SA3_CALL v1_request_init(sa3_request_v1* request) {
     init_v1_struct(request);
-    if (!request || request->size < sizeof(*request)) return;
+    if (!request || request->size < SA3_REQUEST_V1_MIN_SIZE) return;
     request->operation = SA3_OPERATION_GENERATE_V1;
     request->duration_seconds = 12.0;
     request->steps = 8;
@@ -319,12 +319,12 @@ void SA3_CALL v1_request_init(sa3_request_v1* request) {
 
 void SA3_CALL v1_adapter_init(sa3_adapter_v1* adapter) {
     init_v1_struct(adapter);
-    if (adapter && adapter->size >= sizeof(*adapter)) adapter->strength = 1.0f;
+    if (adapter && adapter->size >= SA3_ADAPTER_V1_MIN_SIZE) adapter->strength = 1.0f;
 }
 
 void SA3_CALL v1_loudness_init(sa3_loudness_v1* loudness) {
     init_v1_struct(loudness);
-    if (!loudness || loudness->size < sizeof(*loudness)) return;
+    if (!loudness || loudness->size < SA3_LOUDNESS_V1_MIN_SIZE) return;
     loudness->peak_normalize = 1;
     loudness->peak_normalize_db = 2.0f;
     loudness->limiter = 1;
@@ -335,7 +335,7 @@ void SA3_CALL v1_loudness_init(sa3_loudness_v1* loudness) {
 
 void SA3_CALL v1_continuation_init(sa3_continuation_v1* continuation) {
     init_v1_struct(continuation);
-    if (!continuation || continuation->size < sizeof(*continuation)) return;
+    if (!continuation || continuation->size < SA3_CONTINUATION_V1_MIN_SIZE) return;
     continuation->splice_source = 1;
     continuation->mask_overlap_seconds = 0.2f;
     continuation->crossfade_seconds = 0.03f;
@@ -344,7 +344,7 @@ void SA3_CALL v1_continuation_init(sa3_continuation_v1* continuation) {
 
 void SA3_CALL v1_result_init(sa3_result_v1* result) {
     init_v1_struct(result);
-    if (result && result->size >= sizeof(*result)) result->layout = SA3_AUDIO_PLANAR_V1;
+    if (result && result->size >= SA3_RESULT_V1_MIN_SIZE) result->layout = SA3_AUDIO_PLANAR_V1;
 }
 
 void SA3_CALL v1_lora_convert_init(sa3_lora_convert_v1* options) {
@@ -420,7 +420,7 @@ sa3_status_v1 SA3_CALL v1_context_create(const sa3_context_config_v1* config,
                                           sa3_context** out_context,
                                           sa3_error_v1* error) {
     clear_v1_error(error);
-    if (!has_v1_size(config) || !out_context)
+    if (!has_v1_size(config, SA3_CONTEXT_CONFIG_V1_MIN_SIZE) || !out_context)
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
                        "context config is too small or out_context is null");
     *out_context = nullptr;
@@ -470,7 +470,8 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
                                     sa3_result_v1* result,
                                     sa3_error_v1* error) {
     clear_v1_error(error);
-    if (!context || !has_v1_size(request) || !has_v1_size(result))
+    if (!context || !has_v1_size(request, SA3_REQUEST_V1_MIN_SIZE) ||
+        !has_v1_size(result, SA3_RESULT_V1_MIN_SIZE))
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
                        "context, full V1 request, and full V1 result are required");
     if (result->samples)
@@ -504,7 +505,7 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
         frames = std::max(1, (target_samples + 4095) / 4096);
         if (frames & 1) ++frames;
     } else if (needs_input) {
-        if (!has_v1_size(&request->input_audio) || !request->input_audio.samples ||
+        if (!has_v1_size(&request->input_audio, SA3_AUDIO_VIEW_V1_MIN_SIZE) || !request->input_audio.samples ||
             request->input_audio.n_samples == 0 || request->input_audio.n_channels == 0 ||
             request->input_audio.sample_rate == 0 ||
             request->input_audio.n_samples > (uint64_t)std::numeric_limits<int>::max() ||
@@ -540,7 +541,8 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
         (request->decode_chunk_size > 0 && request->decode_overlap >= request->decode_chunk_size))
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid encode/decode chunk settings");
 
-    if (!has_v1_size(&request->loudness) || !has_v1_size(&request->continuation))
+    if (!has_v1_size(&request->loudness, SA3_LOUDNESS_V1_MIN_SIZE) ||
+        !has_v1_size(&request->continuation, SA3_CONTINUATION_V1_MIN_SIZE))
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
                        "embedded loudness or continuation options are too small");
     sa3_loudness loudness{};
@@ -581,7 +583,7 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
     std::vector<const char*> adapter_names;
     std::vector<float> adapter_strengths;
     if (request->adapter_count > 0) {
-        if (!request->adapters || request->adapter_stride < sizeof(sa3_adapter_v1) ||
+        if (!request->adapters || request->adapter_stride < SA3_ADAPTER_V1_MIN_SIZE ||
             request->adapter_count > (uint32_t)std::numeric_limits<int>::max())
             return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid adapter array");
         try {
@@ -590,8 +592,9 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
             const auto* bytes = reinterpret_cast<const unsigned char*>(request->adapters);
             for (uint32_t i = 0; i < request->adapter_count; ++i) {
                 sa3_adapter_v1 adapter{};
-                std::memcpy(&adapter, bytes + (size_t)i * request->adapter_stride, sizeof(adapter));
-                if (adapter.size < sizeof(adapter) || !adapter.path_or_name || !*adapter.path_or_name ||
+                std::memcpy(&adapter, bytes + (size_t)i * request->adapter_stride,
+                            std::min<size_t>(request->adapter_stride, sizeof(adapter)));
+                if (adapter.size < SA3_ADAPTER_V1_MIN_SIZE || !adapter.path_or_name || !*adapter.path_or_name ||
                     !std::isfinite(adapter.strength))
                     return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid adapter entry");
                 adapter_names.push_back(adapter.path_or_name);
@@ -664,7 +667,7 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
     }
 
     const uint32_t result_size = result->size;
-    std::memset(result, 0, sizeof(*result));
+    std::memset(result, 0, std::min<size_t>(result_size, sizeof(*result)));
     result->size = result_size;
     result->samples = audio.samples;
     result->n_samples = (uint64_t)audio.n_samp;
@@ -694,7 +697,8 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
 sa3_status_v1 SA3_CALL v1_convert_lora(const sa3_lora_convert_v1* options,
                                         sa3_error_v1* error) {
     clear_v1_error(error);
-    if (!has_v1_size(options) || !options->safetensors_path || !options->output_gguf_path)
+    if (!has_v1_size(options, SA3_LORA_CONVERT_V1_MIN_SIZE) ||
+        !options->safetensors_path || !options->output_gguf_path)
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid LoRA conversion options");
     char message[1024]{};
     const int rc = sa3_convert_lora(options->safetensors_path, options->json_path,
@@ -708,7 +712,7 @@ sa3_status_v1 SA3_CALL v1_convert_lora(const sa3_lora_convert_v1* options,
 
 void SA3_CALL v1_training_config_init(sa3_training_config_v1* config) {
     init_v1_struct(config);
-    if (!config || config->size < sizeof(*config)) return;
+    if (!config || config->size < SA3_TRAINING_CONFIG_V1_MIN_SIZE) return;
     config->steps = 10000;
     config->rank = 16;
     config->alpha = 0.0f;
@@ -783,7 +787,7 @@ int v1_training_audio_bridge(void* user, const char* audio_path, int sample_rate
     const int32_t supplied = bridge->callbacks->load_audio(
         bridge->callbacks->user, audio_path, (uint32_t)sample_rate, (uint32_t)channels, &audio);
     if (!supplied) return 0;
-    if (!has_v1_size(&audio) || !audio.samples || audio.n_samples == 0 ||
+    if (!has_v1_size(&audio, SA3_AUDIO_VIEW_V1_MIN_SIZE) || !audio.samples || audio.n_samples == 0 ||
         audio.n_samples > (uint64_t)std::numeric_limits<int>::max() ||
         audio.n_channels != (uint32_t)channels || audio.sample_rate != (uint32_t)sample_rate ||
         (audio.layout != SA3_AUDIO_PLANAR_V1 && audio.layout != SA3_AUDIO_INTERLEAVED_V1)) {
@@ -836,8 +840,9 @@ sa3_status_v1 SA3_CALL v1_training_run(const sa3_training_config_v1* config,
                                         sa3_training_result_v1* result,
                                         sa3_error_v1* error) {
     clear_v1_error(error);
-    if (!has_v1_size(config) || !has_v1_size(result) ||
-        (callbacks && !has_v1_size(callbacks)))
+    if (!has_v1_size(config, SA3_TRAINING_CONFIG_V1_MIN_SIZE) ||
+        !has_v1_size(result, SA3_TRAINING_RESULT_V1_MIN_SIZE) ||
+        (callbacks && !has_v1_size(callbacks, SA3_TRAINING_CALLBACKS_V1_MIN_SIZE)))
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
                        "full V1 training config and result are required");
     if (!config->dataset_dir || !*config->dataset_dir)
@@ -851,7 +856,7 @@ sa3_status_v1 SA3_CALL v1_training_run(const sa3_training_config_v1* config,
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid V1 training configuration");
 
     const uint32_t result_size = result->size;
-    std::memset(result, 0, sizeof(*result));
+    std::memset(result, 0, std::min<size_t>(result_size, sizeof(*result)));
     result->size = result_size;
 
     sa3_train_config legacy{};

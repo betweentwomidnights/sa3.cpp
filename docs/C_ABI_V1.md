@@ -21,8 +21,11 @@ uses the same call directly. `NULL` means that the requested ABI major is unavai
 - Initializer functions establish every default. A caller zero-initializes a struct, sets its
   `size` to `sizeof(struct)`, then calls the matching initializer. Meaningful zero values are not
   default sentinels in V1: seed 0, transform noise 0, and continuation overlap 0 remain zero.
-- Public structures start with `uint32_t size`. Fields may only be appended. A table is likewise
-  size- and major-version-tagged; functions may only be appended or consume reserved slots.
+- Public structures start with `uint32_t size`. Top-level structs, callback payloads, and strided
+  array entries may only be appended, and validation uses named frozen V1 prefix sizes rather than
+  a future `sizeof(struct)`. Audio, loudness, and continuation values embedded directly in a request
+  are frozen for ABI V1 so growing them cannot shift later request fields. A table is likewise size-
+  and major-version-tagged; functions may only be appended or consume reserved slots.
 - Callbacks execute synchronously on the thread that called `generate`. Callback strings and
   progress objects are borrowed only until the callback returns.
 - `sa3_error_v1` carries a typed status and a stable, copyable message. Functions also return the

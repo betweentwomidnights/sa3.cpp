@@ -28,7 +28,7 @@ int main(void) {
     CHECK(api != NULL);
     CHECK(sa3_get_api(0) == NULL);
     CHECK(sa3_get_api(SA3_ABI_VERSION_1 + 1) == NULL);
-    CHECK(api->size >= sizeof(sa3_api_v1));
+    CHECK(api->size >= SA3_API_V1_MIN_SIZE);
     CHECK(api->abi_version == SA3_ABI_VERSION_1);
     CHECK(api->runtime_version != NULL);
     CHECK(strstr(api->runtime_version(), "ABI 1") != NULL);
@@ -63,6 +63,17 @@ int main(void) {
     CHECK(request.loudness.peak_normalize == 1);
     CHECK(request.continuation.size == sizeof(sa3_continuation_v1));
     CHECK(request.continuation.splice_source == 1);
+
+    struct future_request {
+        sa3_request_v1 known;
+        uint64_t future_tail;
+    } future_request;
+    memset(&future_request, 0xA5, sizeof(future_request));
+    future_request.known.size = sizeof(future_request);
+    api->request_init(&future_request.known);
+    CHECK(future_request.known.size == sizeof(future_request));
+    CHECK(future_request.known.steps == 8);
+    CHECK(future_request.future_tail == UINT64_C(0xA5A5A5A5A5A5A5A5));
 
     sa3_loudness_v1 loudness;
     memset(&loudness, 0xA5, sizeof(loudness));
@@ -102,11 +113,23 @@ int main(void) {
     CHECK(result.size == sizeof(result));
     CHECK(result.samples == NULL);
 
+    struct future_result {
+        sa3_result_v1 known;
+        uint64_t future_tail;
+    } future_result;
+    memset(&future_result, 0xA5, sizeof(future_result));
+    future_result.known.size = sizeof(future_result);
+    future_result.known.samples = NULL;
+    future_result.future_tail = UINT64_C(0x123456789ABCDEF0);
+    api->result_free(&future_result.known);
+    CHECK(future_result.known.size == sizeof(future_result));
+    CHECK(future_result.future_tail == UINT64_C(0x123456789ABCDEF0));
+
     const sa3_training_api_v1* training = sa3_get_training_api(SA3_TRAINING_ABI_VERSION_1);
     CHECK(training != NULL);
     CHECK(sa3_get_training_api(0) == NULL);
     CHECK(sa3_get_training_api(SA3_TRAINING_ABI_VERSION_1 + 1) == NULL);
-    CHECK(training->size >= sizeof(sa3_training_api_v1));
+    CHECK(training->size >= SA3_TRAINING_API_V1_MIN_SIZE);
     CHECK(training->abi_version == SA3_TRAINING_ABI_VERSION_1);
 
     sa3_training_config_v1 training_config;

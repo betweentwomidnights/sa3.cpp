@@ -2,12 +2,14 @@
  *
  * Resolve the single sa3_get_api symbol, request SA3_ABI_VERSION_1, initialize
  * option structs through the returned table, and keep all library-owned audio
- * paired with result_free. Every public data struct is size tagged so fields may
- * only be appended without making a newer library read beyond an older caller.
+ * paired with result_free. Public data structs are size tagged. Top-level structs,
+ * callback payloads, and strided array entries may grow by appending fields; types
+ * embedded by value in another public struct are frozen for ABI V1.
  */
 #ifndef LIBSA3_V1_H
 #define LIBSA3_V1_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifndef SA3_API
@@ -169,6 +171,7 @@ typedef struct {
     float distribution_shift_params[4];
     sa3_residency_v1 residency;
 
+    /* These by-value option types are frozen for V1; extend sa3_request_v1 itself instead. */
     sa3_audio_view_v1 input_audio;
     float transform_noise_level;
     float generation_tail_padding_seconds;
@@ -257,6 +260,32 @@ typedef struct sa3_api_v1 {
 
     void* reserved[16];
 } sa3_api_v1;
+
+/* Frozen V1 prefixes. Where a type is appendable, these expressions must continue to name the
+ * final field published by the initial V1 contract. Libraries validate against these values,
+ * never against a future sizeof(struct). By-value types remain exactly this shape for ABI V1. */
+#define SA3_ERROR_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_error_v1, message) + sizeof(((sa3_error_v1*)0)->message)))
+#define SA3_CONTEXT_CONFIG_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_context_config_v1, cpu_threads) + sizeof(((sa3_context_config_v1*)0)->cpu_threads)))
+#define SA3_AUDIO_VIEW_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_audio_view_v1, reserved) + sizeof(((sa3_audio_view_v1*)0)->reserved)))
+#define SA3_ADAPTER_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_adapter_v1, strength) + sizeof(((sa3_adapter_v1*)0)->strength)))
+#define SA3_LOUDNESS_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_loudness_v1, latent_shift) + sizeof(((sa3_loudness_v1*)0)->latent_shift)))
+#define SA3_CONTINUATION_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_continuation_v1, gain_match) + sizeof(((sa3_continuation_v1*)0)->gain_match)))
+#define SA3_PROGRESS_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_progress_v1, fraction) + sizeof(((sa3_progress_v1*)0)->fraction)))
+#define SA3_REQUEST_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_request_v1, callback_user) + sizeof(((sa3_request_v1*)0)->callback_user)))
+#define SA3_RESULT_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_result_v1, mask_overlap_seconds) + sizeof(((sa3_result_v1*)0)->mask_overlap_seconds)))
+#define SA3_LORA_CONVERT_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_lora_convert_v1, output_gguf_path) + sizeof(((sa3_lora_convert_v1*)0)->output_gguf_path)))
+#define SA3_API_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_api_v1, convert_lora) + sizeof(((sa3_api_v1*)0)->convert_lora)))
 
 /* The only entry point a dynamically loaded V1 consumer needs to resolve.
  * Returns NULL for an unsupported ABI major. The returned table is static and

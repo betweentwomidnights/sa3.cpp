@@ -125,6 +125,18 @@ typedef struct sa3_training_api_v1 {
     void* reserved[16];
 } sa3_training_api_v1;
 
+/* Frozen prefixes for the initial Training V1 publication; see libsa3_v1.h. */
+#define SA3_TRAINING_CONFIG_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_training_config_v1, latents_cache) + sizeof(((sa3_training_config_v1*)0)->latents_cache)))
+#define SA3_TRAINING_STEP_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_training_step_v1, context_frames) + sizeof(((sa3_training_step_v1*)0)->context_frames)))
+#define SA3_TRAINING_CALLBACKS_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_training_callbacks_v1, command_line) + sizeof(((sa3_training_callbacks_v1*)0)->command_line)))
+#define SA3_TRAINING_RESULT_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_training_result_v1, preview_command) + sizeof(((sa3_training_result_v1*)0)->preview_command)))
+#define SA3_TRAINING_API_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_training_api_v1, run) + sizeof(((sa3_training_api_v1*)0)->run)))
+
 SA3_API const sa3_training_api_v1* SA3_CALL sa3_get_training_api(uint32_t abi_version);
 
 #ifdef __cplusplus
