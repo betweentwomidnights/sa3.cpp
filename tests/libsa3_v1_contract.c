@@ -1,0 +1,104 @@
+#include "libsa3_v1.h"
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#define CHECK(condition) do {                                                     \
+    if (!(condition)) {                                                           \
+        fprintf(stderr, "contract check failed at %s:%d: %s\n",                 \
+                __FILE__, __LINE__, #condition);                                  \
+        return 1;                                                                 \
+    }                                                                             \
+} while (0)
+
+_Static_assert(offsetof(sa3_error_v1, size) == 0, "size must lead error");
+_Static_assert(offsetof(sa3_context_config_v1, size) == 0, "size must lead config");
+_Static_assert(offsetof(sa3_audio_view_v1, size) == 0, "size must lead audio view");
+_Static_assert(offsetof(sa3_request_v1, size) == 0, "size must lead request");
+_Static_assert(offsetof(sa3_result_v1, size) == 0, "size must lead result");
+_Static_assert(offsetof(sa3_api_v1, size) == 0, "size must lead API table");
+
+int main(void) {
+    const sa3_api_v1* api = sa3_get_api(SA3_ABI_VERSION_1);
+    CHECK(api != NULL);
+    CHECK(sa3_get_api(0) == NULL);
+    CHECK(sa3_get_api(SA3_ABI_VERSION_1 + 1) == NULL);
+    CHECK(api->size >= sizeof(sa3_api_v1));
+    CHECK(api->abi_version == SA3_ABI_VERSION_1);
+    CHECK(api->runtime_version != NULL);
+    CHECK(strstr(api->runtime_version(), "ABI 1") != NULL);
+
+    sa3_context_config_v1 config;
+    memset(&config, 0xA5, sizeof(config));
+    config.size = sizeof(config);
+    api->context_config_init(&config);
+    CHECK(config.size == sizeof(config));
+    CHECK(config.models_dir == NULL);
+    CHECK(config.cpu_threads == 0);
+
+    sa3_request_v1 request;
+    memset(&request, 0xA5, sizeof(request));
+    request.size = sizeof(request);
+    api->request_init(&request);
+    CHECK(request.size == sizeof(request));
+    CHECK(request.operation == SA3_OPERATION_GENERATE_V1);
+    CHECK(request.duration_seconds == 12.0);
+    CHECK(request.steps == 8);
+    CHECK(request.seed == -1);
+    CHECK(request.cfg_scale == 1.0f);
+    CHECK(request.distribution_shift == SA3_DISTRIBUTION_LOGSNR_V1);
+    CHECK(request.residency == SA3_RESIDENCY_RESIDENT_V1);
+    CHECK(request.input_audio.size == sizeof(sa3_audio_view_v1));
+    CHECK(request.input_audio.layout == SA3_AUDIO_PLANAR_V1);
+    CHECK(request.transform_noise_level == 0.85f);
+    CHECK(request.generation_tail_padding_seconds == 6.0f);
+    CHECK(request.continuation_tail_padding_seconds == 6.0f);
+    CHECK(request.adapter_stride == sizeof(sa3_adapter_v1));
+    CHECK(request.loudness.size == sizeof(sa3_loudness_v1));
+    CHECK(request.loudness.peak_normalize == 1);
+    CHECK(request.continuation.size == sizeof(sa3_continuation_v1));
+    CHECK(request.continuation.splice_source == 1);
+
+    sa3_loudness_v1 loudness;
+    memset(&loudness, 0xA5, sizeof(loudness));
+    loudness.size = sizeof(loudness);
+    api->loudness_init(&loudness);
+    CHECK(loudness.peak_normalize == 1);
+    CHECK(loudness.peak_normalize_db == 2.0f);
+    CHECK(loudness.limiter == 1);
+    CHECK(loudness.limiter_ceiling_db == -0.3f);
+    CHECK(loudness.latent_rescale == 1.0f);
+
+    sa3_continuation_v1 continuation;
+    memset(&continuation, 0xA5, sizeof(continuation));
+    continuation.size = sizeof(continuation);
+    api->continuation_init(&continuation);
+    CHECK(continuation.splice_source == 1);
+    CHECK(continuation.mask_overlap_seconds == 0.2f);
+    CHECK(continuation.crossfade_seconds == 0.03f);
+    CHECK(continuation.gain_match == 1);
+
+    sa3_error_v1 error;
+    memset(&error, 0, sizeof(error));
+    error.size = sizeof(error);
+    api->error_init(&error);
+    CHECK(api->context_create(&config, NULL, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+    CHECK(error.code == SA3_STATUS_INVALID_ARGUMENT_V1);
+    CHECK(error.message[0] != '\0');
+
+    sa3_result_v1 result;
+    memset(&result, 0, sizeof(result));
+    result.size = sizeof(result);
+    api->result_init(&result);
+    CHECK(api->generate(NULL, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+    CHECK(result.samples == NULL);
+    api->result_free(&result);
+    api->result_free(&result);
+    CHECK(result.size == sizeof(result));
+    CHECK(result.samples == NULL);
+
+    puts("libsa3 V1 C ABI contract passed");
+    return 0;
+}

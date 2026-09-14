@@ -5,6 +5,7 @@
 #include "lora_convert.h"
 #include "train_job.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -31,7 +32,8 @@ static void set_err(char* err, int n, const std::string& m) {
     if (err && n > 0) { std::strncpy(err, m.c_str(), (size_t)n - 1); err[n - 1] = '\0'; }
 }
 
-static bool apply_init_audio(const sa3_init_audio& in, sa3::GenParams& p, std::string& err) {
+static bool apply_init_audio(const sa3_init_audio& in, sa3::GenParams& p, std::string& err,
+                             bool explicit_values = false) {
     if (in.mode == SA3_INIT_AUDIO_NONE) return true;
     if (in.mode != SA3_INIT_AUDIO_A2A && in.mode != SA3_INIT_AUDIO_INPAINT) {
         err = "init_audio.mode must be SA3_INIT_AUDIO_NONE, SA3_INIT_AUDIO_A2A, or SA3_INIT_AUDIO_INPAINT";
@@ -55,7 +57,8 @@ static bool apply_init_audio(const sa3_init_audio& in, sa3::GenParams& p, std::s
     p.init_n_samp = in.n_samp;
     p.init_n_ch = in.n_ch;
     p.init_sample_rate = in.sample_rate;
-    p.init_noise_level = in.init_noise_level > 0.0f ? in.init_noise_level : 0.85f;
+    p.init_noise_level = explicit_values ? in.init_noise_level
+                                         : (in.init_noise_level > 0.0f ? in.init_noise_level : 0.85f);
     if (in.mode == SA3_INIT_AUDIO_INPAINT) {
         p.inpaint_start = in.inpaint_start;
         p.inpaint_end = in.inpaint_end;
@@ -65,7 +68,8 @@ static bool apply_init_audio(const sa3_init_audio& in, sa3::GenParams& p, std::s
 
 static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3_request_ex* req_ex,
                              const sa3_splice* splice_override, sa3_audio* out,
-                             char* err, int err_len) {
+                             char* err, int err_len, int target_n_samp = 0,
+                             bool explicit_values = false) {
     if (!ctx || !req || !out) { set_err(err, err_len, "null argument"); return 1; }
     out->samples = nullptr; out->n_samp = 0; out->n_ch = 0; out->sample_rate = 0; out->seed = 0;
     try {
@@ -76,11 +80,14 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
         sa3::GenParams p;
         p.prompt = req->prompt ? req->prompt : "";
         if (req->negative_prompt) p.negative_prompt = req->negative_prompt;
-        p.frames = req->frames > 0 ? req->frames : 128;
-        p.steps  = req->steps  > 0 ? req->steps  : 8;
+        p.frames = explicit_values ? req->frames : (req->frames > 0 ? req->frames : 128);
+        p.steps  = explicit_values ? req->steps  : (req->steps > 0 ? req->steps : 8);
         p.seed   = sa3::pick_seed((long long)req->seed);
-        p.cfg_scale = req->cfg_scale != 0.0f ? req->cfg_scale : 1.0f;
-        p.duration_padding_sec = req->duration_padding_sec >= 0.0f ? req->duration_padding_sec : 6.0f;
+        p.cfg_scale = explicit_values ? req->cfg_scale
+                                      : (req->cfg_scale != 0.0f ? req->cfg_scale : 1.0f);
+        p.duration_padding_sec = explicit_values ? req->duration_padding_sec
+                                                 : (req->duration_padding_sec >= 0.0f ? req->duration_padding_sec : 6.0f);
+        p.target_n_samp = target_n_samp;
         p.keep_models = req->keep_models != 0;
 
         // distribution shift: NULL/"" -> "LogSNR"; per-type defaults, overridden by dist_shift_params if any set.
@@ -88,7 +95,7 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
         sa3::dist_shift_defaults(p.dist_shift, p.ds_p1, p.ds_p2, p.ds_p3, p.ds_p4);
         {
             const float* dp = req->dist_shift_params;
-            if (dp[0] != 0.0f || dp[1] != 0.0f || dp[2] != 0.0f || dp[3] != 0.0f) {
+            if (explicit_values || dp[0] != 0.0f || dp[1] != 0.0f || dp[2] != 0.0f || dp[3] != 0.0f) {
                 p.ds_p1 = dp[0]; p.ds_p2 = dp[1]; p.ds_p3 = dp[2]; p.ds_p4 = dp[3];
             }
         }
@@ -98,8 +105,10 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
             lp.peak_normalize_db      = req->loudness.peak_normalize_db;
             lp.limiter_enabled        = req->loudness.limiter != 0;
             lp.limiter_ceiling_db     = req->loudness.limiter_ceiling_db;
-            lp.limiter_knee           = req->loudness.limiter_knee > 0.0f ? req->loudness.limiter_knee : lp.limiter_knee;
-            lp.latent_rescale         = req->loudness.latent_rescale > 0.0f ? req->loudness.latent_rescale : 1.0f;
+            lp.limiter_knee           = explicit_values ? req->loudness.limiter_knee
+                                                        : (req->loudness.limiter_knee > 0.0f ? req->loudness.limiter_knee : lp.limiter_knee);
+            lp.latent_rescale         = explicit_values ? req->loudness.latent_rescale
+                                                        : (req->loudness.latent_rescale > 0.0f ? req->loudness.latent_rescale : 1.0f);
             lp.latent_shift           = req->loudness.latent_shift;
             sa3::normalize_loudness_params(lp);
             std::string lerr;
@@ -112,14 +121,16 @@ static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3
 
         if (req_ex) {
             std::string ierr;
-            if (!apply_init_audio(req_ex->init_audio, p, ierr)) { set_err(err, err_len, ierr); return 5; }
+            if (!apply_init_audio(req_ex->init_audio, p, ierr, explicit_values)) { set_err(err, err_len, ierr); return 5; }
             if (req_ex->encode_chunk_size > 0) {
                 p.encode_chunk_size = req_ex->encode_chunk_size;
-                p.encode_overlap = req_ex->encode_overlap > 0 ? req_ex->encode_overlap : 32;
+                p.encode_overlap = explicit_values ? req_ex->encode_overlap
+                                                   : (req_ex->encode_overlap > 0 ? req_ex->encode_overlap : 32);
             }
             if (req_ex->decode_chunk_size > 0) {
                 p.decode_chunk_size = req_ex->decode_chunk_size;
-                p.decode_overlap = req_ex->decode_overlap > 0 ? req_ex->decode_overlap : 32;
+                p.decode_overlap = explicit_values ? req_ex->decode_overlap
+                                                   : (req_ex->decode_overlap > 0 ? req_ex->decode_overlap : 32);
             }
             if (splice_override && splice_override->set) { // per-request splice (incl. old behaviour: splice=0)
                 sa3::SpliceParams sp;
@@ -215,7 +226,509 @@ static sa3_context* sa3_init_impl(const sa3_config* cfg, int cpu_threads, const 
       catch (...)                     { set_err(err, err_len, "unknown error"); return nullptr; }
 }
 
+namespace {
+
+template <typename T>
+void init_v1_struct(T* value) {
+    if (!value) return;
+    const uint32_t caller_size = value->size;
+    if (caller_size < sizeof(uint32_t)) return;
+    std::memset(value, 0, std::min<size_t>(caller_size, sizeof(T)));
+    value->size = caller_size;
+}
+
+template <typename T>
+bool has_v1_size(const T* value) {
+    return value && value->size >= sizeof(T);
+}
+
+void SA3_CALL v1_error_init(sa3_error_v1* error) {
+    init_v1_struct(error);
+}
+
+void set_v1_error(sa3_error_v1* error, sa3_status_v1 code, const std::string& message) {
+    if (!error || error->size < sizeof(uint32_t)) return;
+    const uint32_t caller_size = error->size;
+    std::memset(error, 0, std::min<size_t>(caller_size, sizeof(*error)));
+    error->size = caller_size;
+    if (caller_size >= offsetof(sa3_error_v1, code) + sizeof(error->code)) error->code = code;
+    if (caller_size > offsetof(sa3_error_v1, message)) {
+        const size_t cap = std::min<size_t>(sizeof(error->message),
+                                            caller_size - offsetof(sa3_error_v1, message));
+        if (cap > 0) {
+            std::strncpy(error->message, message.c_str(), cap - 1);
+            error->message[cap - 1] = '\0';
+        }
+    }
+}
+
+void clear_v1_error(sa3_error_v1* error) {
+    set_v1_error(error, SA3_STATUS_OK_V1, "");
+}
+
+void SA3_CALL v1_context_config_init(sa3_context_config_v1* config) {
+    init_v1_struct(config);
+}
+
+void SA3_CALL v1_audio_view_init(sa3_audio_view_v1* audio) {
+    init_v1_struct(audio);
+    if (audio && audio->size >= sizeof(*audio)) audio->layout = SA3_AUDIO_PLANAR_V1;
+}
+
+void SA3_CALL v1_request_init(sa3_request_v1* request) {
+    init_v1_struct(request);
+    if (!request || request->size < sizeof(*request)) return;
+    request->operation = SA3_OPERATION_GENERATE_V1;
+    request->duration_seconds = 12.0;
+    request->steps = 8;
+    request->seed = -1;
+    request->cfg_scale = 1.0f;
+    request->distribution_shift = SA3_DISTRIBUTION_LOGSNR_V1;
+    request->distribution_shift_params[0] = 2000.0f;
+    request->distribution_shift_params[1] = -6.2f;
+    request->distribution_shift_params[2] = 0.0f;
+    request->distribution_shift_params[3] = 2.0f;
+    request->residency = SA3_RESIDENCY_RESIDENT_V1;
+    request->input_audio.size = sizeof(request->input_audio);
+    request->input_audio.layout = SA3_AUDIO_PLANAR_V1;
+    request->transform_noise_level = 0.85f;
+    request->generation_tail_padding_seconds = 6.0f;
+    request->continuation_tail_padding_seconds = 6.0f;
+    request->adapter_stride = sizeof(sa3_adapter_v1);
+    request->loudness.size = sizeof(request->loudness);
+    request->loudness.peak_normalize = 1;
+    request->loudness.peak_normalize_db = 2.0f;
+    request->loudness.limiter = 1;
+    request->loudness.limiter_ceiling_db = -0.3f;
+    request->loudness.limiter_knee = 0.8f;
+    request->loudness.latent_rescale = 1.0f;
+    request->continuation.size = sizeof(request->continuation);
+    request->continuation.splice_source = 1;
+    request->continuation.mask_overlap_seconds = 0.2f;
+    request->continuation.crossfade_seconds = 0.03f;
+    request->continuation.gain_match = 1;
+    request->encode_overlap = 32;
+    request->decode_overlap = 32;
+}
+
+void SA3_CALL v1_adapter_init(sa3_adapter_v1* adapter) {
+    init_v1_struct(adapter);
+    if (adapter && adapter->size >= sizeof(*adapter)) adapter->strength = 1.0f;
+}
+
+void SA3_CALL v1_loudness_init(sa3_loudness_v1* loudness) {
+    init_v1_struct(loudness);
+    if (!loudness || loudness->size < sizeof(*loudness)) return;
+    loudness->peak_normalize = 1;
+    loudness->peak_normalize_db = 2.0f;
+    loudness->limiter = 1;
+    loudness->limiter_ceiling_db = -0.3f;
+    loudness->limiter_knee = 0.8f;
+    loudness->latent_rescale = 1.0f;
+}
+
+void SA3_CALL v1_continuation_init(sa3_continuation_v1* continuation) {
+    init_v1_struct(continuation);
+    if (!continuation || continuation->size < sizeof(*continuation)) return;
+    continuation->splice_source = 1;
+    continuation->mask_overlap_seconds = 0.2f;
+    continuation->crossfade_seconds = 0.03f;
+    continuation->gain_match = 1;
+}
+
+void SA3_CALL v1_result_init(sa3_result_v1* result) {
+    init_v1_struct(result);
+    if (result && result->size >= sizeof(*result)) result->layout = SA3_AUDIO_PLANAR_V1;
+}
+
+void SA3_CALL v1_lora_convert_init(sa3_lora_convert_v1* options) {
+    init_v1_struct(options);
+}
+
+sa3_progress_stage_v1 v1_progress_stage(const char* stage) {
+    if (!stage) return SA3_PROGRESS_OTHER_V1;
+    if (std::strcmp(stage, "loading") == 0) return SA3_PROGRESS_LOADING_V1;
+    if (std::strcmp(stage, "encoding") == 0) return SA3_PROGRESS_ENCODING_V1;
+    if (std::strcmp(stage, "sampling") == 0) return SA3_PROGRESS_SAMPLING_V1;
+    if (std::strcmp(stage, "decoding") == 0) return SA3_PROGRESS_DECODING_V1;
+    if (std::strcmp(stage, "done") == 0) return SA3_PROGRESS_DONE_V1;
+    return SA3_PROGRESS_OTHER_V1;
+}
+
+struct V1CallbackBridge {
+    const sa3_request_v1* request = nullptr;
+};
+
+void v1_progress_bridge(void* user, const char* stage, int step, int total, float fraction) {
+    const auto* bridge = static_cast<const V1CallbackBridge*>(user);
+    if (!bridge || !bridge->request || !bridge->request->on_progress) return;
+    sa3_progress_v1 progress{};
+    progress.size = sizeof(progress);
+    progress.stage = v1_progress_stage(stage);
+    progress.stage_name = stage;
+    progress.step = step;
+    progress.total = total;
+    progress.fraction = fraction;
+    bridge->request->on_progress(bridge->request->callback_user, &progress);
+}
+
+int v1_cancel_bridge(void* user) {
+    const auto* bridge = static_cast<const V1CallbackBridge*>(user);
+    return bridge && bridge->request && bridge->request->should_cancel
+         ? bridge->request->should_cancel(bridge->request->callback_user) : 0;
+}
+
+bool seconds_to_samples(double seconds, int& samples) {
+    if (!std::isfinite(seconds) || seconds <= 0.0) return false;
+    const double rounded = std::round(seconds * 44100.0);
+    if (rounded < 1.0 || rounded > (double)std::numeric_limits<int>::max()) return false;
+    samples = (int)rounded;
+    return true;
+}
+
+const char* v1_distribution_name(sa3_distribution_shift_v1 shift) {
+    switch (shift) {
+        case SA3_DISTRIBUTION_LOGSNR_V1: return "LogSNR";
+        case SA3_DISTRIBUTION_FLUX_V1: return "Flux";
+        case SA3_DISTRIBUTION_FULL_V1: return "Full";
+        case SA3_DISTRIBUTION_NONE_V1: return "None";
+        default: return nullptr;
+    }
+}
+
+sa3_status_v1 status_from_legacy(int code, const char* message) {
+    if (code == 0) return SA3_STATUS_OK_V1;
+    if (message && std::strstr(message, "cancelled")) return SA3_STATUS_CANCELLED_V1;
+    if (code == 1 || code == 4 || code == 5 || code == 6) return SA3_STATUS_INVALID_ARGUMENT_V1;
+    if (code == 2) return SA3_STATUS_IO_ERROR_V1;
+    if (code == 3) return SA3_STATUS_OUT_OF_MEMORY_V1;
+    return SA3_STATUS_MODEL_ERROR_V1;
+}
+
+sa3_status_v1 fail_v1(sa3_error_v1* error, sa3_status_v1 status, const std::string& message) {
+    set_v1_error(error, status, message);
+    return status;
+}
+
+sa3_status_v1 SA3_CALL v1_context_create(const sa3_context_config_v1* config,
+                                          sa3_context** out_context,
+                                          sa3_error_v1* error) {
+    clear_v1_error(error);
+    if (!has_v1_size(config) || !out_context)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "context config is too small or out_context is null");
+    *out_context = nullptr;
+    if (config->cpu_threads < 0)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "cpu_threads must be non-negative");
+
+    sa3_config_ex legacy{};
+    legacy.config.models_dir = config->models_dir;
+    legacy.config.adapters_dir = config->adapters_dir;
+    legacy.config.variant = config->variant;
+    legacy.config.encoding = config->dit_encoding;
+    legacy.cpu_threads = config->cpu_threads;
+    legacy.device = config->device;
+    legacy.text_encoder_encoding = config->text_encoder_encoding;
+    legacy.autoencoder_encoding = config->autoencoder_encoding;
+    char message[1024]{};
+    *out_context = sa3_init_impl(&legacy.config, legacy.cpu_threads, legacy.device,
+                                 legacy.text_encoder_encoding, legacy.autoencoder_encoding,
+                                 message, (int)sizeof(message));
+    if (!*out_context)
+        return fail_v1(error, SA3_STATUS_MODEL_ERROR_V1,
+                       message[0] ? message : "failed to create context");
+    return SA3_STATUS_OK_V1;
+}
+
+void SA3_CALL v1_context_unload(sa3_context* context) {
+    if (context) context->pipe.reset();
+}
+
+void SA3_CALL v1_context_destroy(sa3_context* context) {
+    delete context;
+}
+
+void SA3_CALL v1_result_free(sa3_result_v1* result) {
+    if (!result || result->size < sizeof(uint32_t)) return;
+    const uint32_t caller_size = result->size;
+    if (caller_size >= offsetof(sa3_result_v1, samples) + sizeof(result->samples) && result->samples)
+        std::free(result->samples);
+    std::memset(result, 0, std::min<size_t>(caller_size, sizeof(*result)));
+    result->size = caller_size;
+    if (caller_size >= offsetof(sa3_result_v1, layout) + sizeof(result->layout))
+        result->layout = SA3_AUDIO_PLANAR_V1;
+}
+
+sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
+                                    const sa3_request_v1* request,
+                                    sa3_result_v1* result,
+                                    sa3_error_v1* error) {
+    clear_v1_error(error);
+    if (!context || !has_v1_size(request) || !has_v1_size(result))
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "context, full V1 request, and full V1 result are required");
+    if (result->samples)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "result already owns audio; call result_free before reusing it");
+    if (request->steps <= 0 || !std::isfinite(request->cfg_scale) ||
+        !std::isfinite(request->generation_tail_padding_seconds) ||
+        !std::isfinite(request->continuation_tail_padding_seconds) ||
+        request->generation_tail_padding_seconds < 0.0f ||
+        request->continuation_tail_padding_seconds < 0.0f)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid steps, CFG, or tail padding");
+    const char* distribution = v1_distribution_name(request->distribution_shift);
+    if (!distribution)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "unknown distribution shift");
+    for (float value : request->distribution_shift_params)
+        if (!std::isfinite(value))
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                           "distribution shift parameters must be finite");
+    if (request->residency != SA3_RESIDENCY_FRUGAL_V1 &&
+        request->residency != SA3_RESIDENCY_RESIDENT_V1)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "unknown residency mode");
+
+    int target_samples = 0;
+    int source_samples_44100 = 0;
+    int frames = 1;
+    const bool needs_input = request->operation == SA3_OPERATION_TRANSFORM_V1 ||
+                             request->operation == SA3_OPERATION_CONTINUE_V1;
+    if (request->operation == SA3_OPERATION_GENERATE_V1) {
+        if (!seconds_to_samples(request->duration_seconds, target_samples))
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "generation duration is out of range");
+        frames = std::max(1, (target_samples + 4095) / 4096);
+        if (frames & 1) ++frames;
+    } else if (needs_input) {
+        if (!has_v1_size(&request->input_audio) || !request->input_audio.samples ||
+            request->input_audio.n_samples == 0 || request->input_audio.n_channels == 0 ||
+            request->input_audio.sample_rate == 0 ||
+            request->input_audio.n_samples > (uint64_t)std::numeric_limits<int>::max() ||
+            request->input_audio.n_channels > (uint32_t)std::numeric_limits<int>::max())
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "valid input audio is required");
+        if (request->input_audio.layout != SA3_AUDIO_PLANAR_V1 &&
+            request->input_audio.layout != SA3_AUDIO_INTERLEAVED_V1)
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "unknown input audio layout");
+        if (!std::isfinite(request->transform_noise_level) ||
+            request->transform_noise_level < 0.0f || request->transform_noise_level > 1.0f)
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                           "transform noise level must be finite and in [0, 1]");
+        const double resampled = std::round((double)request->input_audio.n_samples * 44100.0 /
+                                            (double)request->input_audio.sample_rate);
+        if (resampled < 1.0 || resampled > (double)std::numeric_limits<int>::max())
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "input audio duration is out of range");
+        source_samples_44100 = (int)resampled;
+        target_samples = source_samples_44100;
+        if (request->operation == SA3_OPERATION_CONTINUE_V1) {
+            int added_samples = 0;
+            if (!seconds_to_samples(request->duration_seconds, added_samples) ||
+                added_samples > std::numeric_limits<int>::max() - source_samples_44100)
+                return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "continuation duration is out of range");
+            target_samples += added_samples;
+        }
+    } else {
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "unknown generation operation");
+    }
+
+    if (request->encode_chunk_size < 0 || request->encode_overlap < 0 ||
+        (request->encode_chunk_size > 0 && request->encode_overlap >= request->encode_chunk_size) ||
+        request->decode_chunk_size < 0 || request->decode_overlap < 0 ||
+        (request->decode_chunk_size > 0 && request->decode_overlap >= request->decode_chunk_size))
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid encode/decode chunk settings");
+
+    if (!has_v1_size(&request->loudness) || !has_v1_size(&request->continuation))
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "embedded loudness or continuation options are too small");
+    sa3_loudness loudness{};
+    loudness.set = 1;
+    loudness.peak_normalize = request->loudness.peak_normalize;
+    loudness.peak_normalize_db = request->loudness.peak_normalize_db;
+    loudness.limiter = request->loudness.limiter;
+    loudness.limiter_ceiling_db = request->loudness.limiter_ceiling_db;
+    loudness.limiter_knee = request->loudness.limiter_knee;
+    loudness.latent_rescale = request->loudness.latent_rescale;
+    loudness.latent_shift = request->loudness.latent_shift;
+
+    sa3_splice splice{};
+    splice.set = 1;
+    splice.splice = request->continuation.splice_source;
+    splice.mask_overlap = request->continuation.mask_overlap_seconds;
+    splice.xfade = request->continuation.crossfade_seconds;
+    splice.gain_match = request->continuation.gain_match;
+
+    std::vector<float> planar_input;
+    const float* input_samples = needs_input ? request->input_audio.samples : nullptr;
+    if (needs_input && request->input_audio.layout == SA3_AUDIO_INTERLEAVED_V1) {
+        const size_t ns = (size_t)request->input_audio.n_samples;
+        const size_t nc = (size_t)request->input_audio.n_channels;
+        if (nc > std::numeric_limits<size_t>::max() / ns)
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "input audio is too large");
+        try {
+            planar_input.resize(ns * nc);
+        } catch (const std::bad_alloc&) {
+            return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory converting input audio");
+        }
+        for (size_t s = 0; s < ns; ++s)
+            for (size_t c = 0; c < nc; ++c)
+                planar_input[c * ns + s] = request->input_audio.samples[s * nc + c];
+        input_samples = planar_input.data();
+    }
+
+    std::vector<const char*> adapter_names;
+    std::vector<float> adapter_strengths;
+    if (request->adapter_count > 0) {
+        if (!request->adapters || request->adapter_stride < sizeof(sa3_adapter_v1) ||
+            request->adapter_count > (uint32_t)std::numeric_limits<int>::max())
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid adapter array");
+        try {
+            adapter_names.reserve(request->adapter_count);
+            adapter_strengths.reserve(request->adapter_count);
+            const auto* bytes = reinterpret_cast<const unsigned char*>(request->adapters);
+            for (uint32_t i = 0; i < request->adapter_count; ++i) {
+                sa3_adapter_v1 adapter{};
+                std::memcpy(&adapter, bytes + (size_t)i * request->adapter_stride, sizeof(adapter));
+                if (adapter.size < sizeof(adapter) || !adapter.path_or_name || !*adapter.path_or_name ||
+                    !std::isfinite(adapter.strength))
+                    return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid adapter entry");
+                adapter_names.push_back(adapter.path_or_name);
+                adapter_strengths.push_back(adapter.strength);
+            }
+        } catch (const std::bad_alloc&) {
+            return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory preparing adapters");
+        }
+    }
+
+    V1CallbackBridge bridge{request};
+    sa3_request_v2 legacy{};
+    legacy.size = sizeof(legacy);
+    legacy.request.request.prompt = request->prompt;
+    legacy.request.request.negative_prompt = request->negative_prompt;
+    legacy.request.request.frames = frames;
+    legacy.request.request.steps = request->steps;
+    legacy.request.request.seed = request->seed;
+    legacy.request.request.cfg_scale = request->cfg_scale;
+    legacy.request.request.duration_padding_sec = request->operation == SA3_OPERATION_GENERATE_V1
+        ? request->generation_tail_padding_seconds : 0.0f;
+    legacy.request.request.keep_models = request->residency == SA3_RESIDENCY_RESIDENT_V1;
+    legacy.request.request.loudness = loudness;
+    legacy.request.request.n_loras = (int)adapter_names.size();
+    legacy.request.request.lora_names = adapter_names.empty() ? nullptr : adapter_names.data();
+    legacy.request.request.lora_strengths = adapter_strengths.empty() ? nullptr : adapter_strengths.data();
+    legacy.request.request.dist_shift = distribution;
+    std::copy(std::begin(request->distribution_shift_params),
+              std::end(request->distribution_shift_params),
+              std::begin(legacy.request.request.dist_shift_params));
+    if (request->on_progress) {
+        legacy.request.request.on_progress = v1_progress_bridge;
+        legacy.request.request.user = &bridge;
+    }
+    if (needs_input) {
+        legacy.request.init_audio.mode = request->operation == SA3_OPERATION_TRANSFORM_V1
+            ? SA3_INIT_AUDIO_A2A : SA3_INIT_AUDIO_INPAINT;
+        legacy.request.init_audio.samples = input_samples;
+        legacy.request.init_audio.n_samp = (int)request->input_audio.n_samples;
+        legacy.request.init_audio.n_ch = (int)request->input_audio.n_channels;
+        legacy.request.init_audio.sample_rate = (int)request->input_audio.sample_rate;
+        legacy.request.init_audio.init_noise_level = request->transform_noise_level;
+        if (request->operation == SA3_OPERATION_CONTINUE_V1) {
+            legacy.request.init_audio.inpaint_start = (float)((double)source_samples_44100 / 44100.0);
+            const double canvas_samples = (double)target_samples +
+                std::round((double)request->continuation_tail_padding_seconds * 44100.0);
+            if (canvas_samples > (double)std::numeric_limits<int>::max())
+                return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "continuation canvas is out of range");
+            legacy.request.init_audio.inpaint_end = (float)(canvas_samples / 44100.0);
+            legacy.splice = splice;
+        }
+    }
+    legacy.request.encode_chunk_size = request->encode_chunk_size;
+    legacy.request.encode_overlap = request->encode_overlap;
+    legacy.request.decode_chunk_size = request->decode_chunk_size;
+    legacy.request.decode_overlap = request->decode_overlap;
+    if (request->should_cancel) {
+        legacy.request.should_cancel = v1_cancel_bridge;
+        legacy.request.cancel_user = &bridge;
+    }
+
+    sa3_audio audio{};
+    char message[1024]{};
+    const int rc = sa3_generate_impl(context, &legacy.request.request, &legacy.request,
+                                     request->operation == SA3_OPERATION_CONTINUE_V1 ? &legacy.splice : nullptr,
+                                     &audio, message, (int)sizeof(message), target_samples, true);
+    if (rc != 0) {
+        const sa3_status_v1 status = status_from_legacy(rc, message);
+        return fail_v1(error, status, message[0] ? message : "generation failed");
+    }
+
+    const uint32_t result_size = result->size;
+    std::memset(result, 0, sizeof(*result));
+    result->size = result_size;
+    result->samples = audio.samples;
+    result->n_samples = (uint64_t)audio.n_samp;
+    result->n_channels = (uint32_t)audio.n_ch;
+    result->sample_rate = (uint32_t)audio.sample_rate;
+    result->layout = SA3_AUDIO_PLANAR_V1;
+    result->seed = audio.seed;
+    const sa3_meta& meta = context->last_meta;
+    result->decoded_peak = meta.decoded_peak;
+    result->peak_normalize_gain_set = meta.peak_normalize_gain_set;
+    result->peak_normalize_gain = meta.peak_normalize_gain;
+    result->limiter_limited_fraction_set = meta.limiter_limited_fraction_set;
+    result->limiter_limited_fraction = meta.limiter_limited_fraction;
+    result->safety_gain_set = meta.safety_gain_set;
+    result->safety_gain = meta.safety_gain;
+    result->final_peak = meta.final_peak;
+    result->latent_factor = meta.latent_factor;
+    result->splice_applied = meta.splice_applied;
+    result->splice_end_seconds = meta.splice_end_seconds;
+    result->splice_crossfade_seconds = meta.splice_xfade_applied;
+    result->splice_gain = meta.splice_gain;
+    result->mask_start_seconds = meta.mask_start_seconds;
+    result->mask_overlap_seconds = meta.mask_overlap_applied;
+    return SA3_STATUS_OK_V1;
+}
+
+sa3_status_v1 SA3_CALL v1_convert_lora(const sa3_lora_convert_v1* options,
+                                        sa3_error_v1* error) {
+    clear_v1_error(error);
+    if (!has_v1_size(options) || !options->safetensors_path || !options->output_gguf_path)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid LoRA conversion options");
+    char message[1024]{};
+    const int rc = sa3_convert_lora(options->safetensors_path, options->json_path,
+                                    options->output_gguf_path, message, (int)sizeof(message));
+    if (rc != 0) {
+        const sa3_status_v1 status = status_from_legacy(rc, message);
+        return fail_v1(error, status, message[0] ? message : "LoRA conversion failed");
+    }
+    return SA3_STATUS_OK_V1;
+}
+
+const sa3_api_v1 k_api_v1 = {
+    sizeof(sa3_api_v1),
+    SA3_ABI_VERSION_1,
+    sa3_version,
+    v1_error_init,
+    v1_context_config_init,
+    v1_request_init,
+    v1_audio_view_init,
+    v1_adapter_init,
+    v1_loudness_init,
+    v1_continuation_init,
+    v1_result_init,
+    v1_lora_convert_init,
+    v1_context_create,
+    v1_context_unload,
+    v1_context_destroy,
+    v1_generate,
+    v1_result_free,
+    v1_convert_lora,
+    {nullptr}
+};
+
+} // namespace
+
 extern "C" {
+
+SA3_API const sa3_api_v1* SA3_CALL sa3_get_api(uint32_t abi_version) {
+    return abi_version == SA3_ABI_VERSION_1 ? &k_api_v1 : nullptr;
+}
 
 SA3_API sa3_context* sa3_init(const sa3_config* cfg, char* err, int err_len) {
     return sa3_init_impl(cfg, 0, nullptr, nullptr, nullptr, err, err_len);
@@ -268,7 +781,7 @@ SA3_API void sa3_unload(sa3_context* ctx) { if (ctx) ctx->pipe.reset(); }   // d
 
 SA3_API void sa3_free(sa3_context* ctx) { delete ctx; }
 
-SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 5"; }
+SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 6 (ABI 1)"; }
 
 SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path,
                              const char* out_gguf_path, char* err, int err_len) {
