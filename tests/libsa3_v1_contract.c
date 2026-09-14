@@ -1,4 +1,4 @@
-#include "libsa3_v1.h"
+#include "libsa3_training_v1.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -19,6 +19,9 @@ _Static_assert(offsetof(sa3_audio_view_v1, size) == 0, "size must lead audio vie
 _Static_assert(offsetof(sa3_request_v1, size) == 0, "size must lead request");
 _Static_assert(offsetof(sa3_result_v1, size) == 0, "size must lead result");
 _Static_assert(offsetof(sa3_api_v1, size) == 0, "size must lead API table");
+_Static_assert(offsetof(sa3_training_config_v1, size) == 0, "size must lead training config");
+_Static_assert(offsetof(sa3_training_step_v1, size) == 0, "size must lead training step");
+_Static_assert(offsetof(sa3_training_result_v1, size) == 0, "size must lead training result");
 
 int main(void) {
     const sa3_api_v1* api = sa3_get_api(SA3_ABI_VERSION_1);
@@ -98,6 +101,43 @@ int main(void) {
     api->result_free(&result);
     CHECK(result.size == sizeof(result));
     CHECK(result.samples == NULL);
+
+    const sa3_training_api_v1* training = sa3_get_training_api(SA3_TRAINING_ABI_VERSION_1);
+    CHECK(training != NULL);
+    CHECK(sa3_get_training_api(0) == NULL);
+    CHECK(sa3_get_training_api(SA3_TRAINING_ABI_VERSION_1 + 1) == NULL);
+    CHECK(training->size >= sizeof(sa3_training_api_v1));
+    CHECK(training->abi_version == SA3_TRAINING_ABI_VERSION_1);
+
+    sa3_training_config_v1 training_config;
+    memset(&training_config, 0xA5, sizeof(training_config));
+    training_config.size = sizeof(training_config);
+    training->config_init(&training_config);
+    CHECK(training_config.steps == 10000);
+    CHECK(training_config.rank == 16);
+    CHECK(training_config.learning_rate == 1.0e-4f);
+    CHECK(training_config.frames == 512);
+    CHECK(training_config.batch_size == 1);
+    CHECK(training_config.checkpoint_every == 500);
+    CHECK(training_config.pre_encode == 1);
+    CHECK(training_config.seed == 42);
+    CHECK(training_config.latents_cache == 1);
+
+    sa3_training_callbacks_v1 training_callbacks;
+    memset(&training_callbacks, 0xA5, sizeof(training_callbacks));
+    training_callbacks.size = sizeof(training_callbacks);
+    training->callbacks_init(&training_callbacks);
+    CHECK(training_callbacks.on_log == NULL);
+    CHECK(training_callbacks.user == NULL);
+
+    sa3_training_result_v1 training_result;
+    memset(&training_result, 0xA5, sizeof(training_result));
+    training_result.size = sizeof(training_result);
+    training->result_init(&training_result);
+    CHECK(training_result.completed_steps == 0);
+    CHECK(training->run(&training_config, &training_callbacks, &training_result, &error)
+          == SA3_STATUS_INVALID_ARGUMENT_V1);
+    CHECK(strstr(error.message, "dataset_dir") != NULL);
 
     puts("libsa3 V1 C ABI contract passed");
     return 0;

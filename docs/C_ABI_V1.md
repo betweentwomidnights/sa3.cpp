@@ -66,12 +66,28 @@ The V1 draft is not merged to `main` until the same sa3.cpp commit passes these 
 - `sa3-ableton-extension`: the embedded C ABI backend on Windows; Generate, Transform, Continue,
   adapter import/selection, cancellation, exact duration, and native-addon unload/reload.
 - `sa3.cpp-ios`: a static device build on the MacBook; context lifecycle, Generate, adapter import,
-  cancellation, exact duration, and audio ownership on simulator and device.
+  cancellation, exact duration, audio ownership, and Training V1 on simulator and device.
 
-Training is intentionally not frozen into the inference table. The current iOS training call stays
-available during this draft, but must move to a separately versioned, size-tagged training table
-before the legacy declarations can be retired. Training evolves independently and should not force
-an inference ABI major bump.
+## Training capability
+
+Training is intentionally not frozen into the inference table. Hosts resolve the independent
+`sa3_get_training_api(SA3_TRAINING_ABI_VERSION_1)` capability from
+`libsa3_training_v1.h`. Training can therefore gain a new major without forcing inference-only
+hosts to migrate.
+
+The training table provides explicit initialized defaults, a size-tagged configuration and result,
+size-tagged optimizer-step reports, cooperative cancellation, log and progress callbacks, and an
+optional audio callback for sandboxed hosts that cannot let libsa3 decode dataset files itself.
+Callback audio may be planar or interleaved; libsa3 copies it before returning to the trainer.
+
+`run` is synchronous and training jobs must be serialized within a process. Both
+`SA3_STATUS_OK_V1` and `SA3_STATUS_CANCELLED_V1` return a valid result. A cancelled training phase
+may have produced a final adapter/checkpoint, while cancellation during pre-encode may not have.
+Callers inspect `cancelled` and `final_adapter` rather than discarding the result.
+
+The optional JSON config is applied first. Every field represented by the initialized V1 config
+then overrides its JSON counterpart, while the JSON remains an escape hatch for advanced trainer
+options not yet represented in V1.
 
 ## Legacy transition
 

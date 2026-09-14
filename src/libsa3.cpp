@@ -226,6 +226,12 @@ static sa3_context* sa3_init_impl(const sa3_config* cfg, int cpu_threads, const 
       catch (...)                     { set_err(err, err_len, "unknown error"); return nullptr; }
 }
 
+extern "C" {
+static int sa3_train_impl(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
+                          sa3_train_result* out, char* err, int err_len,
+                          bool explicit_values);
+}
+
 namespace {
 
 template <typename T>
@@ -700,6 +706,219 @@ sa3_status_v1 SA3_CALL v1_convert_lora(const sa3_lora_convert_v1* options,
     return SA3_STATUS_OK_V1;
 }
 
+void SA3_CALL v1_training_config_init(sa3_training_config_v1* config) {
+    init_v1_struct(config);
+    if (!config || config->size < sizeof(*config)) return;
+    config->steps = 10000;
+    config->rank = 16;
+    config->alpha = 0.0f;
+    config->learning_rate = 1.0e-4f;
+    config->frames = 512;
+    config->duration_seconds = 0.0f;
+    config->batch_size = 1;
+    config->checkpoint_every = 500;
+    config->cpu_threads = 0;
+    config->pre_encode = 1;
+    config->seed = 42;
+    config->evict_text_encoder = 0;
+    config->latents_cache = 1;
+}
+
+void SA3_CALL v1_training_callbacks_init(sa3_training_callbacks_v1* callbacks) {
+    init_v1_struct(callbacks);
+}
+
+void SA3_CALL v1_training_result_init(sa3_training_result_v1* result) {
+    init_v1_struct(result);
+}
+
+struct V1TrainingBridge {
+    const sa3_training_callbacks_v1* callbacks = nullptr;
+    std::vector<float> audio_copy;
+    std::string audio_error;
+};
+
+void v1_training_log_bridge(void* user, const char* line) {
+    auto* bridge = static_cast<V1TrainingBridge*>(user);
+    if (bridge && bridge->callbacks && bridge->callbacks->on_log)
+        bridge->callbacks->on_log(bridge->callbacks->user, line);
+}
+
+void v1_training_step_bridge(void* user, const sa3_train_step* legacy) {
+    auto* bridge = static_cast<V1TrainingBridge*>(user);
+    if (!bridge || !bridge->callbacks || !bridge->callbacks->on_step || !legacy) return;
+    sa3_training_step_v1 step{};
+    step.size = sizeof(step);
+    step.epoch = legacy->epoch;
+    step.step = legacy->step;
+    step.max_steps = legacy->max_steps;
+    step.id = legacy->id;
+    step.prompt = legacy->prompt;
+    step.mask = legacy->mask;
+    step.timestep = legacy->t;
+    step.learning_rate = legacy->learning_rate;
+    step.loss = legacy->loss;
+    step.gradient_norm = legacy->grad_norm;
+    step.step_seconds = legacy->step_seconds;
+    step.cfg_dropped = legacy->cfg_dropped;
+    step.updated = legacy->updated;
+    step.generated_frames = legacy->n_gen;
+    step.context_frames = legacy->n_ctx;
+    bridge->callbacks->on_step(bridge->callbacks->user, &step);
+}
+
+int v1_training_cancel_bridge(void* user) {
+    auto* bridge = static_cast<V1TrainingBridge*>(user);
+    return bridge && bridge->callbacks && bridge->callbacks->should_cancel
+         ? bridge->callbacks->should_cancel(bridge->callbacks->user) : 0;
+}
+
+int v1_training_audio_bridge(void* user, const char* audio_path, int sample_rate, int channels,
+                             const float** samples, int* n_samp) {
+    auto* bridge = static_cast<V1TrainingBridge*>(user);
+    if (!bridge || !bridge->callbacks || !bridge->callbacks->load_audio) return 0;
+    sa3_audio_view_v1 audio{};
+    audio.size = sizeof(audio);
+    v1_audio_view_init(&audio);
+    const int32_t supplied = bridge->callbacks->load_audio(
+        bridge->callbacks->user, audio_path, (uint32_t)sample_rate, (uint32_t)channels, &audio);
+    if (!supplied) return 0;
+    if (!has_v1_size(&audio) || !audio.samples || audio.n_samples == 0 ||
+        audio.n_samples > (uint64_t)std::numeric_limits<int>::max() ||
+        audio.n_channels != (uint32_t)channels || audio.sample_rate != (uint32_t)sample_rate ||
+        (audio.layout != SA3_AUDIO_PLANAR_V1 && audio.layout != SA3_AUDIO_INTERLEAVED_V1)) {
+        bridge->audio_error = "training audio callback returned an invalid or mismatched audio view";
+        *samples = nullptr;
+        *n_samp = 0;
+        return 1;
+    }
+    const size_t ns = (size_t)audio.n_samples;
+    const size_t nc = (size_t)audio.n_channels;
+    if (nc > std::numeric_limits<size_t>::max() / ns) {
+        bridge->audio_error = "training audio callback returned too many samples";
+        *samples = nullptr;
+        *n_samp = 0;
+        return 1;
+    }
+    try {
+        bridge->audio_copy.resize(ns * nc);
+    } catch (const std::bad_alloc&) {
+        bridge->audio_error = "out of memory copying training callback audio";
+        *samples = nullptr;
+        *n_samp = 0;
+        return 1;
+    }
+    if (audio.layout == SA3_AUDIO_PLANAR_V1) {
+        std::copy(audio.samples, audio.samples + ns * nc, bridge->audio_copy.begin());
+    } else {
+        for (size_t s = 0; s < ns; ++s)
+            for (size_t c = 0; c < nc; ++c)
+                bridge->audio_copy[c * ns + s] = audio.samples[s * nc + c];
+    }
+    *samples = bridge->audio_copy.data();
+    *n_samp = (int)audio.n_samples;
+    return 1;
+}
+
+sa3_status_v1 training_failure_status(int code, const char* message) {
+    if (code == 1) return SA3_STATUS_INVALID_ARGUMENT_V1;
+    if (message && (std::strstr(message, "required") || std::strstr(message, "invalid") ||
+                    std::strstr(message, "must be")))
+        return SA3_STATUS_INVALID_ARGUMENT_V1;
+    if (message && (std::strstr(message, "dataset") || std::strstr(message, "file") ||
+                    std::strstr(message, "path") || std::strstr(message, "directory")))
+        return SA3_STATUS_IO_ERROR_V1;
+    return SA3_STATUS_MODEL_ERROR_V1;
+}
+
+sa3_status_v1 SA3_CALL v1_training_run(const sa3_training_config_v1* config,
+                                        const sa3_training_callbacks_v1* callbacks,
+                                        sa3_training_result_v1* result,
+                                        sa3_error_v1* error) {
+    clear_v1_error(error);
+    if (!has_v1_size(config) || !has_v1_size(result) ||
+        (callbacks && !has_v1_size(callbacks)))
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "full V1 training config and result are required");
+    if (!config->dataset_dir || !*config->dataset_dir)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "training dataset_dir is required");
+    if (config->steps <= 0 || config->rank <= 0 ||
+        !std::isfinite(config->alpha) || config->alpha < 0.0f ||
+        !std::isfinite(config->learning_rate) || config->learning_rate <= 0.0f ||
+        config->frames <= 0 || !std::isfinite(config->duration_seconds) ||
+        config->duration_seconds < 0.0f || config->batch_size <= 0 ||
+        config->checkpoint_every < 0 || config->cpu_threads < 0 || config->seed < 0)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid V1 training configuration");
+
+    const uint32_t result_size = result->size;
+    std::memset(result, 0, sizeof(*result));
+    result->size = result_size;
+
+    sa3_train_config legacy{};
+    legacy.models_dir = config->models_dir;
+    legacy.dataset_dir = config->dataset_dir;
+    legacy.output_dir = config->output_dir;
+    legacy.config_path = config->config_path;
+    legacy.latents_dir = config->latents_dir;
+    legacy.latents_cache_dir = config->latents_cache_dir;
+    legacy.prompt_config_path = config->prompt_config_path;
+    legacy.resume_path = config->resume_path;
+    legacy.variant = config->variant;
+    legacy.encoding = config->dit_encoding;
+    legacy.text_encoder_encoding = config->text_encoder_encoding;
+    legacy.autoencoder_encoding = config->autoencoder_encoding;
+    legacy.adapter_type = config->adapter_type;
+    legacy.lora_scope = config->lora_scope;
+    legacy.device = config->device;
+    legacy.steps = config->steps;
+    legacy.rank = config->rank;
+    legacy.alpha = config->alpha;
+    legacy.learning_rate = config->learning_rate;
+    legacy.frames = config->frames;
+    legacy.duration_sec = config->duration_seconds;
+    legacy.batch_size = config->batch_size;
+    legacy.checkpoint_every = config->checkpoint_every;
+    legacy.cpu_threads = config->cpu_threads;
+    legacy.pre_encode = config->pre_encode;
+    legacy.seed = config->seed;
+    legacy.evict_text_encoder = config->evict_text_encoder;
+    legacy.latents_cache = config->latents_cache;
+
+    V1TrainingBridge bridge{callbacks};
+    sa3_train_hooks hooks{};
+    const sa3_train_hooks* hooks_ptr = nullptr;
+    if (callbacks) {
+        hooks.user = &bridge;
+        hooks.on_log = callbacks->on_log ? v1_training_log_bridge : nullptr;
+        hooks.on_step = callbacks->on_step ? v1_training_step_bridge : nullptr;
+        hooks.should_cancel = callbacks->should_cancel ? v1_training_cancel_bridge : nullptr;
+        hooks.load_audio = callbacks->load_audio ? v1_training_audio_bridge : nullptr;
+        hooks.command_line = callbacks->command_line;
+        hooks_ptr = &hooks;
+    }
+
+    sa3_train_result legacy_result{};
+    char message[1024]{};
+    const int rc = sa3_train_impl(&legacy, hooks_ptr, &legacy_result,
+                                  message, (int)sizeof(message), true);
+    if (!bridge.audio_error.empty())
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, bridge.audio_error);
+    if (rc != 0) {
+        const sa3_status_v1 status = training_failure_status(rc, message);
+        return fail_v1(error, status, message[0] ? message : "training failed");
+    }
+
+    result->completed_steps = legacy_result.steps;
+    result->cancelled = legacy_result.cancelled;
+    result->mean_step_seconds = legacy_result.mean_step_seconds;
+    std::memcpy(result->final_adapter, legacy_result.final_adapter, sizeof(result->final_adapter));
+    std::memcpy(result->last_checkpoint, legacy_result.last_checkpoint, sizeof(result->last_checkpoint));
+    std::memcpy(result->preview_command, legacy_result.preview_command, sizeof(result->preview_command));
+    if (result->cancelled)
+        return fail_v1(error, SA3_STATUS_CANCELLED_V1, "training cancelled");
+    return SA3_STATUS_OK_V1;
+}
+
 const sa3_api_v1 k_api_v1 = {
     sizeof(sa3_api_v1),
     SA3_ABI_VERSION_1,
@@ -722,12 +941,27 @@ const sa3_api_v1 k_api_v1 = {
     {nullptr}
 };
 
+const sa3_training_api_v1 k_training_api_v1 = {
+    sizeof(sa3_training_api_v1),
+    SA3_TRAINING_ABI_VERSION_1,
+    sa3_version,
+    v1_training_config_init,
+    v1_training_callbacks_init,
+    v1_training_result_init,
+    v1_training_run,
+    {nullptr}
+};
+
 } // namespace
 
 extern "C" {
 
 SA3_API const sa3_api_v1* SA3_CALL sa3_get_api(uint32_t abi_version) {
     return abi_version == SA3_ABI_VERSION_1 ? &k_api_v1 : nullptr;
+}
+
+SA3_API const sa3_training_api_v1* SA3_CALL sa3_get_training_api(uint32_t abi_version) {
+    return abi_version == SA3_TRAINING_ABI_VERSION_1 ? &k_training_api_v1 : nullptr;
 }
 
 SA3_API sa3_context* sa3_init(const sa3_config* cfg, char* err, int err_len) {
@@ -806,8 +1040,9 @@ static void copy_field(char* dst, size_t cap, const std::string& src) {
     dst[n] = '\0';
 }
 
-SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
-                      sa3_train_result* out, char* err, int err_len) {
+static int sa3_train_impl(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
+                          sa3_train_result* out, char* err, int err_len,
+                          bool explicit_values) {
     if (!cfg) { set_err(err, err_len, "null argument"); return 1; }
     if (out) std::memset(out, 0, sizeof(*out));
     try {
@@ -835,20 +1070,36 @@ SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
         str(cfg->lora_scope,     tc.lora_scope);
         str(cfg->latents_cache_dir, tc.latents_cache_dir);
 
-        if (cfg->steps > 0)            tc.max_steps = cfg->steps;
-        if (cfg->rank > 0)             tc.rank = cfg->rank;
-        if (cfg->alpha > 0.0f)         tc.alpha = cfg->alpha;
-        if (cfg->learning_rate > 0.0f) tc.learning_rate = cfg->learning_rate;
-        if (cfg->frames > 0)           tc.frames = cfg->frames;
-        if (cfg->duration_sec > 0.0f)  tc.duration_sec = cfg->duration_sec;
-        if (cfg->batch_size > 0)       tc.batch_size = cfg->batch_size;
-        if (cfg->checkpoint_every > 0) tc.checkpoint_every = cfg->checkpoint_every;
-        if (cfg->checkpoint_every < 0) tc.checkpoint_every = 0;   // negative = no intermediate writes
-        if (cfg->cpu_threads > 0)      tc.cpu_threads = cfg->cpu_threads;
-        if (cfg->pre_encode)           tc.pre_encode = true;
-        if (cfg->evict_text_encoder)   tc.evict_text_encoder = true;
-        if (cfg->latents_cache < 0)    tc.latents_cache = false;
-        if (cfg->seed != 0)            tc.seed = (unsigned long long)cfg->seed;
+        if (explicit_values) {
+            tc.max_steps = cfg->steps;
+            tc.rank = cfg->rank;
+            tc.alpha = cfg->alpha;
+            tc.learning_rate = cfg->learning_rate;
+            tc.frames = cfg->frames;
+            tc.duration_sec = cfg->duration_sec;
+            tc.batch_size = cfg->batch_size;
+            tc.checkpoint_every = cfg->checkpoint_every;
+            tc.cpu_threads = cfg->cpu_threads;
+            tc.pre_encode = cfg->pre_encode != 0;
+            tc.evict_text_encoder = cfg->evict_text_encoder != 0;
+            tc.latents_cache = cfg->latents_cache != 0;
+            tc.seed = (unsigned long long)cfg->seed;
+        } else {
+            if (cfg->steps > 0)            tc.max_steps = cfg->steps;
+            if (cfg->rank > 0)             tc.rank = cfg->rank;
+            if (cfg->alpha > 0.0f)         tc.alpha = cfg->alpha;
+            if (cfg->learning_rate > 0.0f) tc.learning_rate = cfg->learning_rate;
+            if (cfg->frames > 0)           tc.frames = cfg->frames;
+            if (cfg->duration_sec > 0.0f)  tc.duration_sec = cfg->duration_sec;
+            if (cfg->batch_size > 0)       tc.batch_size = cfg->batch_size;
+            if (cfg->checkpoint_every > 0) tc.checkpoint_every = cfg->checkpoint_every;
+            if (cfg->checkpoint_every < 0) tc.checkpoint_every = 0;
+            if (cfg->cpu_threads > 0)      tc.cpu_threads = cfg->cpu_threads;
+            if (cfg->pre_encode)           tc.pre_encode = true;
+            if (cfg->evict_text_encoder)   tc.evict_text_encoder = true;
+            if (cfg->latents_cache < 0)    tc.latents_cache = false;
+            if (cfg->seed != 0)            tc.seed = (unsigned long long)cfg->seed;
+        }
 
         if (tc.dataset_dir.empty()) { set_err(err, err_len, "dataset_dir is required"); return 2; }
         str(cfg->device, tc.device);
@@ -924,6 +1175,11 @@ SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
         return 0;
     } catch (const std::exception& e) { set_err(err, err_len, e.what()); return 10; }
       catch (...)                     { set_err(err, err_len, "unknown error"); return 10; }
+}
+
+SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
+                      sa3_train_result* out, char* err, int err_len) {
+    return sa3_train_impl(cfg, hooks, out, err, err_len, false);
 }
 
 } // extern "C"

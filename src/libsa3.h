@@ -34,6 +34,7 @@ typedef struct sa3_context sa3_context;
 /* Production V1 API. The legacy declarations below remain temporarily while
  * controlled consumers migrate on the draft integration PR. */
 #include "libsa3_v1.h"
+#include "libsa3_training_v1.h"
 
 /* Model set + backend selection. Any NULL string falls back to a default:
  *   models_dir   -> $SA3_MODELS_DIR, else "models"
