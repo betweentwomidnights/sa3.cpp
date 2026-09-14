@@ -81,16 +81,19 @@ hosts to migrate.
 The training table provides explicit initialized defaults, a size-tagged configuration and result,
 size-tagged optimizer-step reports, cooperative cancellation, log and progress callbacks, and an
 optional audio callback for sandboxed hosts that cannot let libsa3 decode dataset files itself.
-Callback audio may be planar or interleaved; libsa3 copies it before returning to the trainer.
+Callback audio may be planar or interleaved. A tri-state result distinguishes fallback-to-libsa3,
+success, and a host decode error. Successful buffers carry an opaque ownership token and libsa3
+calls the paired release callback exactly once after copying, even if validation or allocation
+fails. This makes buffer lifetime explicit for Swift and other managed-language hosts.
 
 `run` is synchronous and training jobs must be serialized within a process. Both
 `SA3_STATUS_OK_V1` and `SA3_STATUS_CANCELLED_V1` return a valid result. A cancelled training phase
 may have produced a final adapter/checkpoint, while cancellation during pre-encode may not have.
 Callers inspect `cancelled` and `final_adapter` rather than discarding the result.
 
-The optional JSON config is applied first. Every field represented by the initialized V1 config
-then overrides its JSON counterpart, while the JSON remains an escape hatch for advanced trainer
-options not yet represented in V1.
+The optional JSON config is applied first. Initialized scalar fields and non-null string fields in
+the V1 config then override their JSON counterparts, while the JSON remains an escape hatch for
+advanced trainer options not yet represented in V1.
 
 ## Legacy transition
 

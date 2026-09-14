@@ -25,6 +25,7 @@ typedef struct {
     const char* latents_cache_dir;
     const char* prompt_config_path;
     const char* resume_path;
+    const char* command_line;
 
     const char* variant;
     const char* dit_encoding;
@@ -74,15 +75,34 @@ typedef void (SA3_CALL *sa3_training_step_callback_v1)(void* user,
                                                         const sa3_training_step_v1* step);
 typedef int32_t (SA3_CALL *sa3_training_cancel_callback_v1)(void* user);
 
-/* Optional sandboxed-host decoder. Return non-zero with a complete borrowed audio view to supply
- * audio, or zero to let libsa3 read audio_path. The requested sample rate and channel count must
- * be returned unchanged. Planar and interleaved views are accepted and copied before return. */
-typedef int32_t (SA3_CALL *sa3_training_audio_callback_v1)(
+typedef int32_t sa3_training_audio_status_v1;
+enum {
+    SA3_TRAINING_AUDIO_ERROR_V1       = -1,
+    SA3_TRAINING_AUDIO_NOT_HANDLED_V1 = 0,
+    SA3_TRAINING_AUDIO_READY_V1       = 1
+};
+
+/* One host-decoded buffer. On READY, ownership transfers temporarily to libsa3 and release_audio
+ * is called exactly once after the samples have been copied, including when validation or copying
+ * fails. The opaque owner is never inspected by libsa3. This type is frozen for Training ABI V1. */
+typedef struct {
+    uint32_t size;
+    sa3_audio_view_v1 audio;
+    void* owner;
+} sa3_training_audio_buffer_v1;
+
+/* Optional sandboxed-host decoder. NOT_HANDLED lets libsa3 read audio_path. READY supplies planar
+ * or interleaved audio at the requested rate/channel count. ERROR stops the run and may populate
+ * error with a typed failure; it does not transfer ownership. load_audio and release_audio must be
+ * installed together. */
+typedef sa3_training_audio_status_v1 (SA3_CALL *sa3_training_audio_callback_v1)(
     void* user,
     const char* audio_path,
     uint32_t requested_sample_rate,
     uint32_t requested_channels,
-    sa3_audio_view_v1* out_audio);
+    sa3_training_audio_buffer_v1* out_audio,
+    sa3_error_v1* error);
+typedef void (SA3_CALL *sa3_training_audio_release_callback_v1)(void* user, void* owner);
 
 typedef struct {
     uint32_t size;
@@ -90,8 +110,8 @@ typedef struct {
     sa3_training_step_callback_v1 on_step;
     sa3_training_cancel_callback_v1 should_cancel;
     sa3_training_audio_callback_v1 load_audio;
+    sa3_training_audio_release_callback_v1 release_audio;
     void* user;
-    const char* command_line;
 } sa3_training_callbacks_v1;
 
 /* Caller-owned fixed-size result. A cancelled run may still return a final adapter and checkpoint.
@@ -122,7 +142,7 @@ typedef struct sa3_training_api_v1 {
                                   sa3_training_result_v1* result,
                                   sa3_error_v1* error);
 
-    void* reserved[16];
+    sa3_reserved_function_v1 reserved[16];
 } sa3_training_api_v1;
 
 /* Frozen prefixes for the initial Training V1 publication; see libsa3_v1.h. */
@@ -130,8 +150,10 @@ typedef struct sa3_training_api_v1 {
     ((uint32_t)(offsetof(sa3_training_config_v1, latents_cache) + sizeof(((sa3_training_config_v1*)0)->latents_cache)))
 #define SA3_TRAINING_STEP_V1_MIN_SIZE \
     ((uint32_t)(offsetof(sa3_training_step_v1, context_frames) + sizeof(((sa3_training_step_v1*)0)->context_frames)))
+#define SA3_TRAINING_AUDIO_BUFFER_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_training_audio_buffer_v1, owner) + sizeof(((sa3_training_audio_buffer_v1*)0)->owner)))
 #define SA3_TRAINING_CALLBACKS_V1_MIN_SIZE \
-    ((uint32_t)(offsetof(sa3_training_callbacks_v1, command_line) + sizeof(((sa3_training_callbacks_v1*)0)->command_line)))
+    ((uint32_t)(offsetof(sa3_training_callbacks_v1, user) + sizeof(((sa3_training_callbacks_v1*)0)->user)))
 #define SA3_TRAINING_RESULT_V1_MIN_SIZE \
     ((uint32_t)(offsetof(sa3_training_result_v1, preview_command) + sizeof(((sa3_training_result_v1*)0)->preview_command)))
 #define SA3_TRAINING_API_V1_MIN_SIZE \

@@ -154,6 +154,7 @@ typedef struct {
 
 typedef void (SA3_CALL *sa3_progress_callback_v1)(void* user, const sa3_progress_v1* progress);
 typedef int32_t (SA3_CALL *sa3_cancel_callback_v1)(void* user);
+typedef void (SA3_CALL *sa3_reserved_function_v1)(void);
 
 /* duration_seconds means exact output duration for Generate and seconds to add
  * for Continue. Transform follows the input duration. libsa3 owns model-frame
@@ -258,7 +259,7 @@ typedef struct sa3_api_v1 {
     sa3_status_v1 (SA3_CALL *convert_lora)(const sa3_lora_convert_v1* options,
                                            sa3_error_v1* error);
 
-    void* reserved[16];
+    sa3_reserved_function_v1 reserved[16];
 } sa3_api_v1;
 
 /* Frozen V1 prefixes. Where a type is appendable, these expressions must continue to name the

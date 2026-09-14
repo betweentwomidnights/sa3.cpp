@@ -21,7 +21,16 @@ _Static_assert(offsetof(sa3_result_v1, size) == 0, "size must lead result");
 _Static_assert(offsetof(sa3_api_v1, size) == 0, "size must lead API table");
 _Static_assert(offsetof(sa3_training_config_v1, size) == 0, "size must lead training config");
 _Static_assert(offsetof(sa3_training_step_v1, size) == 0, "size must lead training step");
+_Static_assert(offsetof(sa3_training_audio_buffer_v1, size) == 0,
+               "size must lead training audio buffer");
 _Static_assert(offsetof(sa3_training_result_v1, size) == 0, "size must lead training result");
+
+static sa3_training_audio_status_v1 SA3_CALL test_training_audio_loader(
+    void* user, const char* path, uint32_t sample_rate, uint32_t channels,
+    sa3_training_audio_buffer_v1* audio, sa3_error_v1* error) {
+    (void)user; (void)path; (void)sample_rate; (void)channels; (void)audio; (void)error;
+    return SA3_TRAINING_AUDIO_NOT_HANDLED_V1;
+}
 
 int main(void) {
     const sa3_api_v1* api = sa3_get_api(SA3_ABI_VERSION_1);
@@ -146,6 +155,18 @@ int main(void) {
     CHECK(training_config.seed == 42);
     CHECK(training_config.latents_cache == 1);
 
+    struct future_training_config {
+        sa3_training_config_v1 known;
+        uint64_t future_tail;
+    } future_training_config;
+    memset(&future_training_config, 0xA5, sizeof(future_training_config));
+    future_training_config.known.size = sizeof(future_training_config);
+    future_training_config.future_tail = UINT64_C(0x123456789ABCDEF0);
+    training->config_init(&future_training_config.known);
+    CHECK(future_training_config.known.size == sizeof(future_training_config));
+    CHECK(future_training_config.known.steps == 10000);
+    CHECK(future_training_config.future_tail == UINT64_C(0x123456789ABCDEF0));
+
     sa3_training_callbacks_v1 training_callbacks;
     memset(&training_callbacks, 0xA5, sizeof(training_callbacks));
     training_callbacks.size = sizeof(training_callbacks);
@@ -158,9 +179,26 @@ int main(void) {
     training_result.size = sizeof(training_result);
     training->result_init(&training_result);
     CHECK(training_result.completed_steps == 0);
+
+    struct future_training_result {
+        sa3_training_result_v1 known;
+        uint64_t future_tail;
+    } future_training_result;
+    memset(&future_training_result, 0xA5, sizeof(future_training_result));
+    future_training_result.known.size = sizeof(future_training_result);
+    future_training_result.future_tail = UINT64_C(0x123456789ABCDEF0);
+    training->result_init(&future_training_result.known);
+    CHECK(future_training_result.known.size == sizeof(future_training_result));
+    CHECK(future_training_result.known.completed_steps == 0);
+    CHECK(future_training_result.future_tail == UINT64_C(0x123456789ABCDEF0));
     CHECK(training->run(&training_config, &training_callbacks, &training_result, &error)
           == SA3_STATUS_INVALID_ARGUMENT_V1);
     CHECK(strstr(error.message, "dataset_dir") != NULL);
+
+    training_callbacks.load_audio = test_training_audio_loader;
+    CHECK(training->run(&training_config, &training_callbacks, &training_result, &error)
+          == SA3_STATUS_INVALID_ARGUMENT_V1);
+    CHECK(strstr(error.message, "release_audio") != NULL);
 
     puts("libsa3 V1 C ABI contract passed");
     return 0;

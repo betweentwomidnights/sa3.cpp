@@ -740,7 +740,23 @@ struct V1TrainingBridge {
     const sa3_training_callbacks_v1* callbacks = nullptr;
     std::vector<float> audio_copy;
     std::string audio_error;
+    sa3_status_v1 audio_status = SA3_STATUS_OK_V1;
 };
+
+sa3_status_v1 v1_training_audio_error_status(sa3_status_v1 status) {
+    switch (status) {
+        case SA3_STATUS_INVALID_ARGUMENT_V1:
+        case SA3_STATUS_UNSUPPORTED_ABI_V1:
+        case SA3_STATUS_CANCELLED_V1:
+        case SA3_STATUS_MODEL_ERROR_V1:
+        case SA3_STATUS_IO_ERROR_V1:
+        case SA3_STATUS_OUT_OF_MEMORY_V1:
+        case SA3_STATUS_INTERNAL_ERROR_V1:
+            return status;
+        default:
+            return SA3_STATUS_IO_ERROR_V1;
+    }
+}
 
 void v1_training_log_bridge(void* user, const char* line) {
     auto* bridge = static_cast<V1TrainingBridge*>(user);
@@ -781,35 +797,68 @@ int v1_training_audio_bridge(void* user, const char* audio_path, int sample_rate
                              const float** samples, int* n_samp) {
     auto* bridge = static_cast<V1TrainingBridge*>(user);
     if (!bridge || !bridge->callbacks || !bridge->callbacks->load_audio) return 0;
-    sa3_audio_view_v1 audio{};
-    audio.size = sizeof(audio);
-    v1_audio_view_init(&audio);
-    const int32_t supplied = bridge->callbacks->load_audio(
-        bridge->callbacks->user, audio_path, (uint32_t)sample_rate, (uint32_t)channels, &audio);
-    if (!supplied) return 0;
-    if (!has_v1_size(&audio, SA3_AUDIO_VIEW_V1_MIN_SIZE) || !audio.samples || audio.n_samples == 0 ||
+    sa3_training_audio_buffer_v1 buffer{};
+    buffer.size = sizeof(buffer);
+    buffer.audio.size = sizeof(buffer.audio);
+    v1_audio_view_init(&buffer.audio);
+    sa3_error_v1 callback_error{};
+    callback_error.size = sizeof(callback_error);
+    v1_error_init(&callback_error);
+    const sa3_training_audio_status_v1 supplied = bridge->callbacks->load_audio(
+        bridge->callbacks->user, audio_path, (uint32_t)sample_rate, (uint32_t)channels,
+        &buffer, &callback_error);
+    if (supplied == SA3_TRAINING_AUDIO_NOT_HANDLED_V1) return 0;
+    if (supplied == SA3_TRAINING_AUDIO_ERROR_V1) {
+        const char* begin = callback_error.message;
+        const char* end = std::find(begin, begin + sizeof(callback_error.message), '\0');
+        bridge->audio_error = begin != end
+                            ? std::string(begin, end) : "host failed to decode training audio";
+        bridge->audio_status = v1_training_audio_error_status(callback_error.code);
+        *samples = nullptr;
+        *n_samp = 0;
+        return 1;
+    }
+    if (supplied != SA3_TRAINING_AUDIO_READY_V1) {
+        bridge->audio_error = "training audio callback returned an unknown status";
+        bridge->audio_status = SA3_STATUS_INVALID_ARGUMENT_V1;
+        *samples = nullptr;
+        *n_samp = 0;
+        return 1;
+    }
+    const auto release = [&]() {
+        bridge->callbacks->release_audio(bridge->callbacks->user, buffer.owner);
+    };
+    const sa3_audio_view_v1& audio = buffer.audio;
+    if (!has_v1_size(&buffer, SA3_TRAINING_AUDIO_BUFFER_V1_MIN_SIZE) ||
+        !has_v1_size(&audio, SA3_AUDIO_VIEW_V1_MIN_SIZE) || !audio.samples || audio.n_samples == 0 ||
         audio.n_samples > (uint64_t)std::numeric_limits<int>::max() ||
         audio.n_channels != (uint32_t)channels || audio.sample_rate != (uint32_t)sample_rate ||
         (audio.layout != SA3_AUDIO_PLANAR_V1 && audio.layout != SA3_AUDIO_INTERLEAVED_V1)) {
         bridge->audio_error = "training audio callback returned an invalid or mismatched audio view";
+        bridge->audio_status = SA3_STATUS_INVALID_ARGUMENT_V1;
         *samples = nullptr;
         *n_samp = 0;
+        release();
         return 1;
     }
     const size_t ns = (size_t)audio.n_samples;
     const size_t nc = (size_t)audio.n_channels;
     if (nc > std::numeric_limits<size_t>::max() / ns) {
         bridge->audio_error = "training audio callback returned too many samples";
+        bridge->audio_status = SA3_STATUS_INVALID_ARGUMENT_V1;
         *samples = nullptr;
         *n_samp = 0;
+        release();
         return 1;
     }
     try {
         bridge->audio_copy.resize(ns * nc);
     } catch (const std::bad_alloc&) {
         bridge->audio_error = "out of memory copying training callback audio";
+        bridge->audio_status = SA3_STATUS_OUT_OF_MEMORY_V1;
         *samples = nullptr;
         *n_samp = 0;
+        release();
         return 1;
     }
     if (audio.layout == SA3_AUDIO_PLANAR_V1) {
@@ -819,6 +868,7 @@ int v1_training_audio_bridge(void* user, const char* audio_path, int sample_rate
             for (size_t c = 0; c < nc; ++c)
                 bridge->audio_copy[c * ns + s] = audio.samples[s * nc + c];
     }
+    release();
     *samples = bridge->audio_copy.data();
     *n_samp = (int)audio.n_samples;
     return 1;
@@ -845,6 +895,10 @@ sa3_status_v1 SA3_CALL v1_training_run(const sa3_training_config_v1* config,
         (callbacks && !has_v1_size(callbacks, SA3_TRAINING_CALLBACKS_V1_MIN_SIZE)))
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
                        "full V1 training config and result are required");
+    if (callbacks && ((callbacks->load_audio == nullptr) !=
+                      (callbacks->release_audio == nullptr)))
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "training load_audio and release_audio must be installed together");
     if (!config->dataset_dir || !*config->dataset_dir)
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "training dataset_dir is required");
     if (config->steps <= 0 || config->rank <= 0 ||
@@ -898,7 +952,10 @@ sa3_status_v1 SA3_CALL v1_training_run(const sa3_training_config_v1* config,
         hooks.on_step = callbacks->on_step ? v1_training_step_bridge : nullptr;
         hooks.should_cancel = callbacks->should_cancel ? v1_training_cancel_bridge : nullptr;
         hooks.load_audio = callbacks->load_audio ? v1_training_audio_bridge : nullptr;
-        hooks.command_line = callbacks->command_line;
+        hooks_ptr = &hooks;
+    }
+    if (config->command_line) {
+        hooks.command_line = config->command_line;
         hooks_ptr = &hooks;
     }
 
@@ -907,7 +964,7 @@ sa3_status_v1 SA3_CALL v1_training_run(const sa3_training_config_v1* config,
     const int rc = sa3_train_impl(&legacy, hooks_ptr, &legacy_result,
                                   message, (int)sizeof(message), true);
     if (!bridge.audio_error.empty())
-        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, bridge.audio_error);
+        return fail_v1(error, bridge.audio_status, bridge.audio_error);
     if (rc != 0) {
         const sa3_status_v1 status = training_failure_status(rc, message);
         return fail_v1(error, status, message[0] ? message : "training failed");
