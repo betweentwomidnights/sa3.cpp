@@ -393,4 +393,14 @@ target_link_libraries(sa3-libtrain PRIVATE sa3_shared)
 add_executable(sa3-libcancel tools/sa3-libcancel.c)
 target_include_directories(sa3-libcancel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sa3-libcancel PRIVATE sa3_shared)
+
+# Model-free contract test for the production V1 function table. Keeping this source as C (not
+# C++) catches accidental C++ types or linkage in the public header.
+add_executable(sa3-lib-v1-contract tests/libsa3_v1_contract.c)
+target_include_directories(sa3-lib-v1-contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(sa3-lib-v1-contract PRIVATE sa3_shared)
+if(BUILD_TESTING)
+    add_test(NAME sa3-lib-v1-contract COMMAND sa3-lib-v1-contract)
+    set_tests_properties(sa3-lib-v1-contract PROPERTIES LABELS "non-gpu;abi")
+endif()
 endif() # SA3_BUILD_TOOLS
