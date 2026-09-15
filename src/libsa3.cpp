@@ -584,7 +584,8 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
     std::vector<float> adapter_strengths;
     if (request->adapter_count > 0) {
         if (!request->adapters || request->adapter_stride < SA3_ADAPTER_V1_MIN_SIZE ||
-            request->adapter_count > (uint32_t)std::numeric_limits<int>::max())
+            request->adapter_count > (uint32_t)std::numeric_limits<int>::max() ||
+            request->adapter_count > std::numeric_limits<size_t>::max() / request->adapter_stride)
             return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid adapter array");
         try {
             adapter_names.reserve(request->adapter_count);
@@ -594,9 +595,15 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
                 sa3_adapter_v1 adapter{};
                 std::memcpy(&adapter, bytes + (size_t)i * request->adapter_stride,
                             std::min<size_t>(request->adapter_stride, sizeof(adapter)));
-                if (adapter.size < SA3_ADAPTER_V1_MIN_SIZE || !adapter.path_or_name || !*adapter.path_or_name ||
-                    !std::isfinite(adapter.strength))
-                    return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid adapter entry");
+                if (adapter.size < SA3_ADAPTER_V1_MIN_SIZE || adapter.size > request->adapter_stride)
+                    return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                                   "adapter entry " + std::to_string(i) + " has an invalid size");
+                if (!adapter.path_or_name || !*adapter.path_or_name)
+                    return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                                   "adapter entry " + std::to_string(i) + " has an empty path or name");
+                if (!std::isfinite(adapter.strength))
+                    return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                                   "adapter entry " + std::to_string(i) + " has a non-finite strength");
                 adapter_names.push_back(adapter.path_or_name);
                 adapter_strengths.push_back(adapter.strength);
             }
@@ -1007,6 +1014,7 @@ const sa3_training_api_v1 k_training_api_v1 = {
     sizeof(sa3_training_api_v1),
     SA3_TRAINING_ABI_VERSION_1,
     sa3_version,
+    v1_error_init,
     v1_training_config_init,
     v1_training_callbacks_init,
     v1_training_result_init,

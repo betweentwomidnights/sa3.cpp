@@ -131,6 +131,8 @@ typedef struct sa3_training_api_v1 {
     uint32_t abi_version;
     const char* (SA3_CALL *runtime_version)(void);
 
+    /* Training uses the shared V1 error type but does not require the inference table. */
+    void (SA3_CALL *error_init)(sa3_error_v1* error);
     void (SA3_CALL *config_init)(sa3_training_config_v1* config);
     void (SA3_CALL *callbacks_init)(sa3_training_callbacks_v1* callbacks);
     void (SA3_CALL *result_init)(sa3_training_result_v1* result);

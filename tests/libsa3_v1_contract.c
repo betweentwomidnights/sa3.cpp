@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -117,6 +118,41 @@ int main(void) {
     api->result_init(&result);
     CHECK(api->generate(NULL, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
     CHECK(result.samples == NULL);
+
+    /* Exercise the public strided walk, not merely its initialized stride. The fake entry placed
+     * at the tightly-packed offset has an empty path, while the real second entry at padded stride
+     * has a non-finite strength. The expected diagnostic proves the walker reached the latter. A
+     * deliberately non-null opaque context is safe because adapter validation returns first. */
+    struct padded_adapter {
+        sa3_adapter_v1 adapter;
+        unsigned char padding[sizeof(sa3_adapter_v1)];
+    } padded_adapters[2];
+    memset(padded_adapters, 0, sizeof(padded_adapters));
+    padded_adapters[0].adapter.size = sizeof(sa3_adapter_v1);
+    padded_adapters[0].adapter.path_or_name = "first";
+    padded_adapters[0].adapter.strength = 1.0f;
+    {
+        sa3_adapter_v1 tightly_packed_decoy;
+        memset(&tightly_packed_decoy, 0, sizeof(tightly_packed_decoy));
+        tightly_packed_decoy.size = sizeof(tightly_packed_decoy);
+        tightly_packed_decoy.strength = 1.0f;
+        memcpy(padded_adapters[0].padding, &tightly_packed_decoy,
+               sizeof(tightly_packed_decoy));
+    }
+    padded_adapters[1].adapter.size = sizeof(sa3_adapter_v1);
+    padded_adapters[1].adapter.path_or_name = "second";
+    padded_adapters[1].adapter.strength = NAN;
+    request.adapters = &padded_adapters[0].adapter;
+    request.adapter_count = 2;
+    request.adapter_stride = sizeof(struct padded_adapter);
+    CHECK(api->generate((sa3_context*)(uintptr_t)1, &request, &result, &error)
+          == SA3_STATUS_INVALID_ARGUMENT_V1);
+    CHECK(strstr(error.message, "entry 1") != NULL);
+    CHECK(strstr(error.message, "strength") != NULL);
+    request.adapters = NULL;
+    request.adapter_count = 0;
+    request.adapter_stride = sizeof(sa3_adapter_v1);
+
     api->result_free(&result);
     api->result_free(&result);
     CHECK(result.size == sizeof(result));
@@ -140,6 +176,7 @@ int main(void) {
     CHECK(sa3_get_training_api(SA3_TRAINING_ABI_VERSION_1 + 1) == NULL);
     CHECK(training->size >= SA3_TRAINING_API_V1_MIN_SIZE);
     CHECK(training->abi_version == SA3_TRAINING_ABI_VERSION_1);
+    CHECK(training->error_init != NULL);
 
     sa3_training_config_v1 training_config;
     memset(&training_config, 0xA5, sizeof(training_config));
@@ -179,6 +216,11 @@ int main(void) {
     training_result.size = sizeof(training_result);
     training->result_init(&training_result);
     CHECK(training_result.completed_steps == 0);
+    memset(&error, 0xA5, sizeof(error));
+    error.size = sizeof(error);
+    training->error_init(&error);
+    CHECK(error.code == SA3_STATUS_OK_V1);
+    CHECK(error.message[0] == '\0');
 
     struct future_training_result {
         sa3_training_result_v1 known;

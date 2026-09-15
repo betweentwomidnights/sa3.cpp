@@ -76,7 +76,8 @@ The V1 draft is not merged to `main` until the same sa3.cpp commit passes these 
 Training is intentionally not frozen into the inference table. Hosts resolve the independent
 `sa3_get_training_api(SA3_TRAINING_ABI_VERSION_1)` capability from
 `libsa3_training_v1.h`. Training can therefore gain a new major without forcing inference-only
-hosts to migrate.
+hosts to migrate. Its table initializes the shared V1 error type itself, so a training-only host
+does not need to resolve the inference table.
 
 The training table provides explicit initialized defaults, a size-tagged configuration and result,
 size-tagged optimizer-step reports, cooperative cancellation, log and progress callbacks, and an
