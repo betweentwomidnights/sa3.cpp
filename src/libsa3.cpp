@@ -59,7 +59,10 @@ void SA3_CALL v1_error_init(sa3_error_v1* error) {
     init_v1_struct(error);
 }
 
-void set_v1_error(sa3_error_v1* error, sa3_status_v1 code, const std::string& message) {
+/// Writes into the caller's fixed buffer and allocates nothing, which is what makes it safe in a
+/// catch handler: the condition being reported may be that allocation just failed, and building a
+/// std::string to describe it would throw again on the way out of a C ABI boundary.
+void set_v1_error_literal(sa3_error_v1* error, sa3_status_v1 code, const char* message) {
     if (!error || error->size < sizeof(uint32_t)) return;
     const uint32_t caller_size = error->size;
     std::memset(error, 0, std::min<size_t>(caller_size, sizeof(*error)));
@@ -68,11 +71,15 @@ void set_v1_error(sa3_error_v1* error, sa3_status_v1 code, const std::string& me
     if (caller_size > offsetof(sa3_error_v1, message)) {
         const size_t cap = std::min<size_t>(sizeof(error->message),
                                             caller_size - offsetof(sa3_error_v1, message));
-        if (cap > 0) {
-            std::strncpy(error->message, message.c_str(), cap - 1);
+        if (cap > 0 && message) {
+            std::strncpy(error->message, message, cap - 1);
             error->message[cap - 1] = '\0';
         }
     }
+}
+
+void set_v1_error(sa3_error_v1* error, sa3_status_v1 code, const std::string& message) {
+    set_v1_error_literal(error, code, message.c_str());
 }
 
 void clear_v1_error(sa3_error_v1* error) {
@@ -211,6 +218,12 @@ sa3_status_v1 fail_v1(sa3_error_v1* error, sa3_status_v1 status, const std::stri
     return status;
 }
 
+/// The allocation-free counterpart, for catch handlers and anything on an out-of-memory path.
+sa3_status_v1 fail_v1_literal(sa3_error_v1* error, sa3_status_v1 status, const char* message) {
+    set_v1_error_literal(error, status, message);
+    return status;
+}
+
 sa3_status_v1 SA3_CALL v1_context_create(const sa3_context_config_v1* config,
                                           sa3_context** out_context,
                                           sa3_error_v1* error) {
@@ -223,42 +236,45 @@ sa3_status_v1 SA3_CALL v1_context_create(const sa3_context_config_v1* config,
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "cpu_threads must be non-negative");
 
     try {
-        // A null or empty string means "unset" and falls back; everything else is taken as given.
-        auto text = [](const char* value) { return value && *value ? std::string(value) : std::string(); };
-        std::string models_dir = text(config->models_dir);
+        // NULL means unset and falls back. An empty string is NOT a fallback -- it is passed
+        // through as the caller wrote it, and resolve fails on it. That is what V1 published and
+        // what three frontends shipped against, so it stays; models_dir is the one exception,
+        // because it has always treated empty as unset.
+        const auto given = [](const char* value) { return value ? std::string(value) : std::string(); };
+        std::string models_dir = given(config->models_dir);
         if (models_dir.empty()) {
             const char* from_env = std::getenv("SA3_MODELS_DIR");
             models_dir = (from_env && *from_env) ? from_env : "models";
         }
-        std::string variant = text(config->variant);
-        if (variant.empty()) variant = "medium";
-        std::string dit = text(config->dit_encoding);
-        if (dit.empty()) dit = "f16";
-        std::string adapters_dir = text(config->adapters_dir);
-        if (adapters_dir.empty()) adapters_dir = models_dir;
-        const std::string device = text(config->device);
+        const std::string variant = config->variant ? config->variant : "medium";
+        const std::string dit = config->dit_encoding ? config->dit_encoding : "f16";
+        const std::string adapters_dir = config->adapters_dir ? config->adapters_dir : models_dir;
 
         sa3::ModelPaths paths;
         std::string why;
-        if (!sa3::ModelPaths::resolve(models_dir, variant, dit, text(config->text_encoder_encoding),
-                                      text(config->autoencoder_encoding), paths, why))
-            return fail_v1(error, SA3_STATUS_IO_ERROR_V1, why);
+        // MODEL_ERROR rather than IO_ERROR: a missing or unresolvable model set has reported
+        // itself this way since V1 published, and frontends branch on the status.
+        if (!sa3::ModelPaths::resolve(models_dir, variant, dit, given(config->text_encoder_encoding),
+                                      given(config->autoencoder_encoding), paths, why))
+            return fail_v1(error, SA3_STATUS_MODEL_ERROR_V1,
+                           why.empty() ? "failed to resolve the model set" : why);
 
         auto created = std::make_unique<sa3_context>();
         created->paths = paths;
         created->adapters_dir = adapters_dir;
         created->cpu_threads = config->cpu_threads;
-        created->device = device;
+        created->device = given(config->device);
         created->pipe = std::make_unique<sa3::Pipeline>();
-        created->pipe->load(paths, created->cpu_threads, device.empty() ? nullptr : device.c_str());
+        // The raw pointer, so an empty device string reaches the backend exactly as it used to.
+        created->pipe->load(paths, created->cpu_threads, config->device);
         *out_context = created.release();
         return SA3_STATUS_OK_V1;
     } catch (const std::bad_alloc&) {
-        return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory creating context");
+        return fail_v1_literal(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory creating context");
     } catch (const std::exception& e) {
-        return fail_v1(error, SA3_STATUS_MODEL_ERROR_V1, e.what());
+        return fail_v1_literal(error, SA3_STATUS_MODEL_ERROR_V1, e.what());
     } catch (...) {
-        return fail_v1(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error creating context");
+        return fail_v1_literal(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error creating context");
     }
 }
 
@@ -288,7 +304,7 @@ void SA3_CALL v1_result_free(sa3_result_v1* result) {
 /// rather than a failure -- callers get CANCELLED and an untouched result.
 sa3_status_v1 run_generation(sa3_context* context, sa3::GenParams& params,
                              sa3_result_v1* result, sa3_error_v1* error) {
-    try {
+    {
         if (!context->pipe) {   // reload after context_unload()
             context->pipe = std::make_unique<sa3::Pipeline>();
             context->pipe->load(context->paths, context->cpu_threads,
@@ -329,19 +345,10 @@ sa3_status_v1 run_generation(sa3_context* context, sa3::GenParams& params,
         result->mask_start_seconds = r.splice.mask_start_seconds;
         result->mask_overlap_seconds = r.splice.mask_overlap_applied;
         return SA3_STATUS_OK_V1;
-    } catch (const std::bad_alloc&) {
-        return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory during generation");
-    } catch (const std::exception& e) {
-        const std::string what = e.what();
-        if (what.find("cancelled") != std::string::npos)
-            return fail_v1(error, SA3_STATUS_CANCELLED_V1, what);
-        return fail_v1(error, SA3_STATUS_MODEL_ERROR_V1, what);
-    } catch (...) {
-        return fail_v1(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error during generation");
     }
 }
 
-sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
+sa3_status_v1 v1_generate_body(sa3_context* context,
                                     const sa3_request_v1* request,
                                     sa3_result_v1* result,
                                     sa3_error_v1* error) {
@@ -593,6 +600,35 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
     return run_generation(context, p, result, error);
 }
 
+/// The exception boundary for generation.
+///
+/// It wraps the ENTIRE operation — request translation, its string and vector allocations, the
+/// callbacks, the run itself and result construction — because a C ABI that lets an exception
+/// escape does not return an error, it terminates the host. An allocation while copying a long
+/// prompt is as capable of throwing as the sampler is.
+///
+/// Everything here is allocation-free: `strstr` rather than a std::string search, and literal
+/// error messages, so reporting an out-of-memory condition cannot itself run out of memory.
+sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
+                                   const sa3_request_v1* request,
+                                   sa3_result_v1* result,
+                                   sa3_error_v1* error) {
+    try {
+        return v1_generate_body(context, request, result, error);
+    } catch (const std::bad_alloc&) {
+        return fail_v1_literal(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory during generation");
+    } catch (const std::exception& e) {
+        // The pipeline signals a cooperative stop by throwing; that is a cancellation, not a failure.
+        const char* what = e.what();
+        if (what && std::strstr(what, "cancelled"))
+            return fail_v1_literal(error, SA3_STATUS_CANCELLED_V1, what);
+        return fail_v1_literal(error, SA3_STATUS_MODEL_ERROR_V1,
+                               what && *what ? what : "generation failed");
+    } catch (...) {
+        return fail_v1_literal(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error during generation");
+    }
+}
+
 sa3_status_v1 SA3_CALL v1_convert_lora(const sa3_lora_convert_v1* options,
                                         sa3_error_v1* error) {
     clear_v1_error(error);
@@ -608,10 +644,12 @@ sa3_status_v1 SA3_CALL v1_convert_lora(const sa3_lora_convert_v1* options,
                                            options->output_gguf_path, why))
             return fail_v1(error, SA3_STATUS_IO_ERROR_V1, why.empty() ? "LoRA conversion failed" : why);
         return SA3_STATUS_OK_V1;
+    } catch (const std::bad_alloc&) {
+        return fail_v1_literal(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory converting LoRA");
     } catch (const std::exception& e) {
-        return fail_v1(error, SA3_STATUS_IO_ERROR_V1, e.what());
+        return fail_v1_literal(error, SA3_STATUS_IO_ERROR_V1, e.what());
     } catch (...) {
-        return fail_v1(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error converting LoRA");
+        return fail_v1_literal(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error converting LoRA");
     }
 }
 
@@ -913,11 +951,11 @@ sa3_status_v1 SA3_CALL v1_training_run(const sa3_training_config_v1* config,
             return fail_v1(error, SA3_STATUS_CANCELLED_V1, "training cancelled");
         return SA3_STATUS_OK_V1;
     } catch (const std::bad_alloc&) {
-        return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory during training");
+        return fail_v1_literal(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory during training");
     } catch (const std::exception& e) {
-        return fail_v1(error, SA3_STATUS_MODEL_ERROR_V1, e.what());
+        return fail_v1_literal(error, SA3_STATUS_MODEL_ERROR_V1, e.what());
     } catch (...) {
-        return fail_v1(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error during training");
+        return fail_v1_literal(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error during training");
     }
 }
 

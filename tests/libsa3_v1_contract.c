@@ -246,6 +246,30 @@ int main(void) {
           == SA3_STATUS_INVALID_ARGUMENT_V1);
     CHECK(strstr(error.message, "release_audio") != NULL);
 
+    /* Context creation semantics that a frontend can observe. These are pinned because they are
+       easy to "improve" during a refactor and the change is silent: a status a host branches on,
+       and the difference between a field being unset and being explicitly empty. */
+    sa3_context_config_v1 context_config;
+    memset(&context_config, 0, sizeof context_config);
+    context_config.size = sizeof context_config;
+    api->context_config_init(&context_config);
+    context_config.models_dir = "/nonexistent-sa3-models-for-the-contract-test";
+    sa3_context* context = NULL;
+
+    /* An unresolvable model set is a MODEL_ERROR, not an IO_ERROR. */
+    CHECK(api->context_create(&context_config, &context, &error) == SA3_STATUS_MODEL_ERROR_V1);
+    CHECK(context == NULL);
+
+    /* NULL means unset and falls back to the documented default; an empty string does NOT. It is
+       passed through as written, so it fails rather than quietly selecting "medium". */
+    context_config.variant = "";
+    CHECK(api->context_create(&context_config, &context, &error) == SA3_STATUS_MODEL_ERROR_V1);
+    CHECK(context == NULL);
+
+    context_config.cpu_threads = -1;
+    CHECK(api->context_create(&context_config, &context, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+    CHECK(context == NULL);
+
     puts("libsa3 V1 C ABI contract passed");
     return 0;
 }
