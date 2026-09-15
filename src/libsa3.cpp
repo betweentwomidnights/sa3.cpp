@@ -290,10 +290,6 @@ void SA3_CALL v1_request_init(sa3_request_v1* request) {
     request->seed = -1;
     request->cfg_scale = 1.0f;
     request->distribution_shift = SA3_DISTRIBUTION_LOGSNR_V1;
-    request->distribution_shift_params[0] = 2000.0f;
-    request->distribution_shift_params[1] = -6.2f;
-    request->distribution_shift_params[2] = 0.0f;
-    request->distribution_shift_params[3] = 2.0f;
     request->residency = SA3_RESIDENCY_RESIDENT_V1;
     request->input_audio.size = sizeof(request->input_audio);
     request->input_audio.layout = SA3_AUDIO_PLANAR_V1;
@@ -490,6 +486,14 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
         if (!std::isfinite(value))
             return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
                            "distribution shift parameters must be finite");
+    float distribution_params[4];
+    std::copy(std::begin(request->distribution_shift_params),
+              std::end(request->distribution_shift_params),
+              std::begin(distribution_params));
+    if (std::all_of(std::begin(distribution_params), std::end(distribution_params),
+                    [](float value) { return value == 0.0f; }))
+        sa3::dist_shift_defaults(distribution, distribution_params[0], distribution_params[1],
+                                distribution_params[2], distribution_params[3]);
     if (request->residency != SA3_RESIDENCY_FRUGAL_V1 &&
         request->residency != SA3_RESIDENCY_RESIDENT_V1)
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "unknown residency mode");
@@ -629,8 +633,8 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
     legacy.request.request.lora_names = adapter_names.empty() ? nullptr : adapter_names.data();
     legacy.request.request.lora_strengths = adapter_strengths.empty() ? nullptr : adapter_strengths.data();
     legacy.request.request.dist_shift = distribution;
-    std::copy(std::begin(request->distribution_shift_params),
-              std::end(request->distribution_shift_params),
+    std::copy(std::begin(distribution_params),
+              std::end(distribution_params),
               std::begin(legacy.request.request.dist_shift_params));
     if (request->on_progress) {
         legacy.request.request.on_progress = v1_progress_bridge;

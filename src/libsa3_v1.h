@@ -169,6 +169,8 @@ typedef struct {
     int64_t seed;
     float cfg_scale;
     sa3_distribution_shift_v1 distribution_shift;
+    /* All zeroes select the built-in defaults for distribution_shift. Set all
+     * four values to override that shift's defaults explicitly. */
     float distribution_shift_params[4];
     sa3_residency_v1 residency;
 

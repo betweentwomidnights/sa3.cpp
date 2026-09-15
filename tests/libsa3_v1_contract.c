@@ -62,6 +62,10 @@ int main(void) {
     CHECK(request.seed == -1);
     CHECK(request.cfg_scale == 1.0f);
     CHECK(request.distribution_shift == SA3_DISTRIBUTION_LOGSNR_V1);
+    CHECK(request.distribution_shift_params[0] == 0.0f);
+    CHECK(request.distribution_shift_params[1] == 0.0f);
+    CHECK(request.distribution_shift_params[2] == 0.0f);
+    CHECK(request.distribution_shift_params[3] == 0.0f);
     CHECK(request.residency == SA3_RESIDENCY_RESIDENT_V1);
     CHECK(request.input_audio.size == sizeof(sa3_audio_view_v1));
     CHECK(request.input_audio.layout == SA3_AUDIO_PLANAR_V1);
