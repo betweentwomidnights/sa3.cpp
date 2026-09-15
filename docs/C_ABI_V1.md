@@ -96,6 +96,38 @@ The optional JSON config is applied first. Initialized scalar fields and non-nul
 the V1 config then override their JSON counterparts, while the JSON remains an escape hatch for
 advanced trainer options not yet represented in V1.
 
+## Proving a change kept the contract
+
+Two tools, and they cover different halves.
+
+`sa3-lib-v1-contract` is a CTest. It needs no models and checks the shape of the ABI: struct sizes
+and frozen prefixes, what the initializers establish, strided adapter walking through a padded
+stride, tail preservation for a future caller, and the error paths a host branches on — including
+that an unresolvable model set is `MODEL_ERROR_V1`, and that an empty `variant` is passed through
+rather than quietly becoming `medium`. Those last ones are pinned precisely because they are easy
+to "improve" during a refactor and the change is silent.
+
+`sa3-lib-v1-baseline` is the other half and needs a model set, so it is a tool rather than a test.
+It runs twelve real scenarios and prints exact sample counts, every reported metadata field, and an
+FNV-1a hash of the decoded audio. Capture it before a change, capture it after, diff:
+
+```sh
+export SA3_MODELS_DIR=/path/to/models
+export SA3_BASELINE_DEVICE=cpu SA3_BASELINE_SECONDS=1.0 SA3_BASELINE_STEPS=2
+sa3-lib-v1-baseline > before.txt      # then make the change and rebuild
+sa3-lib-v1-baseline > after.txt
+diff before.txt after.txt
+```
+
+Anything that re-points how a request reaches the pipeline is a change no compiler can check: a
+wrong field is a different take, not a build error. This is what catches that.
+
+**Run it on CPU.** GPU backends are not necessarily run-to-run reproducible. On an AMD Radeon Pro
+5300M via Metal the same binary and the same seed hash differently every run, because a
+float-ordering difference in the first sampling step compounds into a different take — so a GPU
+comparison reports drift that is not there. Confirm it on your own hardware by running the tool
+twice unchanged before trusting any diff from it.
+
 ## No legacy surface
 
 `libsa3.h` and the `sa3_init*` / `sa3_generate*` / `sa3_train` entry points it declared are gone.

@@ -396,6 +396,12 @@ target_link_libraries(sa3-libcancel PRIVATE sa3_shared)
 
 # Model-free contract test for the production V1 function table. Keeping this source as C (not
 # C++) catches accidental C++ types or linkage in the public header.
+# Needs a model set, so it is a tool rather than a CTest: capture it before and after a change
+# that touches how requests reach the pipeline, and diff the two.
+add_executable(sa3-lib-v1-baseline tools/sa3-lib-v1-baseline.c)
+target_include_directories(sa3-lib-v1-baseline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(sa3-lib-v1-baseline PRIVATE sa3_shared)
+
 add_executable(sa3-lib-v1-contract tests/libsa3_v1_contract.c)
 target_include_directories(sa3-lib-v1-contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sa3-lib-v1-contract PRIVATE sa3_shared)
