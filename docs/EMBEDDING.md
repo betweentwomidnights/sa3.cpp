@@ -143,10 +143,10 @@ if (status != SA3_STATUS_OK_V1 && status != SA3_STATUS_CANCELLED_V1) { /* err.me
 - **cancel is cooperative** — `should_cancel` is checked at each sample boundary, and the run still
   writes a checkpoint pair and a final adapter before returning, so `cfg.resume_path` picks it back
   up exactly where it stopped. `res.cancelled` tells you which way it ended.
-- **`config_json`** takes a JSON file of any train-config key and is applied *before* the struct
+- **`config_path`** takes a JSON file of any train-config key and is applied *before* the struct
   fields, so the struct stays small without capping what a host can set.
-- **the result feeds inference directly** — point a `sa3_request`'s `lora_names` at
-  `res.final_adapter`.
+- **the result feeds inference directly** — put `res.final_adapter` in a `sa3_adapter_v1` entry and
+  pass that entry through `sa3_request_v1.adapters`.
 
 ### training without a filesystem or ffmpeg
 
@@ -247,26 +247,27 @@ mutex-guarded swap + an atomic flag. The demo's `RenderWorkerMain` in
 [`SA3IPlug2Demo.cpp`](https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo/blob/main/SA3IPlug2Demo/SA3IPlug2Demo.cpp)
 is the worked example.
 
-## `keep_models` — the 8 GB reality (use `0`)
+## model residency — the 8 GB reality (use frugal)
 
 counterintuitive but important: on a memory-tight GPU (the demo targets an **8 GB laptop RTX 5070**),
-**`keep_models = 0` (frugal / early-free) is the right default in a DAW, and effectively required for long
+**`SA3_RESIDENCY_FRUGAL_V1` (early-free) is the right default in a DAW, and effectively required for long
 text2music.**
 
-- `keep_models = 0` frees T5 before sampling, the DiT before decode, and the autoencoder after decode, reloading
+- `SA3_RESIDENCY_FRUGAL_V1` frees T5 before sampling, the DiT before decode, and the autoencoder after decode, reloading
   freed nets (~0.5–1.5 s) on the next `generate`. This keeps peak VRAM low.
-- `keep_models = 1` (resident) is snappy for short repeats, but for **long** generations it thrashes/OOMs on 8 GB —
+- `SA3_RESIDENCY_RESIDENT_V1` is snappy for short repeats, but for **long** generations it thrashes/OOMs on 8 GB —
   the decoder's SwiGLU FF activation grows with output length and overflows what's left once the other nets are
   resident (e.g. a 120 s render: ~2 s decode early-free vs tens of seconds thrashing resident). See
   [BENCHMARKS.md](BENCHMARKS.md).
 
-so: frugal by default; only consider `keep_models = 1` for short clips on a big-VRAM card, and expose
-`sa3_unload(ctx)` (e.g. when the plugin is hidden/idle) to hand VRAM back.
+so: set `req.residency = SA3_RESIDENCY_FRUGAL_V1` by default; only consider resident mode for short
+clips on a big-VRAM card, and expose `api->context_unload(ctx)` (e.g. when the plugin is hidden/idle)
+to hand VRAM back.
 
 ## chunked encode/decode — required for long audio
 
 the sliding-window autoencoder must be **outer-chunked** for long clips or you'll hit crashes/hangs building one
-giant graph. set them on `sa3_request_ex`:
+giant graph. set them on `sa3_request_v1`:
 
 - **`decode_chunk_size = 128, decode_overlap = 32`** — for *every* mode's decode (text2music included). This is
   what makes long output decode safely.
@@ -277,15 +278,16 @@ giant graph. set them on `sa3_request_ex`:
 ## cancellation — so closing mid-render can't crash the host
 
 long renders must be abortable, and plugin teardown must not `join()` a worker that's still deep in `generate`.
-libsa3 supports a **cooperative cancel callback** on `sa3_request_ex`:
+libsa3 supports a **cooperative cancel callback** on `sa3_request_v1`:
 
 ```c
 req.should_cancel = [](void* user) -> int { return ((MyPlugin*)user)->mCancelRequested.load(); };
-req.cancel_user = this;
+req.callback_user = this;
 ```
 
-`generate` polls it between steps and returns early (non-zero, no audio) when it fires. On teardown: set the
-cancel flag, then `join()` the worker, then `sa3_free`. [`tools/sa3-libcancel.c`](../tools/sa3-libcancel.c) is a
+`generate` polls it between steps and returns `SA3_STATUS_CANCELLED_V1` with no audio when it fires. On
+teardown: set the cancel flag, then `join()` the worker, then `api->context_destroy(ctx)`.
+[`tools/sa3-libcancel.c`](../tools/sa3-libcancel.c) is a
 small pure-C smoke test — it drives `generate` with the same frugal/chunked request shape the
 demo uses and verifies a cooperative cancel exits cleanly without output audio:
 

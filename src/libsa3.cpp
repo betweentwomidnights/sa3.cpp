@@ -299,9 +299,9 @@ void SA3_CALL v1_result_free(sa3_result_v1* result) {
 
 /// Runs one prepared request and publishes the result.
 ///
-/// This is where a C++ exception becomes a V1 status, and the only place that happens on the
-/// generation path. The pipeline signals a cooperative stop by throwing, which is a cancellation
-/// rather than a failure -- callers get CANCELLED and an untouched result.
+/// The outer v1_generate entry point owns the exception boundary for this work. The pipeline
+/// signals a cooperative stop by throwing; v1_generate maps that to CANCELLED and leaves the
+/// result untouched.
 sa3_status_v1 run_generation(sa3_context* context, sa3::GenParams& params,
                              sa3_result_v1* result, sa3_error_v1* error) {
     {

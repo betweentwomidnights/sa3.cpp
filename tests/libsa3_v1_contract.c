@@ -259,12 +259,15 @@ int main(void) {
     /* An unresolvable model set is a MODEL_ERROR, not an IO_ERROR. */
     CHECK(api->context_create(&context_config, &context, &error) == SA3_STATUS_MODEL_ERROR_V1);
     CHECK(context == NULL);
+    CHECK(strstr(error.message, "stable-audio-3-medium-") != NULL);
 
     /* NULL means unset and falls back to the documented default; an empty string does NOT. It is
        passed through as written, so it fails rather than quietly selecting "medium". */
     context_config.variant = "";
     CHECK(api->context_create(&context_config, &context, &error) == SA3_STATUS_MODEL_ERROR_V1);
     CHECK(context == NULL);
+    CHECK(strstr(error.message, "stable-audio-3--") != NULL);
+    CHECK(strstr(error.message, "stable-audio-3-medium-") == NULL);
 
     context_config.cpu_threads = -1;
     CHECK(api->context_create(&context_config, &context, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);

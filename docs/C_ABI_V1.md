@@ -1,6 +1,6 @@
 # libsa3 C ABI V1
 
-`libsa3_v1.h` is the release-candidate embedding boundary for sa3.cpp. It replaces the accumulated
+`libsa3_v1.h` is the published embedding boundary for sa3.cpp. It replaces the accumulated
 `sa3_init*` and `sa3_generate*` entry points with one version negotiation symbol and a stable
 function table:
 
@@ -60,9 +60,9 @@ registries so it never offers a SAME-L adapter to SAME-S or a DiT adapter to the
 Safetensors conversion is part of the V1 table because all current hosts import adapters. A null or
 empty JSON sidecar means that conversion reads configuration from safetensors metadata.
 
-## Migration gate
+## Consumer coverage
 
-The V1 draft is not merged to `main` until the same sa3.cpp commit passes these consumers:
+The frozen V1 boundary is exercised by these consumers:
 
 - `sa3.cpp-iplug2-demo`: Windows VST3 and REAPER extension; Generate, Transform, Continue, adapter
   import/selection, cancellation, status errors, exact duration, and DLL unload/reload.
@@ -108,8 +108,9 @@ rather than quietly becoming `medium`. Those last ones are pinned precisely beca
 to "improve" during a refactor and the change is silent.
 
 `sa3-lib-v1-baseline` is the other half and needs a model set, so it is a tool rather than a test.
-It runs twelve real scenarios and prints exact sample counts, every reported metadata field, and an
-FNV-1a hash of the decoded audio. Capture it before a change, capture it after, diff:
+It runs eleven core scenarios, or twelve when an adapter path is supplied, and prints exact sample
+counts, every reported metadata field, and an FNV-1a hash of the decoded audio. Capture stdout
+before a change, capture it after, diff:
 
 ```sh
 export SA3_MODELS_DIR=/path/to/models
@@ -118,6 +119,9 @@ sa3-lib-v1-baseline > before.txt      # then make the change and rebuild
 sa3-lib-v1-baseline > after.txt
 diff before.txt after.txt
 ```
+
+The runtime version is written to stderr as provenance. That keeps an intentional version bump out
+of the behavioral diff while still recording which library produced each run.
 
 Anything that re-points how a request reaches the pipeline is a change no compiler can check: a
 wrong field is a different take, not a build error. This is what catches that.

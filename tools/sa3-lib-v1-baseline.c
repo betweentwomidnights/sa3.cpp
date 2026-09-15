@@ -8,7 +8,8 @@
  * error. So this measures OUTPUT: exact sample counts, every reported metadata field, and an
  * FNV-1a hash of the decoded audio.
  *
- * Capture it before a change, capture it after, diff the two. Identical or it drifted.
+ * Capture stdout before a change, capture it after, diff the two. Identical or it drifted. Runtime
+ * version provenance goes to stderr so an intentional version bump does not create a false diff.
  *
  *   sa3-lib-v1-baseline [adapter.gguf] > before.txt
  *   ... make the change, rebuild ...
@@ -29,9 +30,9 @@
  * The optional adapter argument should be a gguf for the medium/SAME-L family; pass none to skip
  * that scenario. The whole set runs in about 100s on CPU at SECONDS=1.0 STEPS=2.
  *
- * Twelve scenarios: all three operations, non-default loudness, frugal residency, every
- * distribution shift on its resolved defaults, explicit shift parameters, an adapter array,
- * cancellation, and two invalid requests.
+ * Eleven core scenarios, or twelve with the optional adapter: all three operations, non-default
+ * loudness, frugal residency, every distribution shift on its resolved defaults, explicit shift
+ * parameters, cancellation, two invalid requests, and optionally an adapter array.
  */
 #include "libsa3_v1.h"
 #include <stdio.h>
@@ -97,7 +98,7 @@ int main(int argc, char** argv) {
     if (getenv("SA3_BASELINE_STEPS"))   g_steps   = atoi(getenv("SA3_BASELINE_STEPS"));
     api = sa3_get_api(SA3_ABI_VERSION_1);
     if (!api) { printf("no V1 api\n"); return 1; }
-    printf("runtime %s, abi %u\n\n", api->runtime_version(), api->abi_version);
+    fprintf(stderr, "runtime %s, abi %u\n", api->runtime_version(), api->abi_version);
 
     sa3_error_v1 err; memset(&err, 0, sizeof err); err.size = sizeof err; api->error_init(&err);
     sa3_result_v1 out;
