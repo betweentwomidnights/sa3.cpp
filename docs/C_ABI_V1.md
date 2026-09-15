@@ -96,8 +96,18 @@ The optional JSON config is applied first. Initialized scalar fields and non-nul
 the V1 config then override their JSON counterparts, while the JSON remains an escape hatch for
 advanced trainer options not yet represented in V1.
 
-## Legacy transition
+## No legacy surface
 
-The historical declarations remain in `libsa3.h` while the controlled consumers migrate. New host
-code includes `libsa3_v1.h` and resolves only `sa3_get_api`. Legacy symbols are compatibility
-shims, not the release contract; their zero-means-default behavior is deliberately unchanged.
+`libsa3.h` and the `sa3_init*` / `sa3_generate*` / `sa3_train` entry points it declared are gone.
+All three controlled frontends migrated to V1, so the shims had no consumers left, and V1 no longer
+routes through the legacy request structs internally either: `generate` builds the pipeline's own
+parameters directly.
+
+That removes the last place where one field meant two things. The shared mapping used to take an
+`explicit_values` flag that switched ten fields between "zero means default" and "zero means zero",
+because the legacy ABI wanted the first and V1 promises the second. With one ABI there is one
+answer, and the initializers are the only thing that decides a default.
+
+It also removes the only per-call state on a context. Generation metadata used to be parked on the
+context between the call and a separate getter because the legacy result struct had nowhere to
+carry it; `sa3_result_v1` does, so a context now holds models and nothing else.

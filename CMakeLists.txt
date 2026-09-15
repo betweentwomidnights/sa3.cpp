@@ -366,7 +366,7 @@ endif()
 
 endif() # SA3_BUILD_TOOLS
 
-# --- libsa3: C ABI library (embed sa3 in a host app; see src/libsa3.h) ---------------------
+# --- libsa3: C ABI library (embed sa3 in a host app; see src/libsa3_v1.h) ------------------
 # Windows: sa3.dll + sa3.lib (import lib).  Unix/macOS: libsa3.so / libsa3.dylib.
 # SA3_STATIC (forced on for iOS) builds libsa3.a instead, to link straight into an app binary.
 if(SA3_STATIC)
