@@ -4,7 +4,7 @@
 // code path behind all three surfaces, so they share behavior + the config/resolution vocabulary:
 //   - sa3-generate (CLI)   : parse args -> Pipeline::load -> generate -> write_wav
 //   - sa3-server (HTTP)    : load once -> generate() per POST /generate
-//   - libsa3 (C ABI)       : sa3_init -> sa3_generate -> sa3_free, wrapping a Pipeline
+//   - libsa3 (C ABI V1)    : context_create -> generate -> context_destroy, wrapping a Pipeline
 //
 // Residency is a per-request policy (GenParams::keep_models), NOT a surface-specific thing — the
 // server and the C API both expose it:

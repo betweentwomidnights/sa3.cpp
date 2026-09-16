@@ -376,7 +376,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
         // (GgufModel::~GgufModel calls free()), but the backend is a raw handle that only the
         // success path freed -- so any throw, and now any cancel, leaked it. That is invisible to
         // the CLI, which exits immediately after, and not at all invisible to an embedded host
-        // that calls sa3_train() again.
+        // that starts another in-process training run.
         struct BackendHandle {
             ggml_backend_t h = nullptr;
             ~BackendHandle() { if (h) ggml_backend_free(h); }

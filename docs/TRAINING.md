@@ -65,8 +65,9 @@ Training prints what it is actually doing at startup, which is worth a glance be
 `scale` is `alpha/rank` and should normally be `1`. Adapter strength is multiplied by it in both
 training and inference, so a `scale` well below 1 means the adapter is being attenuated.
 
-Training is also callable in-process through `libsa3` (`sa3_train`), including from hosts that
-cannot spawn `ffmpeg`; see [EMBEDDING.md](EMBEDDING.md#training).
+Training is also callable in-process through the versioned `libsa3` training table
+(`sa3_get_training_api(...)->run`), including from hosts that cannot spawn `ffmpeg`; see
+[EMBEDDING.md](EMBEDDING.md#training).
 
 ## Build
 

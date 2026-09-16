@@ -1,6 +1,8 @@
-// libsa3 — C ABI implementation over sa3::Pipeline. See libsa3.h for the contract.
+// libsa3 — the V1 C ABI over sa3::Pipeline. See libsa3_v1.h and docs/C_ABI_V1.md for the
+// contract, and libsa3_training_v1.h for the independently versioned training capability.
 #define SA3_BUILD_DLL
-#include "libsa3.h"
+#include "libsa3_v1.h"
+#include "libsa3_training_v1.h"
 #include "sa3_pipeline.h"
 #include "lora_convert.h"
 #include "train_job.h"
@@ -15,221 +17,22 @@
 #include <memory>
 #include <string>
 
-// The context owns the pipeline via a unique_ptr so sa3_unload() can drop the models (and their
-// VRAM) while keeping the context alive; the next sa3_generate() lazily reloads from `paths`.
+// The context owns the pipeline via a unique_ptr so context_unload() can drop the models (and
+// their VRAM) while keeping the context alive; the next generate lazily reloads from `paths`.
+// It holds no per-call state: the result carries everything a generation reports.
 struct sa3_context {
     std::unique_ptr<sa3::Pipeline> pipe;
     sa3::ModelPaths paths;
     std::string adapters_dir;
     int cpu_threads = 0;
     std::string device;  // remembered so the frugal-reload path keeps the same backend
-    // Everything computed after the sampler, for sa3_last_meta(). size stays 0 until the first
-    // successful generate, which is how the getter knows there is nothing to report yet.
-    sa3_meta last_meta{};
 };
 
-static void set_err(char* err, int n, const std::string& m) {
-    if (err && n > 0) { std::strncpy(err, m.c_str(), (size_t)n - 1); err[n - 1] = '\0'; }
-}
 
-static bool apply_init_audio(const sa3_init_audio& in, sa3::GenParams& p, std::string& err,
-                             bool explicit_values = false) {
-    if (in.mode == SA3_INIT_AUDIO_NONE) return true;
-    if (in.mode != SA3_INIT_AUDIO_A2A && in.mode != SA3_INIT_AUDIO_INPAINT) {
-        err = "init_audio.mode must be SA3_INIT_AUDIO_NONE, SA3_INIT_AUDIO_A2A, or SA3_INIT_AUDIO_INPAINT";
-        return false;
-    }
-    if (!in.samples || in.n_samp <= 0 || in.n_ch <= 0 || in.sample_rate <= 0) {
-        err = "init_audio requires non-null planar samples, n_samp > 0, n_ch > 0, and sample_rate > 0";
-        return false;
-    }
-    if (!std::isfinite(in.init_noise_level) || !std::isfinite(in.inpaint_start) || !std::isfinite(in.inpaint_end)) {
-        err = "init_audio fields must be finite";
-        return false;
-    }
-    const int64_t total = (int64_t)in.n_samp * (int64_t)in.n_ch;
-    if (total <= 0 || (uint64_t)total > (uint64_t)(std::numeric_limits<size_t>::max() / sizeof(float))) {
-        err = "init_audio sample count is too large";
-        return false;
-    }
 
-    p.init_audio.assign(in.samples, in.samples + (size_t)total);
-    p.init_n_samp = in.n_samp;
-    p.init_n_ch = in.n_ch;
-    p.init_sample_rate = in.sample_rate;
-    p.init_noise_level = explicit_values ? in.init_noise_level
-                                         : (in.init_noise_level > 0.0f ? in.init_noise_level : 0.85f);
-    if (in.mode == SA3_INIT_AUDIO_INPAINT) {
-        p.inpaint_start = in.inpaint_start;
-        p.inpaint_end = in.inpaint_end;
-    }
-    return true;
-}
 
-static int sa3_generate_impl(sa3_context* ctx, const sa3_request* req, const sa3_request_ex* req_ex,
-                             const sa3_splice* splice_override, sa3_audio* out,
-                             char* err, int err_len, int target_n_samp = 0,
-                             bool explicit_values = false) {
-    if (!ctx || !req || !out) { set_err(err, err_len, "null argument"); return 1; }
-    out->samples = nullptr; out->n_samp = 0; out->n_ch = 0; out->sample_rate = 0; out->seed = 0;
-    try {
-        if (!ctx->pipe) {   // reload after sa3_unload()
-            ctx->pipe = std::make_unique<sa3::Pipeline>();
-            ctx->pipe->load(ctx->paths, ctx->cpu_threads, ctx->device.empty() ? nullptr : ctx->device.c_str());
-        }
-        sa3::GenParams p;
-        p.prompt = req->prompt ? req->prompt : "";
-        if (req->negative_prompt) p.negative_prompt = req->negative_prompt;
-        p.frames = explicit_values ? req->frames : (req->frames > 0 ? req->frames : 128);
-        p.steps  = explicit_values ? req->steps  : (req->steps > 0 ? req->steps : 8);
-        p.seed   = sa3::pick_seed((long long)req->seed);
-        p.cfg_scale = explicit_values ? req->cfg_scale
-                                      : (req->cfg_scale != 0.0f ? req->cfg_scale : 1.0f);
-        p.duration_padding_sec = explicit_values ? req->duration_padding_sec
-                                                 : (req->duration_padding_sec >= 0.0f ? req->duration_padding_sec : 6.0f);
-        p.target_n_samp = target_n_samp;
-        p.keep_models = req->keep_models != 0;
-
-        // distribution shift: NULL/"" -> "LogSNR"; per-type defaults, overridden by dist_shift_params if any set.
-        p.dist_shift = (req->dist_shift && *req->dist_shift) ? req->dist_shift : "LogSNR";
-        sa3::dist_shift_defaults(p.dist_shift, p.ds_p1, p.ds_p2, p.ds_p3, p.ds_p4);
-        {
-            const float* dp = req->dist_shift_params;
-            if (explicit_values || dp[0] != 0.0f || dp[1] != 0.0f || dp[2] != 0.0f || dp[3] != 0.0f) {
-                p.ds_p1 = dp[0]; p.ds_p2 = dp[1]; p.ds_p3 = dp[2]; p.ds_p4 = dp[3];
-            }
-        }
-        if (req->loudness.set) {              // per-request loudness (incl. raw: peak_normalize=0, limiter=0)
-            sa3::LoudnessParams lp;
-            lp.peak_normalize_enabled = req->loudness.peak_normalize != 0;
-            lp.peak_normalize_db      = req->loudness.peak_normalize_db;
-            lp.limiter_enabled        = req->loudness.limiter != 0;
-            lp.limiter_ceiling_db     = req->loudness.limiter_ceiling_db;
-            lp.limiter_knee           = explicit_values ? req->loudness.limiter_knee
-                                                        : (req->loudness.limiter_knee > 0.0f ? req->loudness.limiter_knee : lp.limiter_knee);
-            lp.latent_rescale         = explicit_values ? req->loudness.latent_rescale
-                                                        : (req->loudness.latent_rescale > 0.0f ? req->loudness.latent_rescale : 1.0f);
-            lp.latent_shift           = req->loudness.latent_shift;
-            sa3::normalize_loudness_params(lp);
-            std::string lerr;
-            if (!sa3::validate_loudness_params(lp, lerr)) { set_err(err, err_len, "loudness: " + lerr); return 4; }
-            p.loudness = lp;
-        } else {
-            p.loudness = sa3::loudness_defaults_from_env();   // gary4local defaults + SA3_* env overrides
-        }
-        p.splice = sa3::splice_defaults_from_env();           // ditto, SA3_CONTINUE_* (req_ex may override)
-
-        if (req_ex) {
-            std::string ierr;
-            if (!apply_init_audio(req_ex->init_audio, p, ierr, explicit_values)) { set_err(err, err_len, ierr); return 5; }
-            if (req_ex->encode_chunk_size > 0) {
-                p.encode_chunk_size = req_ex->encode_chunk_size;
-                p.encode_overlap = explicit_values ? req_ex->encode_overlap
-                                                   : (req_ex->encode_overlap > 0 ? req_ex->encode_overlap : 32);
-            }
-            if (req_ex->decode_chunk_size > 0) {
-                p.decode_chunk_size = req_ex->decode_chunk_size;
-                p.decode_overlap = explicit_values ? req_ex->decode_overlap
-                                                   : (req_ex->decode_overlap > 0 ? req_ex->decode_overlap : 32);
-            }
-            if (splice_override && splice_override->set) { // per-request splice (incl. old behaviour: splice=0)
-                sa3::SpliceParams sp;
-                sp.enabled    = splice_override->splice != 0;
-                sp.gain_match = splice_override->gain_match != 0;
-                // 0 is a meaningful value for both (no pullback / no crossfade), so only a negative
-                // falls back to the default rather than the usual 0-means-default convention.
-                sp.mask_overlap = splice_override->mask_overlap >= 0.0f ? splice_override->mask_overlap : sp.mask_overlap;
-                sp.xfade        = splice_override->xfade        >= 0.0f ? splice_override->xfade        : sp.xfade;
-                std::string serr;
-                if (!sa3::validate_splice_params(sp, serr)) { set_err(err, err_len, "splice: " + serr); return 6; }
-                p.splice = sp;
-            }
-            if (req_ex->should_cancel) {
-                const sa3_cancel_cb cb = req_ex->should_cancel;
-                void* user = req_ex->cancel_user;
-                p.should_cancel = [cb, user]() { return cb(user) != 0; };
-            }
-        }
-
-        for (int i = 0; i < req->n_loras; i++) {
-            const std::string name = (req->lora_names && req->lora_names[i]) ? req->lora_names[i] : "";
-            if (name.empty()) continue;
-            std::string path = std::filesystem::exists(name)
-                             ? name : sa3::resolve_one(ctx->adapters_dir, "lora-" + name + "-", ".gguf");
-            if (path.empty()) { set_err(err, err_len, "unknown lora '" + name + "'"); return 2; }
-            const float s = req->lora_strengths ? req->lora_strengths[i] : 1.0f;
-            p.loras.push_back({path, s});
-        }
-        if (req->on_progress) {
-            const sa3_progress_cb cb = req->on_progress; void* user = req->user;
-            p.on_progress = [cb, user](const sa3::Progress& pr) { cb(user, pr.stage, pr.step, pr.total, pr.fraction); };
-        }
-
-        sa3::GenResult r = ctx->pipe->generate(p);
-        const size_t n = (size_t)r.n_samp * r.n_ch;
-        out->samples = (float*)std::malloc(n * sizeof(float));
-        if (!out->samples) { set_err(err, err_len, "out of memory"); return 3; }
-        std::memcpy(out->samples, r.samples.data(), n * sizeof(float));
-        out->n_samp = r.n_samp; out->n_ch = r.n_ch; out->sample_rate = r.sample_rate;
-        out->seed = p.seed;
-
-        sa3_meta m{};
-        m.size = (uint32_t)sizeof(sa3_meta);
-        m.seed = p.seed;
-        m.decoded_peak                = r.loudness.decoded_peak;
-        m.peak_normalize_gain_set     = r.loudness.peak_normalize_gain_set ? 1 : 0;
-        m.peak_normalize_gain         = r.loudness.peak_normalize_gain;
-        m.limiter_limited_fraction_set= r.loudness.limiter_limited_fraction_set ? 1 : 0;
-        m.limiter_limited_fraction    = r.loudness.limiter_limited_fraction;
-        m.safety_gain_set             = r.loudness.safety_gain_set ? 1 : 0;
-        m.safety_gain                 = r.loudness.safety_gain;
-        m.final_peak                  = r.loudness.final_peak;
-        m.latent_factor               = r.loudness.latent_factor;
-        m.splice_applied              = r.splice.applied ? 1 : 0;
-        m.splice_end_seconds          = r.splice.splice_end_seconds;
-        m.splice_xfade_applied        = r.splice.xfade_applied;
-        m.splice_gain                 = r.splice.gain;
-        m.mask_start_seconds          = r.splice.mask_start_seconds;
-        m.mask_overlap_applied        = r.splice.mask_overlap_applied;
-        ctx->last_meta = m;
-        return 0;
-    } catch (const std::exception& e) { set_err(err, err_len, e.what()); return 10; }
-      catch (...)                     { set_err(err, err_len, "unknown error"); return 10; }
-}
-
-static sa3_context* sa3_init_impl(const sa3_config* cfg, int cpu_threads, const char* device,
-                                  const char* text_encoding, const char* ae_encoding,
-                                  char* err, int err_len) {
-    try {
-        if (cpu_threads < 0) { set_err(err, err_len, "cpu_threads must be positive"); return nullptr; }
-        std::string models_dir = cfg && cfg->models_dir ? cfg->models_dir : "";
-        if (models_dir.empty()) { const char* e = std::getenv("SA3_MODELS_DIR"); models_dir = (e && *e) ? e : "models"; }
-        const std::string variant  = cfg && cfg->variant  ? cfg->variant  : "medium";
-        const std::string encoding = cfg && cfg->encoding ? cfg->encoding : "f16";
-        const std::string adir     = cfg && cfg->adapters_dir ? cfg->adapters_dir : models_dir;
-
-        const std::string tenc = text_encoding ? text_encoding : "";
-        const std::string aenc = ae_encoding ? ae_encoding : "";
-
-        sa3::ModelPaths mp; std::string rerr;
-        if (!sa3::ModelPaths::resolve(models_dir, variant, encoding, tenc, aenc, mp, rerr)) { set_err(err, err_len, rerr); return nullptr; }
-
-        auto ctx = std::make_unique<sa3_context>();
-        ctx->paths = mp;
-        ctx->adapters_dir = adir;
-        ctx->cpu_threads = cpu_threads;
-        if (device) ctx->device = device;
-        ctx->pipe = std::make_unique<sa3::Pipeline>();
-        ctx->pipe->load(mp, ctx->cpu_threads, device);
-        return ctx.release();
-    } catch (const std::exception& e) { set_err(err, err_len, e.what()); return nullptr; }
-      catch (...)                     { set_err(err, err_len, "unknown error"); return nullptr; }
-}
 
 extern "C" {
-static int sa3_train_impl(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
-                          sa3_train_result* out, char* err, int err_len,
-                          bool explicit_values);
 }
 
 namespace {
@@ -248,11 +51,18 @@ bool has_v1_size(const T* value, uint32_t minimum_size) {
     return value && value->size >= minimum_size;
 }
 
+/// Both tables publish this. Bumped when the exported surface changes, which is now only ever a
+/// V1 table growing -- the legacy entry points it used to sit beside are gone.
+const char* SA3_CALL v1_runtime_version(void) { return "sa3.cpp libsa3 7 (ABI 1)"; }
+
 void SA3_CALL v1_error_init(sa3_error_v1* error) {
     init_v1_struct(error);
 }
 
-void set_v1_error(sa3_error_v1* error, sa3_status_v1 code, const std::string& message) {
+/// Writes into the caller's fixed buffer and allocates nothing, which is what makes it safe in a
+/// catch handler: the condition being reported may be that allocation just failed, and building a
+/// std::string to describe it would throw again on the way out of a C ABI boundary.
+void set_v1_error_literal(sa3_error_v1* error, sa3_status_v1 code, const char* message) {
     if (!error || error->size < sizeof(uint32_t)) return;
     const uint32_t caller_size = error->size;
     std::memset(error, 0, std::min<size_t>(caller_size, sizeof(*error)));
@@ -261,11 +71,15 @@ void set_v1_error(sa3_error_v1* error, sa3_status_v1 code, const std::string& me
     if (caller_size > offsetof(sa3_error_v1, message)) {
         const size_t cap = std::min<size_t>(sizeof(error->message),
                                             caller_size - offsetof(sa3_error_v1, message));
-        if (cap > 0) {
-            std::strncpy(error->message, message.c_str(), cap - 1);
+        if (cap > 0 && message) {
+            std::strncpy(error->message, message, cap - 1);
             error->message[cap - 1] = '\0';
         }
     }
+}
+
+void set_v1_error(sa3_error_v1* error, sa3_status_v1 code, const std::string& message) {
+    set_v1_error_literal(error, code, message.c_str());
 }
 
 void clear_v1_error(sa3_error_v1* error) {
@@ -398,17 +212,15 @@ const char* v1_distribution_name(sa3_distribution_shift_v1 shift) {
     }
 }
 
-sa3_status_v1 status_from_legacy(int code, const char* message) {
-    if (code == 0) return SA3_STATUS_OK_V1;
-    if (message && std::strstr(message, "cancelled")) return SA3_STATUS_CANCELLED_V1;
-    if (code == 1 || code == 4 || code == 5 || code == 6) return SA3_STATUS_INVALID_ARGUMENT_V1;
-    if (code == 2) return SA3_STATUS_IO_ERROR_V1;
-    if (code == 3) return SA3_STATUS_OUT_OF_MEMORY_V1;
-    return SA3_STATUS_MODEL_ERROR_V1;
-}
 
 sa3_status_v1 fail_v1(sa3_error_v1* error, sa3_status_v1 status, const std::string& message) {
     set_v1_error(error, status, message);
+    return status;
+}
+
+/// The allocation-free counterpart, for catch handlers and anything on an out-of-memory path.
+sa3_status_v1 fail_v1_literal(sa3_error_v1* error, sa3_status_v1 status, const char* message) {
+    set_v1_error_literal(error, status, message);
     return status;
 }
 
@@ -423,23 +235,47 @@ sa3_status_v1 SA3_CALL v1_context_create(const sa3_context_config_v1* config,
     if (config->cpu_threads < 0)
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "cpu_threads must be non-negative");
 
-    sa3_config_ex legacy{};
-    legacy.config.models_dir = config->models_dir;
-    legacy.config.adapters_dir = config->adapters_dir;
-    legacy.config.variant = config->variant;
-    legacy.config.encoding = config->dit_encoding;
-    legacy.cpu_threads = config->cpu_threads;
-    legacy.device = config->device;
-    legacy.text_encoder_encoding = config->text_encoder_encoding;
-    legacy.autoencoder_encoding = config->autoencoder_encoding;
-    char message[1024]{};
-    *out_context = sa3_init_impl(&legacy.config, legacy.cpu_threads, legacy.device,
-                                 legacy.text_encoder_encoding, legacy.autoencoder_encoding,
-                                 message, (int)sizeof(message));
-    if (!*out_context)
-        return fail_v1(error, SA3_STATUS_MODEL_ERROR_V1,
-                       message[0] ? message : "failed to create context");
-    return SA3_STATUS_OK_V1;
+    try {
+        // NULL means unset and falls back. An empty string is NOT a fallback -- it is passed
+        // through as the caller wrote it, and resolve fails on it. That is what V1 published and
+        // what three frontends shipped against, so it stays; models_dir is the one exception,
+        // because it has always treated empty as unset.
+        const auto given = [](const char* value) { return value ? std::string(value) : std::string(); };
+        std::string models_dir = given(config->models_dir);
+        if (models_dir.empty()) {
+            const char* from_env = std::getenv("SA3_MODELS_DIR");
+            models_dir = (from_env && *from_env) ? from_env : "models";
+        }
+        const std::string variant = config->variant ? config->variant : "medium";
+        const std::string dit = config->dit_encoding ? config->dit_encoding : "f16";
+        const std::string adapters_dir = config->adapters_dir ? config->adapters_dir : models_dir;
+
+        sa3::ModelPaths paths;
+        std::string why;
+        // MODEL_ERROR rather than IO_ERROR: a missing or unresolvable model set has reported
+        // itself this way since V1 published, and frontends branch on the status.
+        if (!sa3::ModelPaths::resolve(models_dir, variant, dit, given(config->text_encoder_encoding),
+                                      given(config->autoencoder_encoding), paths, why))
+            return fail_v1(error, SA3_STATUS_MODEL_ERROR_V1,
+                           why.empty() ? "failed to resolve the model set" : why);
+
+        auto created = std::make_unique<sa3_context>();
+        created->paths = paths;
+        created->adapters_dir = adapters_dir;
+        created->cpu_threads = config->cpu_threads;
+        created->device = given(config->device);
+        created->pipe = std::make_unique<sa3::Pipeline>();
+        // The raw pointer, so an empty device string reaches the backend exactly as it used to.
+        created->pipe->load(paths, created->cpu_threads, config->device);
+        *out_context = created.release();
+        return SA3_STATUS_OK_V1;
+    } catch (const std::bad_alloc&) {
+        return fail_v1_literal(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory creating context");
+    } catch (const std::exception& e) {
+        return fail_v1_literal(error, SA3_STATUS_MODEL_ERROR_V1, e.what());
+    } catch (...) {
+        return fail_v1_literal(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error creating context");
+    }
 }
 
 void SA3_CALL v1_context_unload(sa3_context* context) {
@@ -461,7 +297,58 @@ void SA3_CALL v1_result_free(sa3_result_v1* result) {
         result->layout = SA3_AUDIO_PLANAR_V1;
 }
 
-sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
+/// Runs one prepared request and publishes the result.
+///
+/// The outer v1_generate entry point owns the exception boundary for this work. The pipeline
+/// signals a cooperative stop by throwing; v1_generate maps that to CANCELLED and leaves the
+/// result untouched.
+sa3_status_v1 run_generation(sa3_context* context, sa3::GenParams& params,
+                             sa3_result_v1* result, sa3_error_v1* error) {
+    {
+        if (!context->pipe) {   // reload after context_unload()
+            context->pipe = std::make_unique<sa3::Pipeline>();
+            context->pipe->load(context->paths, context->cpu_threads,
+                                context->device.empty() ? nullptr : context->device.c_str());
+        }
+        const sa3::GenResult r = context->pipe->generate(params);
+        const size_t n = (size_t)r.n_samp * r.n_ch;
+        float* samples = (float*)std::malloc(n * sizeof(float));
+        if (!samples)
+            return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory allocating result audio");
+        std::memcpy(samples, r.samples.data(), n * sizeof(float));
+
+        const uint32_t result_size = result->size;
+        std::memset(result, 0, std::min<size_t>(result_size, sizeof(*result)));
+        result->size = result_size;
+        result->samples = samples;
+        result->n_samples = (uint64_t)r.n_samp;
+        result->n_channels = (uint32_t)r.n_ch;
+        result->sample_rate = (uint32_t)r.sample_rate;
+        result->layout = SA3_AUDIO_PLANAR_V1;
+        result->seed = params.seed;
+        // Straight off the pipeline's own metadata. It used to be parked on the context between
+        // the generate call and a separate getter, because the legacy sa3_audio had nowhere to
+        // carry it; sa3_result_v1 does, so the context no longer holds state between calls.
+        result->decoded_peak = r.loudness.decoded_peak;
+        result->peak_normalize_gain_set = r.loudness.peak_normalize_gain_set ? 1 : 0;
+        result->peak_normalize_gain = r.loudness.peak_normalize_gain;
+        result->limiter_limited_fraction_set = r.loudness.limiter_limited_fraction_set ? 1 : 0;
+        result->limiter_limited_fraction = r.loudness.limiter_limited_fraction;
+        result->safety_gain_set = r.loudness.safety_gain_set ? 1 : 0;
+        result->safety_gain = r.loudness.safety_gain;
+        result->final_peak = r.loudness.final_peak;
+        result->latent_factor = r.loudness.latent_factor;
+        result->splice_applied = r.splice.applied ? 1 : 0;
+        result->splice_end_seconds = r.splice.splice_end_seconds;
+        result->splice_crossfade_seconds = r.splice.xfade_applied;
+        result->splice_gain = r.splice.gain;
+        result->mask_start_seconds = r.splice.mask_start_seconds;
+        result->mask_overlap_seconds = r.splice.mask_overlap_applied;
+        return SA3_STATUS_OK_V1;
+    }
+}
+
+sa3_status_v1 v1_generate_body(sa3_context* context,
                                     const sa3_request_v1* request,
                                     sa3_result_v1* result,
                                     sa3_error_v1* error) {
@@ -549,22 +436,35 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
         !has_v1_size(&request->continuation, SA3_CONTINUATION_V1_MIN_SIZE))
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
                        "embedded loudness or continuation options are too small");
-    sa3_loudness loudness{};
-    loudness.set = 1;
-    loudness.peak_normalize = request->loudness.peak_normalize;
-    loudness.peak_normalize_db = request->loudness.peak_normalize_db;
-    loudness.limiter = request->loudness.limiter;
-    loudness.limiter_ceiling_db = request->loudness.limiter_ceiling_db;
-    loudness.limiter_knee = request->loudness.limiter_knee;
-    loudness.latent_rescale = request->loudness.latent_rescale;
-    loudness.latent_shift = request->loudness.latent_shift;
+    // Every V1 value is explicit, so these map straight across: there is no "did the caller mean
+    // zero or mean default" question left to answer, because request_init already answered it.
+    sa3::LoudnessParams loudness;
+    loudness.peak_normalize_enabled = request->loudness.peak_normalize != 0;
+    loudness.peak_normalize_db      = request->loudness.peak_normalize_db;
+    loudness.limiter_enabled        = request->loudness.limiter != 0;
+    loudness.limiter_ceiling_db     = request->loudness.limiter_ceiling_db;
+    loudness.limiter_knee           = request->loudness.limiter_knee;
+    loudness.latent_rescale         = request->loudness.latent_rescale;
+    loudness.latent_shift           = request->loudness.latent_shift;
+    sa3::normalize_loudness_params(loudness);
+    {
+        std::string why;
+        if (!sa3::validate_loudness_params(loudness, why))
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "loudness: " + why);
+    }
 
-    sa3_splice splice{};
-    splice.set = 1;
-    splice.splice = request->continuation.splice_source;
-    splice.mask_overlap = request->continuation.mask_overlap_seconds;
-    splice.xfade = request->continuation.crossfade_seconds;
-    splice.gain_match = request->continuation.gain_match;
+    // Continuation options describe the splice, which only runs for Continue. Other operations
+    // leave the library defaults in place rather than validating values they will never read.
+    sa3::SpliceParams splice = sa3::splice_defaults_from_env();
+    if (request->operation == SA3_OPERATION_CONTINUE_V1) {
+        splice.enabled      = request->continuation.splice_source != 0;
+        splice.mask_overlap = request->continuation.mask_overlap_seconds;
+        splice.xfade        = request->continuation.crossfade_seconds;
+        splice.gain_match   = request->continuation.gain_match != 0;
+        std::string why;
+        if (!sa3::validate_splice_params(splice, why))
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "splice: " + why);
+    }
 
     std::vector<float> planar_input;
     const float* input_samples = needs_input ? request->input_audio.samples : nullptr;
@@ -617,92 +517,116 @@ sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
     }
 
     V1CallbackBridge bridge{request};
-    sa3_request_v2 legacy{};
-    legacy.size = sizeof(legacy);
-    legacy.request.request.prompt = request->prompt;
-    legacy.request.request.negative_prompt = request->negative_prompt;
-    legacy.request.request.frames = frames;
-    legacy.request.request.steps = request->steps;
-    legacy.request.request.seed = request->seed;
-    legacy.request.request.cfg_scale = request->cfg_scale;
-    legacy.request.request.duration_padding_sec = request->operation == SA3_OPERATION_GENERATE_V1
+    sa3::GenParams p;
+    p.prompt = request->prompt ? request->prompt : "";
+    if (request->negative_prompt) p.negative_prompt = request->negative_prompt;
+    p.frames = frames;
+    p.steps = request->steps;
+    p.seed = sa3::pick_seed((long long)request->seed);
+    p.cfg_scale = request->cfg_scale;
+    // Tail headroom is the generation schedule's; a Continue gets its headroom through the
+    // inpaint canvas below instead, so the sampler is told the piece does not end there.
+    p.duration_padding_sec = request->operation == SA3_OPERATION_GENERATE_V1
         ? request->generation_tail_padding_seconds : 0.0f;
-    legacy.request.request.keep_models = request->residency == SA3_RESIDENCY_RESIDENT_V1;
-    legacy.request.request.loudness = loudness;
-    legacy.request.request.n_loras = (int)adapter_names.size();
-    legacy.request.request.lora_names = adapter_names.empty() ? nullptr : adapter_names.data();
-    legacy.request.request.lora_strengths = adapter_strengths.empty() ? nullptr : adapter_strengths.data();
-    legacy.request.request.dist_shift = distribution;
-    std::copy(std::begin(distribution_params),
-              std::end(distribution_params),
-              std::begin(legacy.request.request.dist_shift_params));
-    if (request->on_progress) {
-        legacy.request.request.on_progress = v1_progress_bridge;
-        legacy.request.request.user = &bridge;
+    p.target_n_samp = target_samples;
+    p.keep_models = request->residency == SA3_RESIDENCY_RESIDENT_V1;
+    p.dist_shift = distribution;
+    p.ds_p1 = distribution_params[0];
+    p.ds_p2 = distribution_params[1];
+    p.ds_p3 = distribution_params[2];
+    p.ds_p4 = distribution_params[3];
+    p.loudness = loudness;
+    p.splice = splice;
+    if (request->encode_chunk_size > 0) {
+        p.encode_chunk_size = request->encode_chunk_size;
+        p.encode_overlap = request->encode_overlap;
     }
+    if (request->decode_chunk_size > 0) {
+        p.decode_chunk_size = request->decode_chunk_size;
+        p.decode_overlap = request->decode_overlap;
+    }
+
     if (needs_input) {
-        legacy.request.init_audio.mode = request->operation == SA3_OPERATION_TRANSFORM_V1
-            ? SA3_INIT_AUDIO_A2A : SA3_INIT_AUDIO_INPAINT;
-        legacy.request.init_audio.samples = input_samples;
-        legacy.request.init_audio.n_samp = (int)request->input_audio.n_samples;
-        legacy.request.init_audio.n_ch = (int)request->input_audio.n_channels;
-        legacy.request.init_audio.sample_rate = (int)request->input_audio.sample_rate;
-        legacy.request.init_audio.init_noise_level = request->transform_noise_level;
+        const size_t total = (size_t)request->input_audio.n_samples *
+                             (size_t)request->input_audio.n_channels;
+        try {
+            p.init_audio.assign(input_samples, input_samples + total);
+        } catch (const std::bad_alloc&) {
+            return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory copying input audio");
+        }
+        p.init_n_samp = (int)request->input_audio.n_samples;
+        p.init_n_ch = (int)request->input_audio.n_channels;
+        p.init_sample_rate = (int)request->input_audio.sample_rate;
+        p.init_noise_level = request->transform_noise_level;
         if (request->operation == SA3_OPERATION_CONTINUE_V1) {
-            legacy.request.init_audio.inpaint_start = (float)((double)source_samples_44100 / 44100.0);
+            // The window opens where the source ends; the splice pulls it back from there. The
+            // canvas runs past the promised length by the continuation headroom so the model has
+            // somewhere to go, and target_n_samp trims it back afterwards.
+            p.inpaint_start = (float)((double)source_samples_44100 / 44100.0);
             const double canvas_samples = (double)target_samples +
                 std::round((double)request->continuation_tail_padding_seconds * 44100.0);
             if (canvas_samples > (double)std::numeric_limits<int>::max())
                 return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "continuation canvas is out of range");
-            legacy.request.init_audio.inpaint_end = (float)(canvas_samples / 44100.0);
-            legacy.splice = splice;
+            p.inpaint_end = (float)(canvas_samples / 44100.0);
         }
     }
-    legacy.request.encode_chunk_size = request->encode_chunk_size;
-    legacy.request.encode_overlap = request->encode_overlap;
-    legacy.request.decode_chunk_size = request->decode_chunk_size;
-    legacy.request.decode_overlap = request->decode_overlap;
+
+    // A bare name resolves against adapters_dir; an existing path is taken as given.
+    try {
+        for (size_t i = 0; i < adapter_names.size(); ++i) {
+            const std::string name = adapter_names[i];
+            std::string path = std::filesystem::exists(name)
+                             ? name
+                             : sa3::resolve_one(context->adapters_dir, "lora-" + name + "-", ".gguf");
+            if (path.empty())
+                return fail_v1(error, SA3_STATUS_IO_ERROR_V1, "unknown adapter '" + name + "'");
+            p.loras.push_back({path, adapter_strengths[i]});
+        }
+    } catch (const std::exception& e) {
+        return fail_v1(error, SA3_STATUS_IO_ERROR_V1, e.what());
+    }
+
+    if (request->on_progress) {
+        V1CallbackBridge* b = &bridge;
+        p.on_progress = [b](const sa3::Progress& pr) {
+            v1_progress_bridge(b, pr.stage, pr.step, pr.total, pr.fraction);
+        };
+    }
     if (request->should_cancel) {
-        legacy.request.should_cancel = v1_cancel_bridge;
-        legacy.request.cancel_user = &bridge;
+        V1CallbackBridge* b = &bridge;
+        p.should_cancel = [b]() { return v1_cancel_bridge(b) != 0; };
     }
 
-    sa3_audio audio{};
-    char message[1024]{};
-    const int rc = sa3_generate_impl(context, &legacy.request.request, &legacy.request,
-                                     request->operation == SA3_OPERATION_CONTINUE_V1 ? &legacy.splice : nullptr,
-                                     &audio, message, (int)sizeof(message), target_samples, true);
-    if (rc != 0) {
-        const sa3_status_v1 status = status_from_legacy(rc, message);
-        return fail_v1(error, status, message[0] ? message : "generation failed");
-    }
+    return run_generation(context, p, result, error);
+}
 
-    const uint32_t result_size = result->size;
-    std::memset(result, 0, std::min<size_t>(result_size, sizeof(*result)));
-    result->size = result_size;
-    result->samples = audio.samples;
-    result->n_samples = (uint64_t)audio.n_samp;
-    result->n_channels = (uint32_t)audio.n_ch;
-    result->sample_rate = (uint32_t)audio.sample_rate;
-    result->layout = SA3_AUDIO_PLANAR_V1;
-    result->seed = audio.seed;
-    const sa3_meta& meta = context->last_meta;
-    result->decoded_peak = meta.decoded_peak;
-    result->peak_normalize_gain_set = meta.peak_normalize_gain_set;
-    result->peak_normalize_gain = meta.peak_normalize_gain;
-    result->limiter_limited_fraction_set = meta.limiter_limited_fraction_set;
-    result->limiter_limited_fraction = meta.limiter_limited_fraction;
-    result->safety_gain_set = meta.safety_gain_set;
-    result->safety_gain = meta.safety_gain;
-    result->final_peak = meta.final_peak;
-    result->latent_factor = meta.latent_factor;
-    result->splice_applied = meta.splice_applied;
-    result->splice_end_seconds = meta.splice_end_seconds;
-    result->splice_crossfade_seconds = meta.splice_xfade_applied;
-    result->splice_gain = meta.splice_gain;
-    result->mask_start_seconds = meta.mask_start_seconds;
-    result->mask_overlap_seconds = meta.mask_overlap_applied;
-    return SA3_STATUS_OK_V1;
+/// The exception boundary for generation.
+///
+/// It wraps the ENTIRE operation — request translation, its string and vector allocations, the
+/// callbacks, the run itself and result construction — because a C ABI that lets an exception
+/// escape does not return an error, it terminates the host. An allocation while copying a long
+/// prompt is as capable of throwing as the sampler is.
+///
+/// Everything here is allocation-free: `strstr` rather than a std::string search, and literal
+/// error messages, so reporting an out-of-memory condition cannot itself run out of memory.
+sa3_status_v1 SA3_CALL v1_generate(sa3_context* context,
+                                   const sa3_request_v1* request,
+                                   sa3_result_v1* result,
+                                   sa3_error_v1* error) {
+    try {
+        return v1_generate_body(context, request, result, error);
+    } catch (const std::bad_alloc&) {
+        return fail_v1_literal(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory during generation");
+    } catch (const std::exception& e) {
+        // The pipeline signals a cooperative stop by throwing; that is a cancellation, not a failure.
+        const char* what = e.what();
+        if (what && std::strstr(what, "cancelled"))
+            return fail_v1_literal(error, SA3_STATUS_CANCELLED_V1, what);
+        return fail_v1_literal(error, SA3_STATUS_MODEL_ERROR_V1,
+                               what && *what ? what : "generation failed");
+    } catch (...) {
+        return fail_v1_literal(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error during generation");
+    }
 }
 
 sa3_status_v1 SA3_CALL v1_convert_lora(const sa3_lora_convert_v1* options,
@@ -711,14 +635,29 @@ sa3_status_v1 SA3_CALL v1_convert_lora(const sa3_lora_convert_v1* options,
     if (!has_v1_size(options, SA3_LORA_CONVERT_V1_MIN_SIZE) ||
         !options->safetensors_path || !options->output_gguf_path)
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid LoRA conversion options");
-    char message[1024]{};
-    const int rc = sa3_convert_lora(options->safetensors_path, options->json_path,
-                                    options->output_gguf_path, message, (int)sizeof(message));
-    if (rc != 0) {
-        const sa3_status_v1 status = status_from_legacy(rc, message);
-        return fail_v1(error, status, message[0] ? message : "LoRA conversion failed");
+    try {
+        std::string why;
+        // A null or empty json_path means the config is in the safetensors' own __metadata__,
+        // which is where autoencoder adapters keep it -- they ship as one self-describing file.
+        if (!sa3::convert_lora_safetensors(options->safetensors_path,
+                                           options->json_path ? options->json_path : "",
+                                           options->output_gguf_path, why))
+            return fail_v1(error, SA3_STATUS_IO_ERROR_V1, why.empty() ? "LoRA conversion failed" : why);
+        return SA3_STATUS_OK_V1;
+    } catch (const std::bad_alloc&) {
+        return fail_v1_literal(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory converting LoRA");
+    } catch (const std::exception& e) {
+        return fail_v1_literal(error, SA3_STATUS_IO_ERROR_V1, e.what());
+    } catch (...) {
+        return fail_v1_literal(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error converting LoRA");
     }
-    return SA3_STATUS_OK_V1;
+}
+
+static void copy_field(char* dst, size_t cap, const std::string& src) {
+    if (!dst || cap == 0) return;
+    const size_t n = src.size() < cap - 1 ? src.size() : cap - 1;
+    std::memcpy(dst, src.data(), n);
+    dst[n] = '\0';
 }
 
 void SA3_CALL v1_training_config_init(sa3_training_config_v1* config) {
@@ -747,11 +686,25 @@ void SA3_CALL v1_training_result_init(sa3_training_result_v1* result) {
     init_v1_struct(result);
 }
 
+/// Carries the V1 callbacks into the trainer's own hook types, and remembers why host audio
+/// failed. The error is recorded rather than thrown because the trainer reports failures through
+/// its own return path; v1_training_run reads it back once the run unwinds.
 struct V1TrainingBridge {
     const sa3_training_callbacks_v1* callbacks = nullptr;
     std::vector<float> audio_copy;
     std::string audio_error;
     sa3_status_v1 audio_status = SA3_STATUS_OK_V1;
+
+    void fail(std::string message, sa3_status_v1 status, std::string& why) {
+        audio_status = status;
+        audio_error = std::move(message);
+        why = audio_error;
+    }
+
+    /// False lets libsa3 read the file itself. That is both the NOT_HANDLED answer and what an
+    /// error degrades to, after recording what went wrong.
+    bool load_audio(const std::string& path, int sample_rate, int channels,
+                    sa3::TrainAudio& out, std::string& why);
 };
 
 sa3_status_v1 v1_training_audio_error_status(sa3_status_v1 status) {
@@ -769,45 +722,9 @@ sa3_status_v1 v1_training_audio_error_status(sa3_status_v1 status) {
     }
 }
 
-void v1_training_log_bridge(void* user, const char* line) {
-    auto* bridge = static_cast<V1TrainingBridge*>(user);
-    if (bridge && bridge->callbacks && bridge->callbacks->on_log)
-        bridge->callbacks->on_log(bridge->callbacks->user, line);
-}
-
-void v1_training_step_bridge(void* user, const sa3_train_step* legacy) {
-    auto* bridge = static_cast<V1TrainingBridge*>(user);
-    if (!bridge || !bridge->callbacks || !bridge->callbacks->on_step || !legacy) return;
-    sa3_training_step_v1 step{};
-    step.size = sizeof(step);
-    step.epoch = legacy->epoch;
-    step.step = legacy->step;
-    step.max_steps = legacy->max_steps;
-    step.id = legacy->id;
-    step.prompt = legacy->prompt;
-    step.mask = legacy->mask;
-    step.timestep = legacy->t;
-    step.learning_rate = legacy->learning_rate;
-    step.loss = legacy->loss;
-    step.gradient_norm = legacy->grad_norm;
-    step.step_seconds = legacy->step_seconds;
-    step.cfg_dropped = legacy->cfg_dropped;
-    step.updated = legacy->updated;
-    step.generated_frames = legacy->n_gen;
-    step.context_frames = legacy->n_ctx;
-    bridge->callbacks->on_step(bridge->callbacks->user, &step);
-}
-
-int v1_training_cancel_bridge(void* user) {
-    auto* bridge = static_cast<V1TrainingBridge*>(user);
-    return bridge && bridge->callbacks && bridge->callbacks->should_cancel
-         ? bridge->callbacks->should_cancel(bridge->callbacks->user) : 0;
-}
-
-int v1_training_audio_bridge(void* user, const char* audio_path, int sample_rate, int channels,
-                             const float** samples, int* n_samp) {
-    auto* bridge = static_cast<V1TrainingBridge*>(user);
-    if (!bridge || !bridge->callbacks || !bridge->callbacks->load_audio) return 0;
+bool V1TrainingBridge::load_audio(const std::string& path, int sample_rate, int channels,
+                                  sa3::TrainAudio& out, std::string& why) {
+    if (!callbacks || !callbacks->load_audio) return false;
     sa3_training_audio_buffer_v1 buffer{};
     buffer.size = sizeof(buffer);
     buffer.audio.size = sizeof(buffer.audio);
@@ -815,74 +732,67 @@ int v1_training_audio_bridge(void* user, const char* audio_path, int sample_rate
     sa3_error_v1 callback_error{};
     callback_error.size = sizeof(callback_error);
     v1_error_init(&callback_error);
-    const sa3_training_audio_status_v1 supplied = bridge->callbacks->load_audio(
-        bridge->callbacks->user, audio_path, (uint32_t)sample_rate, (uint32_t)channels,
+
+    const sa3_training_audio_status_v1 supplied = callbacks->load_audio(
+        callbacks->user, path.c_str(), (uint32_t)sample_rate, (uint32_t)channels,
         &buffer, &callback_error);
-    if (supplied == SA3_TRAINING_AUDIO_NOT_HANDLED_V1) return 0;
+    if (supplied == SA3_TRAINING_AUDIO_NOT_HANDLED_V1) return false;
     if (supplied == SA3_TRAINING_AUDIO_ERROR_V1) {
         const char* begin = callback_error.message;
         const char* end = std::find(begin, begin + sizeof(callback_error.message), '\0');
-        bridge->audio_error = begin != end
-                            ? std::string(begin, end) : "host failed to decode training audio";
-        bridge->audio_status = v1_training_audio_error_status(callback_error.code);
-        *samples = nullptr;
-        *n_samp = 0;
-        return 1;
+        fail(begin != end ? std::string(begin, end) : "host failed to decode training audio",
+             v1_training_audio_error_status(callback_error.code), why);
+        return false;   // ERROR does not transfer ownership, so nothing to release
     }
     if (supplied != SA3_TRAINING_AUDIO_READY_V1) {
-        bridge->audio_error = "training audio callback returned an unknown status";
-        bridge->audio_status = SA3_STATUS_INVALID_ARGUMENT_V1;
-        *samples = nullptr;
-        *n_samp = 0;
-        return 1;
+        fail("training audio callback returned an unknown status",
+             SA3_STATUS_INVALID_ARGUMENT_V1, why);
+        return false;
     }
-    const auto release = [&]() {
-        bridge->callbacks->release_audio(bridge->callbacks->user, buffer.owner);
-    };
+
+    // READY transferred ownership, so release runs exactly once from here on -- including on
+    // every validation and allocation failure below.
+    const auto release = [&]() { callbacks->release_audio(callbacks->user, buffer.owner); };
     const sa3_audio_view_v1& audio = buffer.audio;
     if (!has_v1_size(&buffer, SA3_TRAINING_AUDIO_BUFFER_V1_MIN_SIZE) ||
         !has_v1_size(&audio, SA3_AUDIO_VIEW_V1_MIN_SIZE) || !audio.samples || audio.n_samples == 0 ||
         audio.n_samples > (uint64_t)std::numeric_limits<int>::max() ||
         audio.n_channels != (uint32_t)channels || audio.sample_rate != (uint32_t)sample_rate ||
         (audio.layout != SA3_AUDIO_PLANAR_V1 && audio.layout != SA3_AUDIO_INTERLEAVED_V1)) {
-        bridge->audio_error = "training audio callback returned an invalid or mismatched audio view";
-        bridge->audio_status = SA3_STATUS_INVALID_ARGUMENT_V1;
-        *samples = nullptr;
-        *n_samp = 0;
+        fail("training audio callback returned an invalid or mismatched audio view",
+             SA3_STATUS_INVALID_ARGUMENT_V1, why);
         release();
-        return 1;
+        return false;
     }
     const size_t ns = (size_t)audio.n_samples;
     const size_t nc = (size_t)audio.n_channels;
     if (nc > std::numeric_limits<size_t>::max() / ns) {
-        bridge->audio_error = "training audio callback returned too many samples";
-        bridge->audio_status = SA3_STATUS_INVALID_ARGUMENT_V1;
-        *samples = nullptr;
-        *n_samp = 0;
+        fail("training audio callback returned too many samples",
+             SA3_STATUS_INVALID_ARGUMENT_V1, why);
         release();
-        return 1;
+        return false;
     }
     try {
-        bridge->audio_copy.resize(ns * nc);
+        audio_copy.resize(ns * nc);
     } catch (const std::bad_alloc&) {
-        bridge->audio_error = "out of memory copying training callback audio";
-        bridge->audio_status = SA3_STATUS_OUT_OF_MEMORY_V1;
-        *samples = nullptr;
-        *n_samp = 0;
+        fail("out of memory copying training callback audio", SA3_STATUS_OUT_OF_MEMORY_V1, why);
         release();
-        return 1;
+        return false;
     }
     if (audio.layout == SA3_AUDIO_PLANAR_V1) {
-        std::copy(audio.samples, audio.samples + ns * nc, bridge->audio_copy.begin());
+        std::copy(audio.samples, audio.samples + ns * nc, audio_copy.begin());
     } else {
         for (size_t s = 0; s < ns; ++s)
             for (size_t c = 0; c < nc; ++c)
-                bridge->audio_copy[c * ns + s] = audio.samples[s * nc + c];
+                audio_copy[c * ns + s] = audio.samples[s * nc + c];
     }
     release();
-    *samples = bridge->audio_copy.data();
-    *n_samp = (int)audio.n_samples;
-    return 1;
+
+    out.samples = audio_copy;
+    out.n_samples = (int)ns;
+    out.n_channels = channels;
+    out.sample_rate = sample_rate;
+    return true;
 }
 
 sa3_status_v1 training_failure_status(int code, const char* message) {
@@ -924,78 +834,135 @@ sa3_status_v1 SA3_CALL v1_training_run(const sa3_training_config_v1* config,
     std::memset(result, 0, std::min<size_t>(result_size, sizeof(*result)));
     result->size = result_size;
 
-    sa3_train_config legacy{};
-    legacy.models_dir = config->models_dir;
-    legacy.dataset_dir = config->dataset_dir;
-    legacy.output_dir = config->output_dir;
-    legacy.config_path = config->config_path;
-    legacy.latents_dir = config->latents_dir;
-    legacy.latents_cache_dir = config->latents_cache_dir;
-    legacy.prompt_config_path = config->prompt_config_path;
-    legacy.resume_path = config->resume_path;
-    legacy.variant = config->variant;
-    legacy.encoding = config->dit_encoding;
-    legacy.text_encoder_encoding = config->text_encoder_encoding;
-    legacy.autoencoder_encoding = config->autoencoder_encoding;
-    legacy.adapter_type = config->adapter_type;
-    legacy.lora_scope = config->lora_scope;
-    legacy.device = config->device;
-    legacy.steps = config->steps;
-    legacy.rank = config->rank;
-    legacy.alpha = config->alpha;
-    legacy.learning_rate = config->learning_rate;
-    legacy.frames = config->frames;
-    legacy.duration_sec = config->duration_seconds;
-    legacy.batch_size = config->batch_size;
-    legacy.checkpoint_every = config->checkpoint_every;
-    legacy.cpu_threads = config->cpu_threads;
-    legacy.pre_encode = config->pre_encode;
-    legacy.seed = config->seed;
-    legacy.evict_text_encoder = config->evict_text_encoder;
-    legacy.latents_cache = config->latents_cache;
+    try {
+        sa3::TrainConfig tc;
+        if (const char* models = std::getenv("SA3_MODELS_DIR"); models && *models) tc.models_dir = models;
+        // The JSON config is applied first so the fields below win over it -- it is the escape
+        // hatch for trainer options V1 does not name, not an override of the ones it does.
+        if (config->config_path && *config->config_path) {
+            std::string why;
+            if (!sa3::train_apply_json_config(tc, config->config_path, why))
+                return fail_v1(error, SA3_STATUS_IO_ERROR_V1, why);
+        }
+        const auto str = [](const char* value, std::string& into) {
+            if (value && *value) into = value;
+        };
+        str(config->models_dir,             tc.models_dir);
+        str(config->variant,                tc.model_variant);
+        str(config->dit_encoding,           tc.encoding);
+        str(config->text_encoder_encoding,  tc.text_encoding);
+        str(config->autoencoder_encoding,   tc.ae_encoding);
+        str(config->dataset_dir,            tc.dataset_dir);
+        str(config->output_dir,             tc.output_dir);
+        str(config->latents_dir,            tc.latents_dir);
+        str(config->latents_cache_dir,      tc.latents_cache_dir);
+        str(config->prompt_config_path,     tc.prompt_config_path);
+        str(config->resume_path,            tc.resume_path);
+        str(config->adapter_type,           tc.adapter_type);
+        str(config->lora_scope,             tc.lora_scope);
+        str(config->device,                 tc.device);
 
-    V1TrainingBridge bridge{callbacks};
-    sa3_train_hooks hooks{};
-    const sa3_train_hooks* hooks_ptr = nullptr;
-    if (callbacks) {
-        hooks.user = &bridge;
-        hooks.on_log = callbacks->on_log ? v1_training_log_bridge : nullptr;
-        hooks.on_step = callbacks->on_step ? v1_training_step_bridge : nullptr;
-        hooks.should_cancel = callbacks->should_cancel ? v1_training_cancel_bridge : nullptr;
-        hooks.load_audio = callbacks->load_audio ? v1_training_audio_bridge : nullptr;
-        hooks_ptr = &hooks;
-    }
-    if (config->command_line) {
-        hooks.command_line = config->command_line;
-        hooks_ptr = &hooks;
-    }
+        // Every scalar is explicit in V1: config_init established the defaults, so a zero here is
+        // the caller's zero and is copied through as one.
+        tc.max_steps = config->steps;
+        tc.rank = config->rank;
+        tc.alpha = config->alpha;
+        tc.learning_rate = config->learning_rate;
+        tc.frames = config->frames;
+        tc.duration_sec = config->duration_seconds;
+        tc.batch_size = config->batch_size;
+        tc.checkpoint_every = config->checkpoint_every;
+        tc.cpu_threads = config->cpu_threads;
+        tc.pre_encode = config->pre_encode != 0;
+        tc.evict_text_encoder = config->evict_text_encoder != 0;
+        tc.latents_cache = config->latents_cache != 0;
+        tc.seed = (unsigned long long)config->seed;
 
-    sa3_train_result legacy_result{};
-    char message[1024]{};
-    const int rc = sa3_train_impl(&legacy, hooks_ptr, &legacy_result,
-                                  message, (int)sizeof(message), true);
-    if (!bridge.audio_error.empty())
-        return fail_v1(error, bridge.audio_status, bridge.audio_error);
-    if (rc != 0) {
-        const sa3_status_v1 status = training_failure_status(rc, message);
-        return fail_v1(error, status, message[0] ? message : "training failed");
-    }
+        if (tc.dataset_dir.empty())
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "dataset_dir is required");
+        if (tc.cpu_threads == 0) tc.cpu_threads = sa3::cpu_threads_from_env();
+        sa3::train_finalize_defaults(tc);
 
-    result->completed_steps = legacy_result.steps;
-    result->cancelled = legacy_result.cancelled;
-    result->mean_step_seconds = legacy_result.mean_step_seconds;
-    std::memcpy(result->final_adapter, legacy_result.final_adapter, sizeof(result->final_adapter));
-    std::memcpy(result->last_checkpoint, legacy_result.last_checkpoint, sizeof(result->last_checkpoint));
-    std::memcpy(result->preview_command, legacy_result.preview_command, sizeof(result->preview_command));
-    if (result->cancelled)
-        return fail_v1(error, SA3_STATUS_CANCELLED_V1, "training cancelled");
-    return SA3_STATUS_OK_V1;
+        V1TrainingBridge bridge{};
+        bridge.callbacks = callbacks;
+        sa3::TrainHooks th;
+        if (callbacks) {
+            if (callbacks->on_log) {
+                th.log = [&bridge](const std::string& line) {
+                    bridge.callbacks->on_log(bridge.callbacks->user, line.c_str());
+                };
+            }
+            if (callbacks->on_step) {
+                th.on_step = [&bridge](const sa3::TrainStepReport& r) {
+                    sa3_training_step_v1 step{};
+                    step.size = sizeof(step);
+                    step.epoch = r.epoch;
+                    step.step = r.step;
+                    step.max_steps = r.max_steps;
+                    step.id = r.id.c_str();
+                    step.prompt = r.prompt.c_str();
+                    step.mask = r.mask.c_str();
+                    step.timestep = r.t;
+                    step.learning_rate = r.learning_rate;
+                    step.loss = r.loss;
+                    step.gradient_norm = r.grad_norm;
+                    step.step_seconds = r.step_seconds;
+                    step.cfg_dropped = r.cfg_dropped ? 1 : 0;
+                    step.updated = r.updated ? 1 : 0;
+                    step.generated_frames = r.n_gen;
+                    step.context_frames = r.n_ctx;
+                    bridge.callbacks->on_step(bridge.callbacks->user, &step);
+                };
+            }
+            if (callbacks->should_cancel) {
+                th.should_cancel = [&bridge]() {
+                    return bridge.callbacks->should_cancel(bridge.callbacks->user) != 0;
+                };
+            }
+            if (callbacks->load_audio) {
+                th.load_audio = [&bridge](const sa3::TrainAudioCaptionPair& pair, int sr, int ch,
+                                          sa3::TrainAudio& audio, std::string& why) {
+                    return bridge.load_audio(pair.audio_path, sr, ch, audio, why);
+                };
+            }
+        }
+        if (config->command_line) th.command_line = config->command_line;
+
+        sa3::TrainResult run;
+        std::string why;
+        const bool ok = sa3::run_training(tc, th, run, why);
+        // A host decode failure is the more specific cause, so it outranks whatever the trainer
+        // reported on its way out.
+        if (!bridge.audio_error.empty())
+            return fail_v1(error, bridge.audio_status, bridge.audio_error);
+        if (!ok)
+            return fail_v1(error, training_failure_status(3, why.c_str()),
+                           why.empty() ? "training failed" : why);
+
+        result->completed_steps = run.steps;
+        result->cancelled = run.cancelled ? 1 : 0;
+        result->mean_step_seconds = run.mean_step_seconds;
+        copy_field(result->final_adapter, sizeof(result->final_adapter), run.final_adapter);
+        copy_field(result->last_checkpoint, sizeof(result->last_checkpoint), run.last_adapter_checkpoint);
+        copy_field(result->preview_command, sizeof(result->preview_command), run.preview_command);
+        // CANCELLED still carries a valid result; the caller inspects final_adapter rather than
+        // discarding it.
+        if (result->cancelled)
+            return fail_v1(error, SA3_STATUS_CANCELLED_V1, "training cancelled");
+        return SA3_STATUS_OK_V1;
+    } catch (const std::bad_alloc&) {
+        return fail_v1_literal(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory during training");
+    } catch (const std::exception& e) {
+        return fail_v1_literal(error, SA3_STATUS_MODEL_ERROR_V1, e.what());
+    } catch (...) {
+        return fail_v1_literal(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error during training");
+    }
 }
 
 const sa3_api_v1 k_api_v1 = {
     sizeof(sa3_api_v1),
     SA3_ABI_VERSION_1,
-    sa3_version,
+    v1_runtime_version,
     v1_error_init,
     v1_context_config_init,
     v1_request_init,
@@ -1017,7 +984,7 @@ const sa3_api_v1 k_api_v1 = {
 const sa3_training_api_v1 k_training_api_v1 = {
     sizeof(sa3_training_api_v1),
     SA3_TRAINING_ABI_VERSION_1,
-    sa3_version,
+    v1_runtime_version,
     v1_error_init,
     v1_training_config_init,
     v1_training_callbacks_init,
@@ -1036,224 +1003,6 @@ SA3_API const sa3_api_v1* SA3_CALL sa3_get_api(uint32_t abi_version) {
 
 SA3_API const sa3_training_api_v1* SA3_CALL sa3_get_training_api(uint32_t abi_version) {
     return abi_version == SA3_TRAINING_ABI_VERSION_1 ? &k_training_api_v1 : nullptr;
-}
-
-SA3_API sa3_context* sa3_init(const sa3_config* cfg, char* err, int err_len) {
-    return sa3_init_impl(cfg, 0, nullptr, nullptr, nullptr, err, err_len);
-}
-
-SA3_API sa3_context* sa3_init_ex(const sa3_config_ex* cfg, char* err, int err_len) {
-    return sa3_init_impl(cfg ? &cfg->config : nullptr, cfg ? cfg->cpu_threads : 0,
-                         cfg ? cfg->device : nullptr,
-                         cfg ? cfg->text_encoder_encoding : nullptr,
-                         cfg ? cfg->autoencoder_encoding : nullptr, err, err_len);
-}
-
-SA3_API int sa3_generate(sa3_context* ctx, const sa3_request* req, sa3_audio* out, char* err, int err_len) {
-    return sa3_generate_impl(ctx, req, nullptr, nullptr, out, err, err_len);
-}
-
-SA3_API int sa3_generate_ex(sa3_context* ctx, const sa3_request_ex* req, sa3_audio* out, char* err, int err_len) {
-    if (!req) { set_err(err, err_len, "null argument"); return 1; }
-    return sa3_generate_impl(ctx, &req->request, req, nullptr, out, err, err_len);
-}
-
-SA3_API int sa3_generate_v2(sa3_context* ctx, const sa3_request_v2* req, sa3_audio* out, char* err, int err_len) {
-    if (!req) { set_err(err, err_len, "null v2 request"); return 1; }
-    const size_t required = offsetof(sa3_request_v2, splice) + sizeof(sa3_splice);
-    if (req->size < required) { set_err(err, err_len, "v2 request size is too small"); return 1; }
-    return sa3_generate_impl(ctx, &req->request.request, &req->request, &req->splice,
-                             out, err, err_len);
-}
-
-SA3_API void sa3_free_audio(sa3_audio* a) {
-    if (a && a->samples) { std::free(a->samples); a->samples = nullptr; a->n_samp = 0; }
-}
-
-// Copy back only what BOTH sides know about: min(the caller's size, ours). A caller on an older
-// header gets the prefix it understands; one on a newer header sees a smaller size written back and
-// knows the tail it declared is untouched. This is what lets sa3_meta grow forever without an ABI
-// break, and without a new entry point per revision.
-SA3_API int sa3_last_meta(sa3_context* ctx, sa3_meta* out) {
-    if (!ctx || !out) return 1;
-    const uint32_t want = out->size;
-    if (want < sizeof(uint32_t)) return 2;              // too small to even carry the size back
-    if (ctx->last_meta.size == 0) return 3;             // no generation has completed on this ctx
-    const uint32_t n = want < sizeof(sa3_meta) ? want : (uint32_t)sizeof(sa3_meta);
-    std::memcpy(out, &ctx->last_meta, n);
-    out->size = n;
-    return 0;
-}
-
-SA3_API void sa3_unload(sa3_context* ctx) { if (ctx) ctx->pipe.reset(); }   // drop models; keep ctx
-
-SA3_API void sa3_free(sa3_context* ctx) { delete ctx; }
-
-SA3_API const char* sa3_version(void) { return "sa3.cpp libsa3 6 (ABI 1)"; }
-
-SA3_API int sa3_convert_lora(const char* safetensors_path, const char* json_path,
-                             const char* out_gguf_path, char* err, int err_len) {
-    if (!safetensors_path || !out_gguf_path) { set_err(err, err_len, "null argument"); return 1; }
-    try {
-        std::string e;
-        // NULL/"" json_path means "the config is in the safetensors' own __metadata__", which is
-        // where save_lora_safetensors puts it for autoencoder adapters -- they ship as one file.
-        if (!sa3::convert_lora_safetensors(safetensors_path, json_path ? json_path : "",
-                                           out_gguf_path, e)) {
-            set_err(err, err_len, e); return 2;
-        }
-        return 0;
-    } catch (const std::exception& e) { set_err(err, err_len, e.what()); return 10; }
-      catch (...)                     { set_err(err, err_len, "unknown error"); return 10; }
-}
-
-static void copy_field(char* dst, size_t cap, const std::string& src) {
-    if (!dst || cap == 0) return;
-    const size_t n = src.size() < cap - 1 ? src.size() : cap - 1;
-    std::memcpy(dst, src.data(), n);
-    dst[n] = '\0';
-}
-
-static int sa3_train_impl(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
-                          sa3_train_result* out, char* err, int err_len,
-                          bool explicit_values) {
-    if (!cfg) { set_err(err, err_len, "null argument"); return 1; }
-    if (out) std::memset(out, 0, sizeof(*out));
-    try {
-        sa3::TrainConfig tc;
-        if (const char* models = std::getenv("SA3_MODELS_DIR"); models && *models) tc.models_dir = models;
-
-        // the config file first, so the explicit fields below win over it
-        if (cfg->config_path && *cfg->config_path) {
-            std::string jerr;
-            if (!sa3::train_apply_json_config(tc, cfg->config_path, jerr)) { set_err(err, err_len, jerr); return 2; }
-        }
-
-        auto str = [](const char* v, std::string& dst) { if (v && *v) dst = v; };
-        str(cfg->models_dir,     tc.models_dir);
-        str(cfg->variant,        tc.model_variant);
-        str(cfg->encoding,       tc.encoding);
-        str(cfg->text_encoder_encoding, tc.text_encoding);
-        str(cfg->autoencoder_encoding,  tc.ae_encoding);
-        str(cfg->dataset_dir,    tc.dataset_dir);
-        str(cfg->output_dir,     tc.output_dir);
-        str(cfg->latents_dir,    tc.latents_dir);
-        str(cfg->prompt_config_path, tc.prompt_config_path);
-        str(cfg->resume_path,    tc.resume_path);
-        str(cfg->adapter_type,   tc.adapter_type);
-        str(cfg->lora_scope,     tc.lora_scope);
-        str(cfg->latents_cache_dir, tc.latents_cache_dir);
-
-        if (explicit_values) {
-            tc.max_steps = cfg->steps;
-            tc.rank = cfg->rank;
-            tc.alpha = cfg->alpha;
-            tc.learning_rate = cfg->learning_rate;
-            tc.frames = cfg->frames;
-            tc.duration_sec = cfg->duration_sec;
-            tc.batch_size = cfg->batch_size;
-            tc.checkpoint_every = cfg->checkpoint_every;
-            tc.cpu_threads = cfg->cpu_threads;
-            tc.pre_encode = cfg->pre_encode != 0;
-            tc.evict_text_encoder = cfg->evict_text_encoder != 0;
-            tc.latents_cache = cfg->latents_cache != 0;
-            tc.seed = (unsigned long long)cfg->seed;
-        } else {
-            if (cfg->steps > 0)            tc.max_steps = cfg->steps;
-            if (cfg->rank > 0)             tc.rank = cfg->rank;
-            if (cfg->alpha > 0.0f)         tc.alpha = cfg->alpha;
-            if (cfg->learning_rate > 0.0f) tc.learning_rate = cfg->learning_rate;
-            if (cfg->frames > 0)           tc.frames = cfg->frames;
-            if (cfg->duration_sec > 0.0f)  tc.duration_sec = cfg->duration_sec;
-            if (cfg->batch_size > 0)       tc.batch_size = cfg->batch_size;
-            if (cfg->checkpoint_every > 0) tc.checkpoint_every = cfg->checkpoint_every;
-            if (cfg->checkpoint_every < 0) tc.checkpoint_every = 0;
-            if (cfg->cpu_threads > 0)      tc.cpu_threads = cfg->cpu_threads;
-            if (cfg->pre_encode)           tc.pre_encode = true;
-            if (cfg->evict_text_encoder)   tc.evict_text_encoder = true;
-            if (cfg->latents_cache < 0)    tc.latents_cache = false;
-            if (cfg->seed != 0)            tc.seed = (unsigned long long)cfg->seed;
-        }
-
-        if (tc.dataset_dir.empty()) { set_err(err, err_len, "dataset_dir is required"); return 2; }
-        str(cfg->device, tc.device);
-        if (tc.cpu_threads == 0) tc.cpu_threads = sa3::cpu_threads_from_env();
-        sa3::train_finalize_defaults(tc);
-
-        sa3::TrainHooks th;
-        if (hooks) {
-            void* user = hooks->user;
-            if (hooks->on_log) {
-                const sa3_train_log_cb cb = hooks->on_log;
-                th.log = [cb, user](const std::string& line) { cb(user, line.c_str()); };
-            }
-            if (hooks->on_step) {
-                const sa3_train_step_cb cb = hooks->on_step;
-                th.on_step = [cb, user](const sa3::TrainStepReport& r) {
-                    sa3_train_step s;
-                    std::memset(&s, 0, sizeof(s));
-                    s.epoch = r.epoch;
-                    s.step = r.step;
-                    s.max_steps = r.max_steps;
-                    s.id = r.id.c_str();
-                    s.prompt = r.prompt.c_str();
-                    s.mask = r.mask.c_str();
-                    s.t = r.t;
-                    s.learning_rate = r.learning_rate;
-                    s.loss = r.loss;
-                    s.grad_norm = r.grad_norm;
-                    s.step_seconds = r.step_seconds;
-                    s.cfg_dropped = r.cfg_dropped ? 1 : 0;
-                    s.updated = r.updated ? 1 : 0;
-                    s.n_gen = r.n_gen;
-                    s.n_ctx = r.n_ctx;
-                    cb(user, &s);
-                };
-            }
-            if (hooks->should_cancel) {
-                const sa3_train_cancel_cb cb = hooks->should_cancel;
-                th.should_cancel = [cb, user]() { return cb(user) != 0; };
-            }
-            if (hooks->load_audio) {
-                const sa3_train_audio_cb cb = hooks->load_audio;
-                th.load_audio = [cb, user](const sa3::TrainAudioCaptionPair& pair, int sr, int ch,
-                                           sa3::TrainAudio& audio, std::string& lerr) {
-                    const float* samples = nullptr;
-                    int n_samp = 0;
-                    if (cb(user, pair.audio_path.c_str(), sr, ch, &samples, &n_samp) == 0) return false;
-                    if (!samples || n_samp <= 0) {
-                        lerr = "load_audio returned no samples for " + pair.audio_path;
-                        return false;
-                    }
-                    audio.samples.assign(samples, samples + (size_t)n_samp * (size_t)ch);
-                    audio.n_samples = n_samp;
-                    audio.n_channels = ch;
-                    audio.sample_rate = sr;
-                    return true;
-                };
-            }
-            if (hooks->command_line) th.command_line = hooks->command_line;
-        }
-
-        sa3::TrainResult result;
-        std::string terr;
-        if (!sa3::run_training(tc, th, result, terr)) { set_err(err, err_len, terr); return 3; }
-        if (out) {
-            out->steps = result.steps;
-            out->cancelled = result.cancelled ? 1 : 0;
-            out->mean_step_seconds = result.mean_step_seconds;
-            copy_field(out->final_adapter, sizeof(out->final_adapter), result.final_adapter);
-            copy_field(out->last_checkpoint, sizeof(out->last_checkpoint), result.last_adapter_checkpoint);
-            copy_field(out->preview_command, sizeof(out->preview_command), result.preview_command);
-        }
-        return 0;
-    } catch (const std::exception& e) { set_err(err, err_len, e.what()); return 10; }
-      catch (...)                     { set_err(err, err_len, "unknown error"); return 10; }
-}
-
-SA3_API int sa3_train(const sa3_train_config* cfg, const sa3_train_hooks* hooks,
-                      sa3_train_result* out, char* err, int err_len) {
-    return sa3_train_impl(cfg, hooks, out, err, err_len, false);
 }
 
 } // extern "C"

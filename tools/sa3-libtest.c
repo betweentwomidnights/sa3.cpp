@@ -1,22 +1,33 @@
-/* sa3-libtest — a pure-C smoke test + minimal usage example for libsa3 (see src/libsa3.h).
- * This is exactly the call sequence a JUCE / IPlug2 host would use:
- *   sa3_init -> sa3_generate (with a progress callback) -> use samples -> sa3_free_audio -> sa3_free.
- *   usage: sa3-libtest ["prompt"] [out.wav] [cpu_threads]
+/* sa3-libtest — pure-C smoke test and minimal usage example for the libsa3 V1 ABI.
  *
- * It then continues that clip through sa3_generate_v2 to exercise the continuation splice, and
- * reads sa3_last_meta twice — once with a full struct, once with a deliberately undersized one,
- * which is the only thing that tests the `size` contract at all.
+ * This is the whole call sequence an embedded host (JUCE / IPlug2 plugin, iOS app) uses:
+ *
+ *   sa3_get_api -> context_create -> request_init -> generate -> use samples
+ *                                 -> result_free  -> context_destroy
+ *
+ * Note the shape every V1 struct shares: zero it, set `size`, then let the library's initializer
+ * write the defaults in. That last step is not optional — a meaningful zero in V1 means zero, so
+ * the initializer is the only thing that knows what a default is.
+ *
+ * It generates, then continues what it generated, which is also the shortest demonstration that
+ * the library owns duration planning: Generate returns exactly what you asked for, and Continue
+ * returns the source plus exactly what you asked to add.
+ *
+ *   usage: sa3-libtest ["prompt"] [out.wav] [cpu_threads]
  */
-#include "libsa3.h"
+#include "libsa3_v1.h"
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static void on_progress(void* user, const char* stage, int step, int total, float frac) {
+static void SA3_CALL on_progress(void* user, const sa3_progress_v1* progress) {
     (void)user;
-    printf("  [%3.0f%%] %s %d/%d\n", frac * 100.0f, stage, step, total);
+    if (!progress) return;
+    printf("  [%3.0f%%] %s %d/%d\n", progress->fraction * 100.0f,
+           progress->stage_name ? progress->stage_name : "working",
+           progress->step, progress->total);
     fflush(stdout);
 }
 
@@ -45,120 +56,112 @@ int main(int argc, char** argv) {
     const char* prompt = argc > 1 ? argv[1] : "warm analog house groove";
     const char* out    = argc > 2 ? argv[2] : "libsa3_test.wav";
     const int cpu_threads = argc > 3 ? atoi(argv[3]) : 0;
-    char err[512] = {0};
 
-    printf("%s\n", sa3_version());
+    const sa3_api_v1* api = sa3_get_api(SA3_ABI_VERSION_1);
+    if (!api) { fprintf(stderr, "libsa3 does not provide ABI v1\n"); return 1; }
+    printf("%s (abi %u)\n", api->runtime_version(), api->abi_version);
 
-    sa3_config_ex cfg;
+    sa3_error_v1 err;
+    memset(&err, 0, sizeof err);
+    err.size = sizeof err;
+    api->error_init(&err);
+
+    sa3_context_config_v1 cfg;
     memset(&cfg, 0, sizeof cfg);
-    cfg.config.variant = "medium";
-    cfg.config.encoding = "f16";
+    cfg.size = sizeof cfg;
+    api->context_config_init(&cfg);
+    cfg.variant = "medium";
+    cfg.dit_encoding = "f16";
     cfg.cpu_threads = cpu_threads;
-    sa3_context* ctx = sa3_init_ex(&cfg, err, (int)sizeof err);
-    if (!ctx) { fprintf(stderr, "sa3_init failed: %s\n", err); return 1; }
 
-    sa3_request req;
-    memset(&req, 0, sizeof req);
-    req.prompt = prompt;
-    req.frames = 128;                 /* ~12 s */
-    req.steps = 8;
-    req.seed = -1;                    /* random */
-    req.cfg_scale = 1.0f;
-    req.duration_padding_sec = 6.0f;
-    req.keep_models = 1;
-    req.on_progress = on_progress;
-    /* optional LoRA:
-       const char* names[] = { "kev" }; const float strengths[] = { 1.0f };
-       req.n_loras = 1; req.lora_names = names; req.lora_strengths = strengths; */
-
-    sa3_audio audio;
-    memset(&audio, 0, sizeof audio);
-    int rc = sa3_generate(ctx, &req, &audio, err, (int)sizeof err);
-    if (rc != 0) { fprintf(stderr, "sa3_generate failed (%d): %s\n", rc, err); sa3_free(ctx); return 1; }
-
-    printf("generated %.2fs, %dch @ %dHz, seed %llu\n",
-           (double)audio.n_samp / audio.sample_rate, audio.n_ch, audio.sample_rate,
-           (unsigned long long)audio.seed);
-    write_wav(out, audio.samples, audio.n_samp, audio.n_ch, audio.sample_rate);
-    printf("wrote %s\n", out);
-
-    /* Everything the pipeline computed after the sampler. Zero the struct and declare its size;
-       what the library does not fill stays zero. */
-    sa3_meta meta;
-    memset(&meta, 0, sizeof meta);
-    meta.size = (uint32_t)sizeof meta;
-    if (sa3_last_meta(ctx, &meta) != 0) { fprintf(stderr, "sa3_last_meta failed\n"); sa3_free_audio(&audio); sa3_free(ctx); return 1; }
-    printf("meta: filled %u/%u bytes, decoded peak %.4f, normalize gain %.4f, limited %.4f%%, final peak %.4f\n",
-           meta.size, (unsigned)sizeof meta, meta.decoded_peak, meta.peak_normalize_gain,
-           meta.limiter_limited_fraction * 100.0f, meta.final_peak);
-
-    /* The size contract, from the other side: a caller built against an older header declares a
-       SHORTER struct. It must get the prefix it understands and be told how much that was — never
-       a write past the end of what it allocated. Casting a truncated struct is exactly what such a
-       caller does at the ABI level, which is why the test does it here. */
-    {
-        struct { uint32_t size; uint64_t seed; float decoded_peak; } old_client;
-        memset(&old_client, 0, sizeof old_client);
-        old_client.size = (uint32_t)sizeof old_client;
-        if (sa3_last_meta(ctx, (sa3_meta*)&old_client) != 0) {
-            fprintf(stderr, "sa3_last_meta rejected an undersized struct\n");
-            sa3_free_audio(&audio); sa3_free(ctx); return 1;
-        }
-        if (old_client.size != (uint32_t)sizeof old_client || old_client.decoded_peak != meta.decoded_peak) {
-            fprintf(stderr, "undersized sa3_meta came back wrong: size %u, peak %.6f\n",
-                    old_client.size, old_client.decoded_peak);
-            sa3_free_audio(&audio); sa3_free(ctx); return 1;
-        }
-        printf("meta: an old client asking for %u bytes got %u back, prefix intact\n",
-               (unsigned)sizeof old_client, old_client.size);
+    sa3_context* ctx = NULL;
+    if (api->context_create(&cfg, &ctx, &err) != SA3_STATUS_OK_V1) {
+        fprintf(stderr, "context_create failed: %s\n", err.message);
+        return 1;
     }
 
-    /* ---- continuation: feed the clip back in and extend it, with the source splice on ----
-       inpaint_start is where the source ends; the library pulls the sampler's mask back into it by
-       mask_overlap and pastes the original samples over everything up to that same point. A
-       zero-initialized sa3_splice (set = 0) asks for gary4local's tuned defaults. */
-    const int src_n = audio.n_samp, src_ch = audio.n_ch, src_sr = audio.sample_rate;
+    sa3_request_v1 req;
+    memset(&req, 0, sizeof req);
+    req.size = sizeof req;
+    api->request_init(&req);
+    req.operation = SA3_OPERATION_GENERATE_V1;
+    req.prompt = prompt;
+    req.duration_seconds = 12.0;     /* exactly what comes back */
+    req.on_progress = on_progress;
+    /* optional adapters, applied over the base for this call only:
+       sa3_adapter_v1 a; memset(&a, 0, sizeof a); a.size = sizeof a;
+       api->adapter_init(&a); a.path_or_name = "kev"; a.strength = 1.0f;
+       req.adapters = &a; req.adapter_count = 1;
+       req.adapter_stride = (uint32_t)sizeof(sa3_adapter_v1); */
+
+    sa3_result_v1 result;
+    memset(&result, 0, sizeof result);
+    result.size = sizeof result;
+    api->result_init(&result);
+
+    if (api->generate(ctx, &req, &result, &err) != SA3_STATUS_OK_V1) {
+        fprintf(stderr, "generate failed: %s\n", err.message);
+        api->context_destroy(ctx);
+        return 1;
+    }
+    printf("generated %.2fs, %uch @ %uHz, seed %llu, peak %.4f\n",
+           (double)result.n_samples / result.sample_rate, result.n_channels,
+           result.sample_rate, (unsigned long long)result.seed, result.final_peak);
+    write_wav(out, result.samples, (int)result.n_samples, (int)result.n_channels,
+              (int)result.sample_rate);
+    printf("wrote %s\n", out);
+
+    /* Keep a copy as the continuation source, then hand the library's buffer back. Audio is
+       library-owned: result_free is the only correct way to release it, DLL boundary included. */
+    const uint64_t src_n = result.n_samples;
+    const uint32_t src_ch = result.n_channels;
+    const uint32_t src_rate = result.sample_rate;
     float* src = (float*)malloc((size_t)src_n * src_ch * sizeof(float));
-    if (!src) { fprintf(stderr, "out of memory\n"); sa3_free_audio(&audio); sa3_free(ctx); return 1; }
-    memcpy(src, audio.samples, (size_t)src_n * src_ch * sizeof(float));
-    sa3_free_audio(&audio);
+    if (!src) { fprintf(stderr, "out of memory\n"); api->result_free(&result); api->context_destroy(ctx); return 1; }
+    memcpy(src, result.samples, (size_t)src_n * src_ch * sizeof(float));
+    api->result_free(&result);
 
-    const float src_seconds = (float)src_n / (float)src_sr;
-    sa3_request_v2 rx;
-    memset(&rx, 0, sizeof rx);
-    rx.size = (uint32_t)sizeof rx;
-    rx.request.request = req;
-    rx.request.init_audio.mode = SA3_INIT_AUDIO_INPAINT;
-    rx.request.init_audio.samples = src;
-    rx.request.init_audio.n_samp = src_n;
-    rx.request.init_audio.n_ch = src_ch;
-    rx.request.init_audio.sample_rate = src_sr;
-    rx.request.init_audio.inpaint_start = src_seconds;
-    rx.request.init_audio.inpaint_end = src_seconds + 6.0f;   /* six more seconds of music */
-
-    sa3_audio cont;
+    /* Continue: duration_seconds is what gets ADDED. The library places the regeneration window,
+       splices the original source back over the head, and trims to source + added. */
+    sa3_request_v1 cont;
     memset(&cont, 0, sizeof cont);
-    rc = sa3_generate_v2(ctx, &rx, &cont, err, (int)sizeof err);
-    if (rc != 0) { fprintf(stderr, "sa3_generate_v2 failed (%d): %s\n", rc, err); free(src); sa3_free(ctx); return 1; }
+    cont.size = sizeof cont;
+    api->request_init(&cont);
+    cont.operation = SA3_OPERATION_CONTINUE_V1;
+    cont.prompt = prompt;
+    cont.duration_seconds = 6.0;
+    cont.on_progress = on_progress;
+    cont.input_audio.size = sizeof cont.input_audio;
+    cont.input_audio.samples = src;
+    cont.input_audio.n_samples = src_n;
+    cont.input_audio.n_channels = src_ch;
+    cont.input_audio.sample_rate = src_rate;
+    cont.input_audio.layout = SA3_AUDIO_PLANAR_V1;
 
-    memset(&meta, 0, sizeof meta);
-    meta.size = (uint32_t)sizeof meta;
-    if (sa3_last_meta(ctx, &meta) != 0) { fprintf(stderr, "sa3_last_meta failed\n"); free(src); sa3_free_audio(&cont); sa3_free(ctx); return 1; }
-    printf("continued to %.2fs; splice %s, kept 0-%.3fs, xfade %.0fms, gain %.3f, mask start %.3fs (pullback %.3fs)\n",
-           (double)cont.n_samp / cont.sample_rate, meta.splice_applied ? "on" : "off",
-           meta.splice_end_seconds, meta.splice_xfade_applied * 1000.0f, meta.splice_gain,
-           meta.mask_start_seconds, meta.mask_overlap_applied);
-    if (!meta.splice_applied) { fprintf(stderr, "splice did not run on a continuation\n"); free(src); sa3_free_audio(&cont); sa3_free(ctx); return 1; }
+    memset(&result, 0, sizeof result);
+    result.size = sizeof result;
+    api->result_init(&result);
+    if (api->generate(ctx, &cont, &result, &err) != SA3_STATUS_OK_V1) {
+        fprintf(stderr, "continue failed: %s\n", err.message);
+        free(src);
+        api->context_destroy(ctx);
+        return 1;
+    }
+    printf("continued to %.2fs; splice %s, kept 0-%.3fs, xfade %.0fms, gain %.3f\n",
+           (double)result.n_samples / result.sample_rate,
+           result.splice_applied ? "on" : "off", result.splice_end_seconds,
+           result.splice_crossfade_seconds * 1000.0f, result.splice_gain);
 
     {
-        char cont_out[1024];
-        snprintf(cont_out, sizeof cont_out, "%s.continued.wav", out);
-        write_wav(cont_out, cont.samples, cont.n_samp, cont.n_ch, cont.sample_rate);
-        printf("wrote %s\n", cont_out);
+        char continued[1024];
+        snprintf(continued, sizeof continued, "%s.continued.wav", out);
+        write_wav(continued, result.samples, (int)result.n_samples, (int)result.n_channels,
+                  (int)result.sample_rate);
+        printf("wrote %s\n", continued);
     }
 
     free(src);
-    sa3_free_audio(&cont);
-    sa3_free(ctx);
+    api->result_free(&result);
+    api->context_destroy(ctx);
     return 0;
 }

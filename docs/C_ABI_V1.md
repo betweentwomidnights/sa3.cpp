@@ -1,6 +1,6 @@
 # libsa3 C ABI V1
 
-`libsa3_v1.h` is the release-candidate embedding boundary for sa3.cpp. It replaces the accumulated
+`libsa3_v1.h` is the published embedding boundary for sa3.cpp. It replaces the accumulated
 `sa3_init*` and `sa3_generate*` entry points with one version negotiation symbol and a stable
 function table:
 
@@ -60,9 +60,9 @@ registries so it never offers a SAME-L adapter to SAME-S or a DiT adapter to the
 Safetensors conversion is part of the V1 table because all current hosts import adapters. A null or
 empty JSON sidecar means that conversion reads configuration from safetensors metadata.
 
-## Migration gate
+## Consumer coverage
 
-The V1 draft is not merged to `main` until the same sa3.cpp commit passes these consumers:
+The frozen V1 boundary is exercised by these consumers:
 
 - `sa3.cpp-iplug2-demo`: Windows VST3 and REAPER extension; Generate, Transform, Continue, adapter
   import/selection, cancellation, status errors, exact duration, and DLL unload/reload.
@@ -96,8 +96,54 @@ The optional JSON config is applied first. Initialized scalar fields and non-nul
 the V1 config then override their JSON counterparts, while the JSON remains an escape hatch for
 advanced trainer options not yet represented in V1.
 
-## Legacy transition
+## Proving a change kept the contract
 
-The historical declarations remain in `libsa3.h` while the controlled consumers migrate. New host
-code includes `libsa3_v1.h` and resolves only `sa3_get_api`. Legacy symbols are compatibility
-shims, not the release contract; their zero-means-default behavior is deliberately unchanged.
+Two tools, and they cover different halves.
+
+`sa3-lib-v1-contract` is a CTest. It needs no models and checks the shape of the ABI: struct sizes
+and frozen prefixes, what the initializers establish, strided adapter walking through a padded
+stride, tail preservation for a future caller, and the error paths a host branches on — including
+that an unresolvable model set is `MODEL_ERROR_V1`, and that an empty `variant` is passed through
+rather than quietly becoming `medium`. Those last ones are pinned precisely because they are easy
+to "improve" during a refactor and the change is silent.
+
+`sa3-lib-v1-baseline` is the other half and needs a model set, so it is a tool rather than a test.
+It runs eleven core scenarios, or twelve when an adapter path is supplied, and prints exact sample
+counts, every reported metadata field, and an FNV-1a hash of the decoded audio. Capture stdout
+before a change, capture it after, diff:
+
+```sh
+export SA3_MODELS_DIR=/path/to/models
+export SA3_BASELINE_DEVICE=cpu SA3_BASELINE_SECONDS=1.0 SA3_BASELINE_STEPS=2
+sa3-lib-v1-baseline > before.txt      # then make the change and rebuild
+sa3-lib-v1-baseline > after.txt
+diff before.txt after.txt
+```
+
+The runtime version is written to stderr as provenance. That keeps an intentional version bump out
+of the behavioral diff while still recording which library produced each run.
+
+Anything that re-points how a request reaches the pipeline is a change no compiler can check: a
+wrong field is a different take, not a build error. This is what catches that.
+
+**Run it on CPU.** GPU backends are not necessarily run-to-run reproducible. On an AMD Radeon Pro
+5300M via Metal the same binary and the same seed hash differently every run, because a
+float-ordering difference in the first sampling step compounds into a different take — so a GPU
+comparison reports drift that is not there. Confirm it on your own hardware by running the tool
+twice unchanged before trusting any diff from it.
+
+## No legacy surface
+
+`libsa3.h` and the `sa3_init*` / `sa3_generate*` / `sa3_train` entry points it declared are gone.
+All three controlled frontends migrated to V1, so the shims had no consumers left, and V1 no longer
+routes through the legacy request structs internally either: `generate` builds the pipeline's own
+parameters directly.
+
+That removes the last place where one field meant two things. The shared mapping used to take an
+`explicit_values` flag that switched ten fields between "zero means default" and "zero means zero",
+because the legacy ABI wanted the first and V1 promises the second. With one ABI there is one
+answer, and the initializers are the only thing that decides a default.
+
+It also removes the only per-call state on a context. Generation metadata used to be parked on the
+context between the call and a separate getter because the legacy result struct had nowhere to
+carry it; `sa3_result_v1` does, so a context now holds models and nothing else.

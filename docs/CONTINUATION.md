@@ -95,11 +95,9 @@ asked for, or `splice = 0` (`--no-splice`) for the old behaviour outright.
 
 the env names are the ones gary4local already uses, so a knob learned there transfers verbatim.
 
-from C, use the size-tagged `sa3_request_v2` and call `sa3_generate_v2`. its `sa3_splice` mirrors
-`sa3_loudness`: leave `set = 0` for the defaults plus any env overrides, or set `set = 1` to drive
-it per-request -- including the old un-spliced behaviour with `splice = 0`, exactly as a caller
-asks for raw audio today. the older `sa3_request_ex` remains byte-for-byte ABI compatible and uses
-the defaults/env overrides.
+from C, initialize a size-tagged `sa3_request_v1` through the V1 table, set `operation` to
+`SA3_OPERATION_CONTINUE_V1`, and configure `request.continuation`. `request_init` supplies the
+published defaults; override them per request, including `splice_source = 0` for raw decoded audio.
 
 from the CLI:
 
@@ -112,8 +110,8 @@ sa3-generate ... --mask-overlap 0.4 --splice-xfade 0.05 --no-splice-gain-match
 
 ## what it reports
 
-`sa3_last_meta()` fills `splice_applied`, `splice_end_seconds`, `splice_xfade_applied`,
-`splice_gain`, `mask_start_seconds` and `mask_overlap_applied` alongside the loudness measurements.
+`sa3_result_v1` returns `splice_applied`, `splice_end_seconds`, `splice_crossfade_seconds`,
+`splice_gain`, `mask_start_seconds` and `mask_overlap_seconds` alongside the loudness measurements.
 the pipeline also prints both halves:
 
 ```text
