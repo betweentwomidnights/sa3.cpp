@@ -162,6 +162,13 @@ resident models: about 9 s of denoising per chunk and one 0.6 s load. All 48 not
 kit measured within 27 cents of their mapped pitch (within 2 cents above C2).
 `--keybed-preview C4:6` renders one quick chunk.
 
+Complete F16, Q8_0, Q5_K_M, and Q4_K_M bundles are published as
+`thepatch/foundation-1.2-keybeds-GGUF` (`download_models.py --sat --sat-model
+foundation-1.2-keybeds`; staged by `stage_sat_large_repos.py`). The quantized DiTs passed the
+0.990 per-tensor gate (178/0, 175/0, 175/0). Matched 12-note Rhodes and sine previews kept every
+note within 3 cents with no octave errors at every tier, at envelope/log-magnitude cosine vs F16
+of 0.9998/0.9985 (Q8), 0.9992/0.9951 (Q5), and 0.9980/0.9894 (Q4).
+
 ## Publication layout
 
 SAO 1.0 and Foundation-1 are packaged as separate, self-contained repositories:
