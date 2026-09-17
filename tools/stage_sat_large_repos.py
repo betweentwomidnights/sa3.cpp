@@ -113,8 +113,10 @@ def stage_model(model, args, hf_hub_download):
 
 
 def main():
+    # Foundation-1.2 Keybeds is downloadable/resolvable but has no publication recipe yet.
+    stageable = tuple(model for model in SAT_LARGE_MODELS if model in SOURCES)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=("all",) + SAT_LARGE_MODELS, default="all")
+    parser.add_argument("--model", choices=("all",) + stageable, default="all")
     parser.add_argument("--models-dir", type=Path, default=Path("models"))
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
@@ -122,7 +124,7 @@ def main():
         from huggingface_hub import hf_hub_download
     except ImportError:
         raise SystemExit('missing dependency: python -m pip install -U "huggingface_hub"')
-    selected = SAT_LARGE_MODELS if args.model == "all" else (args.model,)
+    selected = stageable if args.model == "all" else (args.model,)
     for model in selected:
         stage_model(model, args, hf_hub_download)
 

@@ -14,6 +14,7 @@ inline constexpr const char* kDefaultSaosVariant = "arc";
 inline constexpr const char* kDefaultSatEncoding = "F16";
 inline constexpr const char* kSao1PublishedRepo = "thepatch/stable-audio-open-1.0-GGUF";
 inline constexpr const char* kFoundationPublishedRepo = "thepatch/foundation-1-GGUF";
+inline constexpr const char* kFoundationKeybedsPublishedRepo = "thepatch/foundation-1.2-keybeds-GGUF";
 
 inline std::string normalize_encoding(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -70,15 +71,28 @@ inline std::string canonical_sat_large_model(std::string value) {
     if (value == "sao1" || value == "sao-1" || value == "sao-1.0" ||
         value == "stable-audio-open-1") return "stable-audio-open-1.0";
     if (value == "foundation" || value == "foundation1") return "foundation-1";
+    if (value == "keybeds" || value == "foundation-1.2" || value == "foundation1.2-keybeds")
+        return "foundation-1.2-keybeds";
+    if (value == "foundation1.2-samples") return "foundation-1.2-samples";
     return value;
+}
+
+// SAO 1.0-topology checkpoints (1.1B DiT, T5-base 128 tokens, SAO Oobleck).
+inline bool is_sat_large_model(const std::string& model) {
+    const std::string name = canonical_sat_large_model(model);
+    return name == "stable-audio-open-1.0" || name == "foundation-1" ||
+           name == "foundation-1.2-keybeds" || name == "foundation-1.2-samples";
+}
+
+inline bool is_foundation_keybeds_model(const std::string& model) {
+    return canonical_sat_large_model(model) == "foundation-1.2-keybeds";
 }
 
 inline std::string sat_large_dit_relative_path(const std::string& model,
                                                const std::string& encoding) {
     const std::string name = canonical_sat_large_model(model);
     const std::string enc = normalize_encoding(encoding);
-    if (!is_saos_published_encoding(enc) ||
-        (name != "stable-audio-open-1.0" && name != "foundation-1")) return {};
+    if (!is_saos_published_encoding(enc) || !is_sat_large_model(name)) return {};
     return name + "-dit-1.1B-v1.0-" + enc + ".gguf";
 }
 
@@ -107,7 +121,7 @@ inline bool resolve_sat_large_model(const std::string& models_dir,
     const std::string t5 = sat_t5_128_relative_path(t5_encoding);
     const std::string ae = sat_oobleck_relative_path(ae_encoding);
     if (dit.empty() || t5.empty() || ae.empty()) {
-        if (error) *error = "unknown SAT model or encoding (models: stable-audio-open-1.0, foundation-1; encodings: f16, q8_0, q5_k_m, q4_k_m)";
+        if (error) *error = "unknown SAT model or encoding (models: stable-audio-open-1.0, foundation-1, foundation-1.2-keybeds, foundation-1.2-samples; encodings: f16, q8_0, q5_k_m, q4_k_m)";
         return false;
     }
     const std::filesystem::path root(models_dir);

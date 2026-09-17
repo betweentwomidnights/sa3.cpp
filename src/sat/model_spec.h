@@ -111,6 +111,16 @@ inline ModelSpec foundation_1() {
     return spec;
 }
 
+// Foundation-1.2 Samples/Keybeds are further fine-tunes on Foundation-1's exact config;
+// only the training data and checkpoint differ.
+inline ModelSpec foundation_1_2_keybeds() {
+    ModelSpec spec = foundation_1();
+    spec.architecture = "foundation-1.2-keybeds";
+    spec.default_steps = 80;
+    spec.default_cfg_scale = 6.0f;
+    return spec;
+}
+
 inline bool validate(const ModelSpec& s, std::string* why = nullptr) {
     auto fail = [&](const char* message) {
         if (why) *why = message;
