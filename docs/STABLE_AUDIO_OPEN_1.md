@@ -123,6 +123,45 @@ Valid family locks are Synth, Keys, Bass, Bowed Strings, Mallet, Wind, Guitar,
 Brass, Vocal, and Plucked Strings. Matching is case-insensitive; quote names
 that contain spaces.
 
+## Foundation-1.2 Keybeds
+
+RoyalCities' Foundation-1.2 Keybeds checkpoint (`RoyalCities/Foundation-1`,
+`Foundation-1.2-Keybeds.safetensors`, revision `7b10fbbb`) is a further fine-tune on
+Foundation-1's exact `model_config.json`. It converts with the same tool and reuses
+Foundation's T5 and Oobleck files; only the DiT changes:
+
+```bash
+python tools/convert_sat_dit.py --src Foundation-1.2-Keybeds.safetensors \
+  --config model_config.json --model-id foundation-1.2-keybeds --out-type f16 \
+  --out foundation-1.2-keybeds-dit-1.1B-v1.0-F16.gguf
+```
+
+A keybed is a playable instrument generated as chromatic chunks. `sat/keybed.h` ports
+RoyalCities' keybed tab, prompt builder, and exporter; its tests pin prompt strings and
+slice/trim samples captured from the Python implementation (RC-stable-audio-tools `43dcbb4b`):
+
+- prompt: `Keybed, Sequence, Timbre Profile, <descriptor>, Dry|Wet[, FX], Chromatic Chunk,
+  Note Sequence, C4, C#4, ...` with up to six notes per chunk;
+- timing: each note gets 3.0 s plus a 0.25 s gap, so six notes crop to 19.25 s from a
+  20 s conditioned canvas (431 latent frames);
+- one seed for every chunk; ranges C2-B5 (8 chunks), C2-F6 (9), or C2-B6 (10);
+- sampler: DPM++ 3M SDE, 80 steps, CFG 6, sigma 0.03-500, raw loudness;
+- export: fixed 3.25 s slices, conservative -60 dB tail trim, 120 ms terminal fade, SFZ.
+
+**Pitch.** Every note renders exactly one octave below its prompt label (measured with
+piano, sine, and bass prompts: "A4" in a sine prompt is 220 Hz). RoyalCities' exporter maps
+labels directly to MIDI; `keybed::label_to_sounding_midi` maps by sounding pitch instead, so
+a C2-B5 prompt range becomes MIDI keys C1-B4 and key 60 plays 261.6 Hz.
+
+```powershell
+sat-generate --model keybeds --prompt "Rhodes Piano, Warm, Soft" --seed 1234 --out-dir kit
+```
+
+On an RTX 5070 Laptop GPU (8 GB, CUDA, F16) the full 48-note C2-B5 kit takes 79.5 s with
+resident models: about 9 s of denoising per chunk and one 0.6 s load. All 48 notes of that
+kit measured within 27 cents of their mapped pitch (within 2 cents above C2).
+`--keybed-preview C4:6` renders one quick chunk.
+
 ## Publication layout
 
 SAO 1.0 and Foundation-1 are packaged as separate, self-contained repositories:

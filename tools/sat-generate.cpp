@@ -1,5 +1,6 @@
 // sat-generate -- family-aware CLI over the optional sa3_sat component.
 #include "sat/foundation_prompt.h"
+#include "sat/keybed.h"
 #include "sat/model_paths.h"
 #include "sat/pipeline.h"
 #include "sat/profiles.h"
@@ -12,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <optional>
 #include <random>
 #include <stdexcept>
@@ -21,7 +23,7 @@
 
 namespace {
 
-enum class ModelFamily { Saos, Sao1, Foundation };
+enum class ModelFamily { Saos, Sao1, Foundation, Keybeds };
 
 struct Options {
     sa3::sat::PipelinePaths paths;
@@ -66,6 +68,12 @@ struct Options {
     bool randomize_mode_set = false;
     bool family_hint_set = false;
     bool randomize = false;
+    std::string keybed_range = "c2-b5";
+    std::string keybed_preview;  // NOTE:COUNT, e.g. C4:6
+    std::string out_dir;
+    std::vector<std::string> fx;
+    bool keybed_range_set = false;
+    bool wet = false;
     sa3::LoudnessParams loudness = sa3::loudness_defaults_from_env();
 };
 
@@ -79,7 +87,8 @@ void print_help() {
         "  arc | stable-audio-open-small    SAOS ARC checkpoint\n"
         "  kickbass | jerry-grunge          SAOS full-checkpoint finetunes\n"
         "  stable-audio-open-1.0 | sao1     original 1.1B SAO checkpoint\n"
-        "  foundation-1 | foundation        RoyalCities Foundation finetune\n\n"
+        "  foundation-1 | foundation        RoyalCities Foundation finetune\n"
+        "  foundation-1.2-keybeds | keybeds RoyalCities playable keybed finetune\n\n"
         "Model files:\n"
         "  --models-dir DIR      root directory (default $SA3_MODELS_DIR or ./models)\n"
         "  --encoding TYPE       DiT/T5/Oobleck tier: F16 (default), Q8_0, Q5_K_M, Q4_K_M\n"
@@ -128,6 +137,18 @@ void print_help() {
         "act as locks. Without it, --prompt is the manual descriptor override.\n"
         "Foundation derives its exact crop, seconds_total, and latent frames from bars/BPM;\n"
         "--seconds, --seconds-total, --frames, and --samples are rejected for this model.\n\n"
+        "Foundation-1.2 Keybeds (model-specific):\n"
+        "  --prompt TEXT         instrument descriptor, e.g. \"Grand Piano, Warm\"\n"
+        "  --randomize           random keybed descriptor (seeded by --seed)\n"
+        "  --keybed-range R      c2-b5 (default, 48 notes), c2-f6, or c2-b6 prompt labels\n"
+        "  --keybed-preview N:C  preview C = 6, 12, or 24 notes from label N, e.g. C4:6\n"
+        "  --wet                 Wet instead of Dry; --fx NAME adds an FX tag (repeatable)\n"
+        "  --out-dir DIR         kit folder (default keybed-SEED): chunk WAVs, one WAV per\n"
+        "                        sounding note, and kit.sfz\n"
+        "Keybeds renders chromatic six-note chunks with one shared seed and resident models,\n"
+        "defaults to DPM++ 3M SDE, 80 steps, CFG 6, sigma 0.03-500, and writes raw audio.\n"
+        "Rendered pitch sits one octave below the prompt label; files and SFZ keys use the\n"
+        "sounding pitch.\n\n"
         "Low-level/debug:\n"
         "  --conditioning PREFIX             read PREFIX.cross.f32/global.f32\n"
         "  --dump-conditioning PREFIX        write conditioning buffers\n"
@@ -227,6 +248,11 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--randomize-mode") { o.randomize_mode = require_value(argc, argv, i); o.randomize_mode_set = true; }
         else if (arg == "--family") { o.family_hint = require_value(argc, argv, i); o.family_hint_set = true; }
         else if (arg == "--randomize") o.randomize = true;
+        else if (arg == "--keybed-range") { o.keybed_range = require_value(argc, argv, i); o.keybed_range_set = true; }
+        else if (arg == "--keybed-preview") o.keybed_preview = require_value(argc, argv, i);
+        else if (arg == "--wet") o.wet = true;
+        else if (arg == "--fx") o.fx.push_back(require_value(argc, argv, i));
+        else if (arg == "--out-dir") o.out_dir = require_value(argc, argv, i);
         else if (arg == "--peak-normalize-db") {
             o.loudness.peak_normalize_enabled = true;
             o.loudness.peak_normalize_db = parse_float(require_value(argc, argv, i), "--peak-normalize-db");
@@ -258,6 +284,10 @@ ModelFamily classify_model(const std::string& input, std::string& canonical) {
     if (large == "foundation-1") {
         canonical = large;
         return ModelFamily::Foundation;
+    }
+    if (sa3::sat::is_foundation_keybeds_model(large)) {
+        canonical = large;
+        return ModelFamily::Keybeds;
     }
     throw std::runtime_error("unknown SAT model: " + input + " (run --help)");
 }
@@ -304,6 +334,25 @@ void write_f32(const std::string& path, const std::vector<float>& data) {
 }
 
 void validate_family_options(const Options& o, ModelFamily family) {
+    const bool keybed_only = o.keybed_range_set || !o.keybed_preview.empty() || o.wet ||
+        !o.fx.empty() || !o.out_dir.empty();
+    if (family != ModelFamily::Keybeds && keybed_only)
+        throw std::runtime_error("--keybed-*/--wet/--fx/--out-dir are Foundation-1.2 Keybeds options");
+    if (family == ModelFamily::Keybeds) {
+        if (o.bars_set || o.bpm_set || o.key_root_set || o.key_mode_set ||
+            o.foundation_profile_set || o.randomize_mode_set || o.family_hint_set)
+            throw std::runtime_error("--bars/--bpm/--key-*/--foundation-profile/--randomize-mode/--family are Foundation-1 loop options");
+        if (o.seconds || o.seconds_total || o.frames || o.samples || o.seconds_start ||
+            !o.output.empty() || !o.conditioning_prefix.empty() ||
+            !o.dump_conditioning_prefix.empty() || !o.latent_path.empty() ||
+            !o.initial_path.empty() || !o.step_noise_path.empty())
+            throw std::runtime_error("Keybeds derives timing per chunk and writes a kit folder; use --out-dir");
+        if (o.randomize && !o.prompt.empty())
+            throw std::runtime_error("--randomize and --prompt are mutually exclusive");
+        if (!o.fx.empty() && !o.wet)
+            throw std::runtime_error("--fx requires --wet");
+        return;
+    }
     const bool foundation_only = o.bars_set || o.bpm_set || o.key_root_set || o.key_mode_set ||
         o.foundation_profile_set || o.randomize || o.randomize_mode_set || o.family_hint_set;
     if (family != ModelFamily::Foundation && foundation_only)
@@ -321,6 +370,124 @@ void validate_family_options(const Options& o, ModelFamily family) {
         throw std::runtime_error("--randomize requires native prompt conditioning, not --conditioning");
 }
 
+std::vector<sa3::sat::keybed::Chunk> plan_keybed(const Options& o) {
+    namespace kb = sa3::sat::keybed;
+    if (!o.keybed_preview.empty()) {
+        if (o.keybed_range_set)
+            throw std::runtime_error("--keybed-preview and --keybed-range are mutually exclusive");
+        const size_t colon = o.keybed_preview.find(':');
+        if (colon == std::string::npos)
+            throw std::runtime_error("--keybed-preview must look like C4:6");
+        const std::optional<int> root = kb::note_name_to_midi(o.keybed_preview.substr(0, colon));
+        if (!root) throw std::runtime_error("--keybed-preview must look like C4:6");
+        return kb::plan_preview(*root, parse_int(o.keybed_preview.c_str() + colon + 1,
+                                                 "--keybed-preview"));
+    }
+    if (o.keybed_range == "c2-b5") return kb::plan_full_range(kb::FullRange::C2ToB5);
+    if (o.keybed_range == "c2-f6") return kb::plan_full_range(kb::FullRange::C2ToF6);
+    if (o.keybed_range == "c2-b6") return kb::plan_full_range(kb::FullRange::C2ToB6);
+    throw std::runtime_error("--keybed-range must be c2-b5, c2-f6, or c2-b6");
+}
+
+void write_text(const std::filesystem::path& path, const std::string& text) {
+    FILE* f = std::fopen(path.string().c_str(), "wb");
+    const bool ok = f && std::fwrite(text.data(), 1, text.size(), f) == text.size();
+    if (f) std::fclose(f);
+    if (!ok) throw std::runtime_error("cannot write " + path.string());
+}
+
+int run_keybed(Options& o, const std::string& model) {
+    namespace kb = sa3::sat::keybed;
+    namespace fs = std::filesystem;
+    const std::vector<kb::Chunk> chunks = plan_keybed(o);
+    const uint64_t seed = o.seed ? *o.seed : entropy_seed();
+    std::string descriptor = o.prompt;
+    if (o.randomize) descriptor = kb::random_descriptor(seed, o.wet).descriptor;
+    if (kb::split_descriptor_tokens(descriptor).body.empty())
+        throw std::runtime_error("Keybeds needs an instrument descriptor: --prompt or --randomize");
+
+    if (o.paths.dit.empty() && o.paths.t5.empty() && o.paths.autoencoder.empty()) {
+        std::string error;
+        if (!sa3::sat::resolve_sat_large_model(o.models_dir, model, o.encoding, o.t5_encoding,
+                                               o.ae_encoding, &o.paths, &error))
+            throw std::runtime_error(error);
+    } else if (o.paths.dit.empty() || o.paths.t5.empty() || o.paths.autoencoder.empty()) {
+        throw std::runtime_error("explicit Keybeds paths require --dit, --t5, and --ae");
+    }
+
+    const kb::SamplerDefaults defaults;
+    sa3::sat::GenerateParams params;
+    params.seed = seed;
+    params.sampler = o.sampler.value_or(sa3::sat::Sampler::Dpmpp3mSde);
+    params.steps = o.steps.value_or(defaults.steps);
+    params.cfg_scale = o.cfg_scale.value_or(defaults.cfg_scale);
+    params.sigma_min = o.sigma_min.value_or(defaults.sigma_min);
+    params.sigma_max = o.sigma_max.value_or(defaults.sigma_max);
+    if (o.sigma_rho) params.sigma_rho = *o.sigma_rho;
+    if (o.sde_eta) params.sde_eta = *o.sde_eta;
+    params.negative_prompt = o.negative_prompt;
+    params.loudness.peak_normalize_enabled = false; // raw audio keeps chunk levels consistent
+    params.loudness.limiter_enabled = false;
+    params.keep_models = true;
+    if (params.steps < 2) throw std::runtime_error("V-prediction sampling requires at least two steps");
+
+    const fs::path out_dir = o.out_dir.empty() ? fs::path("keybed-" + std::to_string(seed))
+                                               : fs::path(o.out_dir);
+    fs::create_directories(out_dir / "chunks");
+    std::printf("request: model=%s seed=%llu chunks=%zu steps=%d cfg=%.3f\n", model.c_str(),
+                (unsigned long long)seed, chunks.size(), params.steps, params.cfg_scale);
+    std::printf("descriptor: %s (%s)\n", descriptor.c_str(), o.wet ? "Wet" : "Dry");
+
+    sa3::sat::Pipeline pipeline(std::move(o.paths));
+    std::vector<kb::SfzRegion> regions;
+    const auto started = std::chrono::steady_clock::now();
+    for (size_t index = 0; index < chunks.size(); ++index) {
+        const kb::Chunk& chunk = chunks[index];
+        params.prompt = kb::build_sequence_prompt(descriptor, chunk.label_midis, o.wet,
+                                                  o.fx.empty() ? nullptr : &o.fx);
+        params.seconds = (float)chunk.actual_seconds;
+        params.seconds_total = (float)chunk.seconds_total;
+        params.frames = (int)std::ceil(chunk.seconds_total * 44100.0 / 2048.0);
+        std::printf("chunk %zu/%zu: %s\n", index + 1, chunks.size(), params.prompt.c_str());
+        const sa3::sat::GenerateResult result = pipeline.generate(params);
+        const std::vector<float> audio = kb::finish_chunk_audio(
+            result.audio.data(), result.channels, result.samples, result.sample_rate,
+            chunk.actual_seconds);
+        const int64_t frames = (int64_t)audio.size() / result.channels;
+        char chunk_name[80];
+        std::snprintf(chunk_name, sizeof(chunk_name), "chunk_%02zu_labels_%s-%s.wav", index + 1,
+                      kb::note_filename(chunk.label_midis.front()).c_str(),
+                      kb::note_filename(chunk.label_midis.back()).c_str());
+        sa3::write_wav_planar((out_dir / "chunks" / chunk_name).string(), audio.data(),
+                              (int)frames, result.channels, result.sample_rate);
+        for (const kb::NoteSlice& slice :
+             kb::note_slices(chunk.label_midis, result.sample_rate, frames)) {
+            if (std::any_of(regions.begin(), regions.end(), [&](const kb::SfzRegion& r) {
+                    return r.midi == slice.sounding_midi;
+                }))
+                continue;
+            const std::vector<float> note = kb::extract_note_sample(
+                audio, result.channels, result.sample_rate, slice);
+            const std::string file = kb::note_filename(slice.sounding_midi) + ".wav";
+            sa3::write_wav_planar((out_dir / file).string(), note.data(),
+                                  (int)(note.size() / (size_t)result.channels),
+                                  result.channels, result.sample_rate);
+            regions.push_back({file, slice.sounding_midi});
+        }
+        std::printf("  denoise=%.3fs load=%.3fs total=%.3fs\n", result.timing.denoise_s,
+                    result.timing.dit_load_s + result.timing.ae_load_s, result.timing.total_s);
+    }
+    write_text(out_dir / "kit.sfz", kb::sfz_text(regions));
+    const double elapsed =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    int lo = 127, hi = 0;
+    for (const kb::SfzRegion& r : regions) { lo = std::min(lo, r.midi); hi = std::max(hi, r.midi); }
+    std::printf("kit: %s (%zu notes, sounding %s-%s, %.1f s)\n", out_dir.string().c_str(),
+                regions.size(), kb::midi_to_note_name(lo).c_str(),
+                kb::midi_to_note_name(hi).c_str(), elapsed);
+    return 0;
+}
+
 int run(int argc, char** argv) {
     Options o = parse_options(argc, argv);
     std::string model;
@@ -332,6 +499,7 @@ int run(int argc, char** argv) {
         throw std::runtime_error("invalid loudness settings: " + loudness_error);
     if (o.t5_encoding.empty()) o.t5_encoding = o.encoding;
     if (o.ae_encoding.empty()) o.ae_encoding = o.encoding;
+    if (family == ModelFamily::Keybeds) return run_keybed(o, model);
     if (o.output.empty()) o.output = model + "-ggml.wav";
 
     sa3::sat::GenerateParams params;
