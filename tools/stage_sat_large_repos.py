@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage self-contained SAO 1.0 and Foundation-1 GGUF repositories locally."""
+"""Stage self-contained SAO 1.0, Foundation-1, and Foundation-1.2 Keybeds GGUF repositories locally."""
 
 import argparse
 import shutil
@@ -27,6 +27,16 @@ SOURCES = {
         "d3160956fa13a8f861d3f608ed24075d44e98554",
         "Foundation_1.safetensors",
     ),
+    "foundation-1.2-keybeds": (
+        "RoyalCities/Foundation-1",
+        "7b10fbbbc1be2f54cbc5540aab89ee383bc94e4a",
+        "Foundation-1.2-Keybeds.safetensors",
+    ),
+}
+DIT_SOURCE_DIRS = {  # (F16 source folder, quantization folder)
+    "stable-audio-open-1.0": ("sao1-source", "sao1"),
+    "foundation-1": ("foundation-source", "foundation"),
+    "foundation-1.2-keybeds": ("foundation-1.2-source", "foundation-1.2-keybeds"),
 }
 STABILITY_LICENSE_SHA256 = "d6f6b1a4dce5c852bd6d7d9482d002baf0ccdb71e662250b73be9eec8764ee8d"
 FOUNDATION_NOTICE_SHA256 = "5b82bfdcdbff48cbf72da490db9404a6ec343c5ccc3ce9d54ff55bdd309f02bc"
@@ -35,13 +45,10 @@ APACHE_LICENSE_SHA256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb00341
 
 def component_source(models, model, component, encoding):
     if component == "dit":
+        source_folder, quant_folder = DIT_SOURCE_DIRS[model]
         if encoding == "F16":
-            folder = "sao1-source" if model == "stable-audio-open-1.0" else "foundation-source"
-            stem = "stable-audio-open-1.0" if model == "stable-audio-open-1.0" else "foundation-1"
-            return models / folder / f"{stem}-dit-f16.gguf"
-        folder = "sao1" if model == "stable-audio-open-1.0" else "foundation"
-        stem = "stable-audio-open-1.0" if model == "stable-audio-open-1.0" else "foundation-1"
-        return models / "quantization" / folder / f"{stem}-dit-{encoding}.gguf"
+            return models / source_folder / f"{model}-dit-f16.gguf"
+        return models / "quantization" / quant_folder / f"{model}-dit-{encoding}.gguf"
     if component == "t5":
         if encoding == "F16":
             return models / "sao1-source" / "t5-base-encoder-128-f16.gguf"
@@ -78,7 +85,7 @@ def stage_model(model, args, hf_hub_download):
     if sha256(stability) != STABILITY_LICENSE_SHA256:
         raise RuntimeError(f"unexpected upstream Stability license: {stability}")
     shutil.copy2(stability, destination / "LICENSE.md")
-    if model == "foundation-1":
+    if model in ("foundation-1", "foundation-1.2-keybeds"):
         foundation_notice = Path(hf_hub_download(
             SOURCES[model][0], "LICENSE.md", revision=SOURCES[model][1]))
         if sha256(foundation_notice) != FOUNDATION_NOTICE_SHA256:
@@ -113,8 +120,9 @@ def stage_model(model, args, hf_hub_download):
 
 
 def main():
+    stageable = tuple(model for model in SAT_LARGE_MODELS if model in SOURCES)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=("all",) + SAT_LARGE_MODELS, default="all")
+    parser.add_argument("--model", choices=("all",) + stageable, default="all")
     parser.add_argument("--models-dir", type=Path, default=Path("models"))
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
@@ -122,7 +130,7 @@ def main():
         from huggingface_hub import hf_hub_download
     except ImportError:
         raise SystemExit('missing dependency: python -m pip install -U "huggingface_hub"')
-    selected = SAT_LARGE_MODELS if args.model == "all" else (args.model,)
+    selected = stageable if args.model == "all" else (args.model,)
     for model in selected:
         stage_model(model, args, hf_hub_download)
 

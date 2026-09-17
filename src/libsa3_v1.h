@@ -64,6 +64,15 @@ enum {
     SA3_DISTRIBUTION_NONE_V1   = 3
 };
 
+/* Samplers for SAT variants (stable-audio-tools checkpoints such as Foundation). SA3 variants
+ * ignore this field. AUTO selects the variant's profile sampler. */
+typedef int32_t sa3_sampler_v1;
+enum {
+    SA3_SAMPLER_AUTO_V1         = 0,
+    SA3_SAMPLER_DPMPP_2M_SDE_V1 = 1,
+    SA3_SAMPLER_DPMPP_3M_SDE_V1 = 2
+};
+
 typedef int32_t sa3_residency_v1;
 enum {
     SA3_RESIDENCY_FRUGAL_V1   = 0,
@@ -158,7 +167,12 @@ typedef void (SA3_CALL *sa3_reserved_function_v1)(void);
 
 /* duration_seconds means exact output duration for Generate and seconds to add
  * for Continue. Transform follows the input duration. libsa3 owns model-frame
- * rounding, SAME-S constraints, continuation headroom, splicing, and trimming. */
+ * rounding, SAME-S constraints, continuation headroom, splicing, and trimming.
+ *
+ * SAT variants (context variant "foundation-1", "foundation-1.2-keybeds", ...) support
+ * Generate only, without adapters; distribution shift, tail padding, and chunk sizes do
+ * not apply. They read the fields appended after callback_user when request.size covers
+ * them. Set steps and cfg_scale explicitly: request_init's values are SA3 defaults. */
 typedef struct {
     uint32_t size;
     sa3_operation_v1 operation;
@@ -195,6 +209,16 @@ typedef struct {
     sa3_progress_callback_v1 on_progress;
     sa3_cancel_callback_v1 should_cancel;
     void* callback_user;
+
+    /* Appended after the frozen V1 prefix; SAT variants only. Zero selects the profile
+     * default for sampler and sigmas. conditioning_seconds_total zero means
+     * ceil(duration_seconds); a larger value conditions a longer canvas that is then
+     * cropped to duration_seconds (Foundation keybed chunks use this). */
+    sa3_sampler_v1 sampler;
+    float sigma_min;
+    float sigma_max;
+    double conditioning_seconds_start;
+    double conditioning_seconds_total;
 } sa3_request_v1;
 
 /* Library-owned planar float audio plus generation metadata. Set size before
@@ -283,6 +307,10 @@ typedef struct sa3_api_v1 {
     ((uint32_t)(offsetof(sa3_progress_v1, fraction) + sizeof(((sa3_progress_v1*)0)->fraction)))
 #define SA3_REQUEST_V1_MIN_SIZE \
     ((uint32_t)(offsetof(sa3_request_v1, callback_user) + sizeof(((sa3_request_v1*)0)->callback_user)))
+/* A request at least this large carries the SAT sampler fields. */
+#define SA3_REQUEST_V1_SAT_SIZE \
+    ((uint32_t)(offsetof(sa3_request_v1, conditioning_seconds_total) + \
+                sizeof(((sa3_request_v1*)0)->conditioning_seconds_total)))
 #define SA3_RESULT_V1_MIN_SIZE \
     ((uint32_t)(offsetof(sa3_result_v1, mask_overlap_seconds) + sizeof(((sa3_result_v1*)0)->mask_overlap_seconds)))
 #define SA3_LORA_CONVERT_V1_MIN_SIZE \

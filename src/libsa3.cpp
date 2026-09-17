@@ -5,6 +5,8 @@
 #include "libsa3_training_v1.h"
 #include "sa3_pipeline.h"
 #include "lora_convert.h"
+#include "sat/model_paths.h"
+#include "sat/profiles.h"
 #include "train_job.h"
 
 #include <algorithm>
@@ -20,12 +22,17 @@
 // The context owns the pipeline via a unique_ptr so context_unload() can drop the models (and
 // their VRAM) while keeping the context alive; the next generate lazily reloads from `paths`.
 // It holds no per-call state: the result carries everything a generation reports.
+// SAT variants (stable-audio-tools checkpoints such as Foundation) fill `sat` instead of `pipe`.
 struct sa3_context {
     std::unique_ptr<sa3::Pipeline> pipe;
     sa3::ModelPaths paths;
     std::string adapters_dir;
     int cpu_threads = 0;
     std::string device;  // remembered so the frugal-reload path keeps the same backend
+#ifdef SA3_LIBSA3_WITH_SAT
+    std::unique_ptr<sa3::sat::Pipeline> sat;
+    std::string sat_model;  // canonical variant, selects the sampler profile
+#endif
 };
 
 
@@ -250,6 +257,33 @@ sa3_status_v1 SA3_CALL v1_context_create(const sa3_context_config_v1* config,
         const std::string dit = config->dit_encoding ? config->dit_encoding : "f16";
         const std::string adapters_dir = config->adapters_dir ? config->adapters_dir : models_dir;
 
+        if (sa3::sat::is_sat_large_model(variant)) {
+#ifdef SA3_LIBSA3_WITH_SAT
+            // SAT components default to the DiT tier, as sat-generate does.
+            const std::string t5 = config->text_encoder_encoding ? config->text_encoder_encoding : dit;
+            const std::string ae = config->autoencoder_encoding ? config->autoencoder_encoding : dit;
+            sa3::sat::PipelinePaths sat_paths;
+            std::string why;
+            if (!sa3::sat::resolve_sat_large_model(models_dir, variant, dit, t5, ae, &sat_paths, &why))
+                return fail_v1(error, SA3_STATUS_MODEL_ERROR_V1,
+                               why.empty() ? "failed to resolve the SAT model set" : why);
+            auto created = std::make_unique<sa3_context>();
+            created->adapters_dir = adapters_dir;
+            created->cpu_threads = config->cpu_threads;
+            created->device = given(config->device);
+            created->sat_model = sa3::sat::canonical_sat_large_model(variant);
+            sa3::sat::PipelineOptions options;
+            options.cpu_threads = config->cpu_threads;
+            options.device = created->device;
+            created->sat = std::make_unique<sa3::sat::Pipeline>(std::move(sat_paths), options);
+            *out_context = created.release();
+            return SA3_STATUS_OK_V1;
+#else
+            return fail_v1(error, SA3_STATUS_MODEL_ERROR_V1,
+                           "variant '" + variant + "' needs a libsa3 built with SA3_BUILD_SAT=ON");
+#endif
+        }
+
         sa3::ModelPaths paths;
         std::string why;
         // MODEL_ERROR rather than IO_ERROR: a missing or unresolvable model set has reported
@@ -279,7 +313,11 @@ sa3_status_v1 SA3_CALL v1_context_create(const sa3_context_config_v1* config,
 }
 
 void SA3_CALL v1_context_unload(sa3_context* context) {
-    if (context) context->pipe.reset();
+    if (!context) return;
+    context->pipe.reset();
+#ifdef SA3_LIBSA3_WITH_SAT
+    if (context->sat) context->sat->unload();
+#endif
 }
 
 void SA3_CALL v1_context_destroy(sa3_context* context) {
@@ -347,6 +385,156 @@ sa3_status_v1 run_generation(sa3_context* context, sa3::GenParams& params,
         return SA3_STATUS_OK_V1;
     }
 }
+
+sa3_status_v1 v1_loudness_params(const sa3_request_v1* request, sa3::LoudnessParams& loudness,
+                                 sa3_error_v1* error) {
+    if (!has_v1_size(&request->loudness, SA3_LOUDNESS_V1_MIN_SIZE))
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "embedded loudness or continuation options are too small");
+    // Every V1 value is explicit, so these map straight across: there is no "did the caller mean
+    // zero or mean default" question left to answer, because request_init already answered it.
+    loudness.peak_normalize_enabled = request->loudness.peak_normalize != 0;
+    loudness.peak_normalize_db      = request->loudness.peak_normalize_db;
+    loudness.limiter_enabled        = request->loudness.limiter != 0;
+    loudness.limiter_ceiling_db     = request->loudness.limiter_ceiling_db;
+    loudness.limiter_knee           = request->loudness.limiter_knee;
+    loudness.latent_rescale         = request->loudness.latent_rescale;
+    loudness.latent_shift           = request->loudness.latent_shift;
+    sa3::normalize_loudness_params(loudness);
+    std::string why;
+    if (!sa3::validate_loudness_params(loudness, why))
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "loudness: " + why);
+    return SA3_STATUS_OK_V1;
+}
+
+#ifdef SA3_LIBSA3_WITH_SAT
+/// Generate for SAT variants. Validation mirrors the SA3 path's contract where the fields
+/// overlap; SA3-only features are rejected rather than silently ignored.
+sa3_status_v1 generate_sat_v1(sa3_context* context, const sa3_request_v1* request,
+                              sa3_result_v1* result, sa3_error_v1* error) {
+    if (request->operation != SA3_OPERATION_GENERATE_V1)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "SAT variants support only the generate operation");
+    if (request->adapter_count > 0)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "SAT variants do not support adapters");
+    if (request->steps < 2)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "SAT V-prediction sampling requires at least two steps");
+    int target_samples = 0;
+    if (!seconds_to_samples(request->duration_seconds, target_samples))
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "generation duration is out of range");
+
+    sa3_sampler_v1 sampler = SA3_SAMPLER_AUTO_V1;
+    float sigma_min = 0.0f, sigma_max = 0.0f;
+    double seconds_start = 0.0, seconds_total = 0.0;
+    if (has_v1_size(request, SA3_REQUEST_V1_SAT_SIZE)) {
+        sampler = request->sampler;
+        sigma_min = request->sigma_min;
+        sigma_max = request->sigma_max;
+        seconds_start = request->conditioning_seconds_start;
+        seconds_total = request->conditioning_seconds_total;
+    }
+    if (sampler != SA3_SAMPLER_AUTO_V1 && sampler != SA3_SAMPLER_DPMPP_2M_SDE_V1 &&
+        sampler != SA3_SAMPLER_DPMPP_3M_SDE_V1)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "unknown SAT sampler");
+    if (!std::isfinite(sigma_min) || !std::isfinite(sigma_max) || sigma_min < 0.0f ||
+        sigma_max < 0.0f || (sigma_min > 0.0f && sigma_max > 0.0f && sigma_min >= sigma_max))
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "SAT sigmas must be finite, non-negative, and min < max");
+    // The number conditioners were trained on 0..512 seconds.
+    if (!std::isfinite(seconds_start) || !std::isfinite(seconds_total) || seconds_start < 0.0 ||
+        seconds_total < 0.0 || seconds_start > 512.0 || seconds_total > 512.0)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "SAT conditioning seconds must be finite and in [0, 512]");
+    if (seconds_total == 0.0) seconds_total = std::ceil((double)target_samples / 44100.0);
+
+    sa3::LoudnessParams loudness;
+    if (const sa3_status_v1 status = v1_loudness_params(request, loudness, error);
+        status != SA3_STATUS_OK_V1)
+        return status;
+
+    // Profile defaults: RoyalCities' tab settings for the Foundation checkpoints.
+    sa3::sat::GenerateParams p;
+    if (sa3::sat::is_foundation_keybeds_model(context->sat_model)) {
+        p.sampler = sa3::sat::Sampler::Dpmpp3mSde;
+        p.sigma_min = 0.03f;
+        p.sigma_max = 500.0f;
+    } else if (context->sat_model == "foundation-1") {
+        sa3::sat::apply_foundation_royalcities_sampler(p);
+    }
+    if (sampler == SA3_SAMPLER_DPMPP_2M_SDE_V1) p.sampler = sa3::sat::Sampler::Dpmpp2mSde;
+    if (sampler == SA3_SAMPLER_DPMPP_3M_SDE_V1) p.sampler = sa3::sat::Sampler::Dpmpp3mSde;
+    if (sigma_min > 0.0f) p.sigma_min = sigma_min;
+    if (sigma_max > 0.0f) p.sigma_max = sigma_max;
+    p.prompt = request->prompt ? request->prompt : "";
+    if (request->negative_prompt) p.negative_prompt = request->negative_prompt;
+    if (p.prompt.empty())
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "SAT variants require a prompt");
+    p.steps = request->steps;
+    p.cfg_scale = request->cfg_scale;
+    p.seed = sa3::pick_seed((long long)request->seed);
+    p.seconds = (float)((double)target_samples / 44100.0);
+    p.output_samples = target_samples;
+    p.seconds_start = (float)seconds_start;
+    p.seconds_total = (float)seconds_total;
+    const double canvas_samples = std::max((double)target_samples, seconds_total * 44100.0);
+    p.frames = (int)std::ceil(canvas_samples / 2048.0);
+    p.loudness = loudness;
+    p.keep_models = request->residency == SA3_RESIDENCY_RESIDENT_V1;
+
+    V1CallbackBridge bridge{request};
+    V1CallbackBridge* b = &bridge;
+    float last_fraction = 0.0f;  // loading reports where the run already is, never backwards
+    if (request->on_progress) {
+        // Overall fraction: encoding 0..0.05, sampling 0.05..0.95, decoding 0.95..1.
+        p.stage = [b, &last_fraction](sa3::sat::PipelineStage stage) {
+            switch (stage) {
+                case sa3::sat::PipelineStage::Loading:  break;
+                case sa3::sat::PipelineStage::Encoding: last_fraction = 0.02f; break;
+                case sa3::sat::PipelineStage::Sampling: last_fraction = 0.05f; break;
+                case sa3::sat::PipelineStage::Decoding: last_fraction = 0.95f; break;
+            }
+            static const char* names[] = {"loading", "encoding", "sampling", "decoding"};
+            v1_progress_bridge(b, names[(int)stage], 0,
+                               stage == sa3::sat::PipelineStage::Sampling ? b->request->steps : 1,
+                               last_fraction);
+        };
+        p.progress = [b, &last_fraction](const sa3::sat::StepProgress& step) {
+            last_fraction = 0.05f + 0.9f * (float)step.step / (float)std::max(1, step.steps);
+            v1_progress_bridge(b, "sampling", step.step, step.steps, last_fraction);
+        };
+    }
+    if (request->should_cancel) p.should_cancel = [b]() { return v1_cancel_bridge(b) != 0; };
+
+    const sa3::sat::GenerateResult r = context->sat->generate(p);
+    if (request->on_progress) v1_progress_bridge(b, "done", r.steps, r.steps, 1.0f);
+    const size_t n = (size_t)r.samples * (size_t)r.channels;
+    float* samples = (float*)std::malloc(n * sizeof(float));
+    if (!samples)
+        return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory allocating result audio");
+    std::memcpy(samples, r.audio.data(), n * sizeof(float));
+
+    const uint32_t result_size = result->size;
+    std::memset(result, 0, std::min<size_t>(result_size, sizeof(*result)));
+    result->size = result_size;
+    result->samples = samples;
+    result->n_samples = (uint64_t)r.samples;
+    result->n_channels = (uint32_t)r.channels;
+    result->sample_rate = (uint32_t)r.sample_rate;
+    result->layout = SA3_AUDIO_PLANAR_V1;
+    result->seed = p.seed;
+    result->decoded_peak = r.loudness.decoded_peak;
+    result->peak_normalize_gain_set = r.loudness.peak_normalize_gain_set ? 1 : 0;
+    result->peak_normalize_gain = r.loudness.peak_normalize_gain;
+    result->limiter_limited_fraction_set = r.loudness.limiter_limited_fraction_set ? 1 : 0;
+    result->limiter_limited_fraction = r.loudness.limiter_limited_fraction;
+    result->safety_gain_set = r.loudness.safety_gain_set ? 1 : 0;
+    result->safety_gain = r.loudness.safety_gain;
+    result->final_peak = r.loudness.final_peak;
+    result->latent_factor = r.loudness.latent_factor;
+    return SA3_STATUS_OK_V1;
+}
+#endif
 
 sa3_status_v1 v1_generate_body(sa3_context* context,
                                     const sa3_request_v1* request,
@@ -432,26 +620,13 @@ sa3_status_v1 v1_generate_body(sa3_context* context,
         (request->decode_chunk_size > 0 && request->decode_overlap >= request->decode_chunk_size))
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid encode/decode chunk settings");
 
-    if (!has_v1_size(&request->loudness, SA3_LOUDNESS_V1_MIN_SIZE) ||
-        !has_v1_size(&request->continuation, SA3_CONTINUATION_V1_MIN_SIZE))
+    if (!has_v1_size(&request->continuation, SA3_CONTINUATION_V1_MIN_SIZE))
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
                        "embedded loudness or continuation options are too small");
-    // Every V1 value is explicit, so these map straight across: there is no "did the caller mean
-    // zero or mean default" question left to answer, because request_init already answered it.
     sa3::LoudnessParams loudness;
-    loudness.peak_normalize_enabled = request->loudness.peak_normalize != 0;
-    loudness.peak_normalize_db      = request->loudness.peak_normalize_db;
-    loudness.limiter_enabled        = request->loudness.limiter != 0;
-    loudness.limiter_ceiling_db     = request->loudness.limiter_ceiling_db;
-    loudness.limiter_knee           = request->loudness.limiter_knee;
-    loudness.latent_rescale         = request->loudness.latent_rescale;
-    loudness.latent_shift           = request->loudness.latent_shift;
-    sa3::normalize_loudness_params(loudness);
-    {
-        std::string why;
-        if (!sa3::validate_loudness_params(loudness, why))
-            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "loudness: " + why);
-    }
+    if (const sa3_status_v1 status = v1_loudness_params(request, loudness, error);
+        status != SA3_STATUS_OK_V1)
+        return status;
 
     // Continuation options describe the splice, which only runs for Continue. Other operations
     // leave the library defaults in place rather than validating values they will never read.
@@ -515,6 +690,11 @@ sa3_status_v1 v1_generate_body(sa3_context* context,
             return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory preparing adapters");
         }
     }
+
+    // Request arguments are fully validated before the opaque context is first dereferenced.
+#ifdef SA3_LIBSA3_WITH_SAT
+    if (context->sat) return generate_sat_v1(context, request, result, error);
+#endif
 
     V1CallbackBridge bridge{request};
     sa3::GenParams p;

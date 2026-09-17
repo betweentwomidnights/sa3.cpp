@@ -10,6 +10,7 @@ stable-audio-tools family instead: SAOS, Stable Audio Open 1.0, or Foundation-1.
   python3 tools/download_models.py --variant medium --encoding q8_0 --dry-run
   python3 tools/download_models.py --sat --sat-model saos --saos-variant jerry-grunge
   python3 tools/download_models.py --sat --sat-model foundation-1 --encoding q5_k_m
+  python3 tools/download_models.py --sat --sat-model foundation-1.2-keybeds
   python3 tools/download_models.py --sat --sat-model sao1 --encoding q8_0
   HF_TOKEN=hf_... python3 tools/download_models.py --variant small-sfx   # if a repo is gated
 
@@ -54,7 +55,8 @@ def main():
     ap.add_argument("--sat", action="store_true",
                     help="download an optional stable-audio-tools family instead of SA3")
     ap.add_argument("--sat-model", default="saos",
-                    choices=["saos", "stable-audio-open-1.0", "sao1", "foundation-1"],
+                    choices=["saos", "stable-audio-open-1.0", "sao1", "foundation-1",
+                             "foundation-1.2-keybeds", "keybeds"],
                     help="stable-audio-tools model family")
     ap.add_argument("--saos-variant", default="arc", choices=list(SAOS_VARIANTS),
                     help="SAOS checkpoint: arc, kickbass, or jerry-grunge")
@@ -144,8 +146,11 @@ def main():
         selection = args.saos_variant if sat_model == "saos" else sat_model
         print(f"[done] SAT {selection} ({encoding}) -> {args.out}/")
         model_arg = selection
-        action = "--randomize" if sat_model == "foundation-1" else '--prompt "..."'
-        print(f"run: sat-generate --model {model_arg} {action} --out song.wav")
+        if sat_model == "foundation-1.2-keybeds":
+            print(f'run: sat-generate --model {model_arg} --prompt "Rhodes Piano, Warm" --out-dir kit')
+        else:
+            action = "--randomize" if sat_model == "foundation-1" else '--prompt "..."'
+            print(f"run: sat-generate --model {model_arg} {action} --out song.wav")
     else:
         suffix = " + training base" if args.training_base else ""
         print(f"[done] {args.variant} ({encoding}){suffix} -> {args.out}/")

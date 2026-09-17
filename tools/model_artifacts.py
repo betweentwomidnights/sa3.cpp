@@ -29,10 +29,11 @@ SAOS_VARIANTS = ("arc", "kickbass", "jerry-grunge")
 SAOS_ENCODINGS = ("F16", "Q8_0", "Q5_K_M", "Q4_K_M")
 SAT_DEFAULT_ENCODING = "F16"
 
-SAT_LARGE_MODELS = ("stable-audio-open-1.0", "foundation-1")
+SAT_LARGE_MODELS = ("stable-audio-open-1.0", "foundation-1", "foundation-1.2-keybeds")
 SAT_LARGE_REPOS = {
     "stable-audio-open-1.0": "stable-audio-open-1.0-GGUF",
     "foundation-1": "foundation-1-GGUF",
+    "foundation-1.2-keybeds": "foundation-1.2-keybeds-GGUF",
 }
 
 # Encodings the DiT and SAME are published in. The conditioner and tokenizer are always F32 --
@@ -227,6 +228,8 @@ def canonical_sat_model(model):
         return "stable-audio-open-1.0"
     if value in ("foundation", "foundation1"):
         return "foundation-1"
+    if value in ("keybeds", "foundation-1.2", "foundation1.2-keybeds"):
+        return "foundation-1.2-keybeds"
     return value
 
 

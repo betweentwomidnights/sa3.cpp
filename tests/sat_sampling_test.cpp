@@ -2,6 +2,7 @@
 #include "sat/dit.h"
 #include "sat/foundation_prompt.h"
 #include "sat/foundation_timing.h"
+#include "sat/keybed.h"
 #include "sat/model_spec.h"
 #include "sat/model_paths.h"
 #include "sat/oobleck.h"
@@ -266,10 +267,150 @@ static int test_oobleck_metadata() {
     return fails;
 }
 
+static int test_keybed_prompts() {
+    namespace kb = sa3::sat::keybed;
+    int fails = 0;
+    // Expected strings captured from RC-stable-audio-tools 43dcbb4b keybed_prompts.py.
+    fails += expect(kb::build_sequence_prompt("Grand Piano, Warm, Gritty", {60, 61, 62, 63, 64, 65}, false) ==
+                    "Keybed, Sequence, Timbre Profile, Grand Piano, Warm, Gritty, Dry, Chromatic Chunk, Note Sequence, C4, C#4, D4, D#4, E4, F4",
+                    "keybed documented Grand Piano sequence prompt");
+    fails += expect(kb::build_sequence_prompt("Synth Lead, Bright, Medium Reverb, Ping Pong Delay", {58, 59}, true) ==
+                    "Keybed, Sequence, Timbre Profile, Synth Lead, Bright, Wet, Medium Reverb, Ping Pong Delay, Chromatic Chunk, Note Sequence, A#3, B3",
+                    "keybed wet prompt keeps descriptor FX after Wet");
+    fails += expect(kb::build_sequence_prompt("Synth Lead, Bright, Medium Reverb", {36, 37}, false) ==
+                    "Keybed, Sequence, Timbre Profile, Synth Lead, Bright, Dry, Chromatic Chunk, Note Sequence, C2, C#2",
+                    "keybed dry prompt drops FX");
+    fails += expect(kb::build_sequence_prompt("Pad, Warm", {104}, true) ==
+                    "Keybed, Sequence, Timbre Profile, Pad, Warm, Wet, Chromatic Chunk, Note Sequence, G#7",
+                    "keybed wet prompt without FX is just Wet");
+    const std::vector<std::string> fx{"High Delay"};
+    fails += expect(kb::build_sequence_prompt("Pad, Warm", {kb::note_name_to_midi("Bb3").value_or(0),
+                                                            kb::note_name_to_midi("Db4").value_or(0)}, true, &fx) ==
+                    "Keybed, Sequence, Timbre Profile, Pad, Warm, Wet, High Delay, Chromatic Chunk, Note Sequence, A#3, C#4",
+                    "keybed explicit FX and flat note names");
+    fails += expect(kb::build_sequence_prompt("Keybed, Sequence, Timbre Profile, Rhodes Piano, Warm, Warm, Wet, Low Reverb, Chromatic Chunk, Note Sequence, C4, C#4", {28, 29}, true) ==
+                    "Keybed, Sequence, Timbre Profile, Rhodes Piano, Warm, Wet, Low Reverb, Chromatic Chunk, Note Sequence, E1, F1",
+                    "keybed pasted sequence prompt is cleaned and rebuilt");
+    fails += expect(kb::build_sequence_prompt("Keybed, Timbre Profile, Marimba, Target Note, C4, keybed_pos_049, Medium Register, Dry, Bright", {72, 72}, false) ==
+                    "Keybed, Sequence, Timbre Profile, Marimba, Bright, Dry, Chromatic Chunk, Note Sequence, C5, C5",
+                    "keybed strips target, position, and register grammar without de-duplicating notes");
+    fails += expect(kb::build_single_note_prompt("Cello, Rich, Plate Reverb", 54, true) ==
+                    "Keybed, Timbre Profile, Cello, Rich, Wet, Plate Reverb, Target Note, F#3",
+                    "keybed single-note prompt");
+    const kb::DescriptorTokens split = kb::split_descriptor_tokens(
+        "Keybed, Target Position, keybed_pos_010, Bass, 808, Dry, High Distortion, b3, Top Register");
+    fails += expect(split.body == std::vector<std::string>{"Bass", "808"} &&
+                    split.fx == std::vector<std::string>{"High Distortion"},
+                    "keybed descriptor split separates body and FX");
+
+    const auto midi = [](const char* name) { return kb::note_name_to_midi(name).value_or(-999); };
+    fails += expect(midi("C4") == 60 && midi("c#4") == 61 && midi("Db4") == 61 &&
+                    midi("bb3") == 58 && midi("B3") == 59 && midi("C-1") == 0 && midi("G#7") == 104,
+                    "keybed note names follow C4 = 60");
+    fails += expect(!kb::note_name_to_midi("E#3") && !kb::note_name_to_midi("Cb4") &&
+                    !kb::note_name_to_midi("H2") && !kb::note_name_to_midi("C"),
+                    "keybed rejects note names outside RC's table");
+    fails += expect(kb::midi_to_note_name(61) == "C#4" && kb::midi_to_note_name(0) == "C-1" &&
+                    kb::note_filename(49) == "Csharp3",
+                    "keybed MIDI note names use sharps");
+    fails += expect(kb::label_to_sounding_midi(60) == 48,
+                    "keybed labels sound one octave below their names");
+
+    const std::vector<kb::Chunk> full = kb::plan_full_range(kb::FullRange::C2ToB5);
+    fails += expect(full.size() == 8 && full.front().label_midis.front() == 36 &&
+                    full.back().label_midis.back() == 83 && full.front().seconds_total == 20 &&
+                    near((float)full.front().actual_seconds, 19.25f),
+                    "keybed compact range is 8 six-note 20 s chunks");
+    fails += expect(kb::plan_full_range(kb::FullRange::C2ToF6).size() == 9 &&
+                    kb::plan_full_range(kb::FullRange::C2ToB6).size() == 10,
+                    "keybed extended and wide ranges");
+    fails += expect(kb::chunk_labels({60, 61, 62, 63, 64, 65, 66}).size() == 1,
+                    "keybed drops a trailing one-note chunk");
+    const std::vector<kb::Chunk> tail = kb::chunk_labels({60, 61, 62, 63, 64, 65, 66, 67});
+    fails += expect(tail.size() == 2 && tail[1].seconds_total == 7 &&
+                    near((float)tail[1].actual_seconds, 6.25f),
+                    "keybed keeps a trailing two-note chunk with its own duration");
+    fails += expect(kb::clamp_preview_root(24, 6) == 36 && kb::clamp_preview_root(100, 6) == 84 &&
+                    kb::clamp_preview_root(90, 24) == 81 && kb::plan_preview(60, 24).size() == 4,
+                    "keybed preview roots clamp to C2-C6 and G#7");
+    return fails;
+}
+
+static int test_keybed_audio() {
+    namespace kb = sa3::sat::keybed;
+    int fails = 0;
+    // Reference values from RC's _apply_short_fade, _note_slices_for_sequence,
+    // trim_tail_conservative, and 120 ms terminal fade on the same synthetic chunk.
+    const int sr = 44100;
+    const double pi = 3.14159265358979323846;
+    const int64_t decoded = (int64_t)std::lround(kb::sequence_actual_seconds(2) * sr) + 2048;
+    std::vector<float> planar((size_t)(decoded * 2), 0.0f);
+    const double freq[] = {220.0, 330.0}, decay[] = {12.0, 0.0}, amp[] = {0.9, 1.3};
+    for (int64_t k = 0; k < decoded; ++k) {
+        const double t = (double)k / sr;
+        for (int i = 0; i < 2; ++i) {
+            const double start = i * 3.25;
+            if (t < start || t >= start + 3.0) continue;
+            const double lt = t - start;
+            const float v = (float)(amp[i] * std::exp(-decay[i] * lt) * std::sin(2.0 * pi * freq[i] * lt));
+            planar[(size_t)k] = v;
+            planar[(size_t)(decoded + k)] = 0.5f * v;
+        }
+    }
+    const std::vector<float> chunk = kb::finish_chunk_audio(planar.data(), 2, decoded, sr,
+                                                            kb::sequence_actual_seconds(2));
+    const int64_t frames = (int64_t)chunk.size() / 2;
+    double abs_sum = 0.0;
+    for (float v : chunk) abs_sum += std::fabs(v);
+    fails += expect(frames == 275625 && std::fabs(abs_sum - 155465.704661) < 0.05 &&
+                    near(chunk[100], 0.001772515f, 1e-6f) &&
+                    near(chunk[(size_t)frames - 100], 0.28125f, 1e-6f),
+                    "keybed chunk crop, clamp, and fades match RC");
+
+    const std::vector<kb::NoteSlice> slices = kb::note_slices({57, 64}, sr, frames);
+    fails += expect(slices.size() == 2 && slices[0].start_frame == 0 &&
+                    slices[0].end_frame == 132300 && slices[1].start_frame == 143325 &&
+                    slices[1].end_frame == 275625 && slices[0].sounding_midi == 45,
+                    "keybed slices sit on the 3.25 s grid");
+
+    struct Expected { int64_t frames; double abs_sum; float right_500; };
+    const Expected expected[] = {
+        {28665, 3009.790682, 0.013986669f},
+        {132300, 149598.730714, -0.649072468f},
+    };
+    for (int i = 0; i < 2; ++i) {
+        const std::vector<float> note = kb::extract_note_sample(chunk, 2, sr, slices[(size_t)i]);
+        double sum = 0.0;
+        for (float v : note) sum += std::fabs(v);
+        const int64_t n = (int64_t)note.size() / 2;
+        fails += expect(n == expected[i].frames && std::fabs(sum - expected[i].abs_sum) < 0.05 &&
+                        near(note[(size_t)(n + 500)], expected[i].right_500, 1e-6f) &&
+                        std::fabs(note[(size_t)(n - 2)]) < 1e-6f,
+                        i == 0 ? "keybed decaying note is tail-trimmed like RC"
+                               : "keybed sustained note is not trimmed");
+    }
+
+    const std::string sfz = kb::sfz_text({{"E3.wav", 52}, {"A2.wav", 45}});
+    fails += expect(sfz.find("ampeg_attack=0.0050\nampeg_decay=0.0000\nampeg_sustain=100\n"
+                             "ampeg_release=0.2500\n") != std::string::npos &&
+                    sfz.find("<region> sample=A2.wav lokey=45 hikey=45 pitch_keycenter=45\n"
+                             "<region> sample=E3.wav") != std::string::npos,
+                    "keybed SFZ is sorted with RC's envelope header");
+
+    const kb::RandomDescriptor a = kb::random_descriptor(42), b = kb::random_descriptor(42);
+    fails += expect(a.descriptor == b.descriptor && !a.family.empty() &&
+                    a.descriptor.rfind(a.family, 0) == 0 &&
+                    kb::split_descriptor_tokens(a.descriptor).fx.empty(),
+                    "keybed random descriptors are seed-stable and FX-free");
+    return fails;
+}
+
 int main() {
     int fails = 0;
 
     fails += test_shared_loudness();
+    fails += test_keybed_prompts();
+    fails += test_keybed_audio();
     fails += expect(std::string(sa3::sat::kDefaultSatEncoding) == "F16",
                     "SAT catalogs default to the reference F16 bundles");
     fails += expect(sa3::sat::saos_dit_relative_path("arc", "q5_k_m") ==
@@ -291,6 +432,21 @@ int main() {
                     sa3::sat::sat_large_dit_relative_path("foundation", "q4_k_m") ==
                         "foundation-1-dit-1.1B-v1.0-Q4_K_M.gguf",
                     "canonical large SAT DiT filenames");
+    fails += expect(sa3::sat::sat_large_dit_relative_path("keybeds", "F16") ==
+                        "foundation-1.2-keybeds-dit-1.1B-v1.0-F16.gguf" &&
+                    sa3::sat::is_sat_large_model("foundation-1.2-samples") &&
+                    sa3::sat::is_foundation_keybeds_model("Foundation_1.2-Keybeds") &&
+                    !sa3::sat::is_sat_large_model("medium") &&
+                    !sa3::sat::is_sat_large_model("arc"),
+                    "Foundation-1.2 variants route as large SAT models");
+    {
+        const sa3::sat::ModelSpec keybeds = sa3::sat::foundation_1_2_keybeds();
+        std::string why;
+        fails += expect(sa3::sat::validate(keybeds, &why) &&
+                        sa3::sat::weight_topology_compatible(sa3::sat::foundation_1(), keybeds, &why) &&
+                        keybeds.default_steps == 80 && keybeds.default_cfg_scale == 6.0f,
+                        "Foundation-1.2 Keybeds shares Foundation-1 topology");
+    }
     fails += expect(sa3::sat::sat_t5_128_relative_path("F16") ==
                         "t5-base-encoder-128tok-0.1B-v1.0-F16.gguf" &&
                     sa3::sat::sat_oobleck_relative_path("Q8_0") ==

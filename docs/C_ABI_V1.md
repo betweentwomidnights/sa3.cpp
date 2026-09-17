@@ -50,6 +50,34 @@ rate. Transform noise is in `[0, 1]`. The initialized request uses an 0.85 trans
 six seconds of generation and continuation headroom, resident model loading, the LogSNR schedule,
 and the tuned loudness and continuation-splice defaults.
 
+## SAT variants
+
+A libsa3 built with `SA3_BUILD_SAT=ON` (the `build.cmd`/`build.sh` default) also serves the
+classic stable-audio-tools checkpoints through the same table. `context_config.variant` selects
+them by name: `stable-audio-open-1.0`, `foundation-1`, `foundation-1.2-keybeds`, or
+`foundation-1.2-samples`. Files resolve under `models_dir` with the `sat-generate` names; T5 and
+Oobleck tiers default to the DiT tier. A library built without SAT returns `MODEL_ERROR` for
+these variants.
+
+SAT variants support Generate only, without adapters. They honor `prompt`, `negative_prompt`,
+`duration_seconds` (the exact crop), `steps` (at least 2), `cfg_scale`, `seed`, `residency`,
+`loudness`, and both callbacks. Distribution shift, tail padding, and chunk sizes do not apply.
+`request_init` fills SA3 defaults, so set `steps` and `cfg_scale` explicitly.
+
+Fields appended after `callback_user` are read only when `request.size >=
+SA3_REQUEST_V1_SAT_SIZE`, so V1 callers compiled against the earlier header are unaffected:
+
+| Field | Zero means |
+| --- | --- |
+| `sampler` | profile sampler (`SA3_SAMPLER_DPMPP_2M_SDE_V1` or `..._3M_SDE_V1`) |
+| `sigma_min`, `sigma_max` | profile sigmas (Keybeds 0.03-500, Foundation-1 0.01-100) |
+| `conditioning_seconds_start` | 0 |
+| `conditioning_seconds_total` | `ceil(duration_seconds)`; a larger value conditions a longer canvas |
+
+A Foundation keybed chunk of six notes is `duration_seconds = 19.25` with
+`conditioning_seconds_total = 20`. `tools/sa3-lib-sat-smoke.c` renders a two-note chunk and
+cancels mid-sampling through the ABI.
+
 ## Adapter and model behavior
 
 `sa3_adapter_v1` accepts either an existing path or a registry name resolved under `adapters_dir`.
