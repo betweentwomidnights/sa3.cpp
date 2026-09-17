@@ -140,6 +140,8 @@ target_link_libraries(sa3 INTERFACE ggml)
 if(SA3_BUILD_SAT)
     add_library(sa3_sat STATIC src/sat/pipeline.cpp)
     target_link_libraries(sa3_sat PUBLIC sa3)
+    # libsa3 links it into a shared library on Unix.
+    set_target_properties(sa3_sat PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 # --- tools -----------------------------------------------------------------
@@ -377,6 +379,11 @@ endif()
 set_target_properties(sa3_shared PROPERTIES OUTPUT_NAME sa3)
 target_link_libraries(sa3_shared PRIVATE sa3)
 target_include_directories(sa3_shared PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+# SAT variants (Foundation-1, Foundation-1.2 Keybeds, SAO 1.0) through the same V1 table.
+if(SA3_BUILD_SAT)
+    target_link_libraries(sa3_shared PRIVATE sa3_sat)
+    target_compile_definitions(sa3_shared PRIVATE SA3_LIBSA3_WITH_SAT)
+endif()
 
 if(SA3_BUILD_TOOLS)
 # Pure-C smoke test / usage example; links the import lib (proves the C ABI + boundary).
@@ -401,6 +408,13 @@ target_link_libraries(sa3-libcancel PRIVATE sa3_shared)
 add_executable(sa3-lib-v1-baseline tools/sa3-lib-v1-baseline.c)
 target_include_directories(sa3-lib-v1-baseline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sa3-lib-v1-baseline PRIVATE sa3_shared)
+
+if(SA3_BUILD_SAT)
+    # Model-gated: SAT variant (Foundation-1.2 Keybeds) render + cancel through the C ABI.
+    add_executable(sa3-lib-sat-smoke tools/sa3-lib-sat-smoke.c)
+    target_include_directories(sa3-lib-sat-smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(sa3-lib-sat-smoke PRIVATE sa3_shared)
+endif()
 
 add_executable(sa3-lib-v1-contract tests/libsa3_v1_contract.c)
 target_include_directories(sa3-lib-v1-contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

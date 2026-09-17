@@ -39,7 +39,8 @@ case "$BACKEND" in
 esac
 
 echo "[sa3] configuring $BACKEND -> $DIR/"
-cmake -S . -B "$DIR" -DCMAKE_BUILD_TYPE=Release $FLAGS
+# SA3_BUILD_SAT puts the stable-audio-tools family (SAO 1.0, Foundation) into libsa3 and the CLI.
+cmake -S . -B "$DIR" -DCMAKE_BUILD_TYPE=Release -DSA3_BUILD_SAT=ON $FLAGS
 echo "[sa3] building (-j $JOBS) ..."
 cmake --build "$DIR" --config Release -j "$JOBS"
 echo "[sa3] done -> $DIR/bin/"

@@ -77,6 +77,13 @@ int main(void) {
     CHECK(request.loudness.peak_normalize == 1);
     CHECK(request.continuation.size == sizeof(sa3_continuation_v1));
     CHECK(request.continuation.splice_source == 1);
+    /* Appended SAT fields: zero means "profile default", and the frozen prefix is unchanged. */
+    CHECK(SA3_REQUEST_V1_MIN_SIZE <= SA3_REQUEST_V1_SAT_SIZE);
+    CHECK(SA3_REQUEST_V1_SAT_SIZE <= sizeof(request));
+    CHECK(request.sampler == SA3_SAMPLER_AUTO_V1);
+    CHECK(request.sigma_min == 0.0f && request.sigma_max == 0.0f);
+    CHECK(request.conditioning_seconds_start == 0.0);
+    CHECK(request.conditioning_seconds_total == 0.0);
 
     struct future_request {
         sa3_request_v1 known;
@@ -268,6 +275,15 @@ int main(void) {
     CHECK(context == NULL);
     CHECK(strstr(error.message, "stable-audio-3--") != NULL);
     CHECK(strstr(error.message, "stable-audio-3-medium-") == NULL);
+
+    /* SAT variants route by name. A missing set is a MODEL_ERROR naming the SAT file, or, in a
+       libsa3 built without SA3_BUILD_SAT, a MODEL_ERROR that says so. */
+    context_config.variant = "foundation-1.2-keybeds";
+    CHECK(api->context_create(&context_config, &context, &error) == SA3_STATUS_MODEL_ERROR_V1);
+    CHECK(context == NULL);
+    CHECK(strstr(error.message, "foundation-1.2-keybeds-dit-1.1B-v1.0-F16.gguf") != NULL ||
+          strstr(error.message, "SA3_BUILD_SAT") != NULL);
+    CHECK(strstr(error.message, "stable-audio-3-") == NULL);
 
     context_config.cpu_threads = -1;
     CHECK(api->context_create(&context_config, &context, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);

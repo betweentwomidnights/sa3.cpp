@@ -38,7 +38,8 @@ if /i "%BACKEND%"=="cpu" (
 )
 
 echo [sa3] configuring %BACKEND% -^> %DIR%\
-cmake -S . -B %DIR% %GEN% -DCMAKE_BUILD_TYPE=Release %FLAGS%
+rem SA3_BUILD_SAT puts the stable-audio-tools family (SAO 1.0, Foundation) into libsa3 and the CLI.
+cmake -S . -B %DIR% %GEN% -DCMAKE_BUILD_TYPE=Release -DSA3_BUILD_SAT=ON %FLAGS%
 if errorlevel 1 exit /b 1
 echo [sa3] building ...
 cmake --build %DIR% --config Release
