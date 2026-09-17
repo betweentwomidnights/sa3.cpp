@@ -397,6 +397,35 @@ static int test_keybed_audio() {
                              "<region> sample=E3.wav") != std::string::npos,
                     "keybed SFZ is sorted with RC's envelope header");
 
+    // Wet FX chains: RC picks a reverb-or-delay primary and a second category about a quarter
+    // of the time, never a second reverb.
+    {
+        int fails_local = 0, two = 0;
+        const std::vector<std::string>& all = kb::vocab::fx_choices();
+        for (uint64_t seed = 0; seed < 400; ++seed)
+        {
+            const std::vector<std::string> chain = kb::random_fx_chain(seed);
+            if (chain.empty() || chain.size() > 2) { ++fails_local; continue; }
+            two += chain.size() == 2;
+            for (const std::string& tag : chain)
+                if (std::find(all.begin(), all.end(), tag) == all.end() || !kb::is_fx_token(tag))
+                    ++fails_local;
+            const bool primary_is_space = chain[0].find("Reverb") != std::string::npos ||
+                                          chain[0].find("Delay") != std::string::npos;
+            if (!primary_is_space) ++fails_local;
+            if (chain.size() == 2 && chain[0].find("Reverb") != std::string::npos &&
+                chain[1].find("Reverb") != std::string::npos)
+                ++fails_local;
+        }
+        fails += expect(fails_local == 0 && two > 60 && two < 160,
+                        "keybed wet FX chains follow RC's category weights");
+        fails += expect(kb::random_fx_chain(7) == kb::random_fx_chain(7) &&
+                        kb::random_fx_chain(7, false).size() == 1,
+                        "keybed FX chains are seed-stable and can be limited to one tag");
+        fails += expect(all.size() == 22 && all.front() == "Low Reverb" && all.back() == "High Bitcrush",
+                        "keybed FX choices flatten every category");
+    }
+
     const kb::RandomDescriptor a = kb::random_descriptor(42), b = kb::random_descriptor(42);
     fails += expect(a.descriptor == b.descriptor && !a.family.empty() &&
                     a.descriptor.rfind(a.family, 0) == 0 &&

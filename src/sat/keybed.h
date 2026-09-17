@@ -635,18 +635,66 @@ inline const std::vector<Weighted>& oscillators() {
     return v;
 }
 
-// UI choices for the Wet FX picker.
-inline const std::vector<std::string>& fx_choices() {
-    static const std::vector<std::string> v = {
-        "Low Reverb", "Medium Reverb", "High Reverb", "Plate Reverb", "Low Delay",
-        "Medium Delay", "High Delay", "Ping Pong Delay", "Stereo Delay", "Cross Delay",
-        "Mono Delay", "Low Distortion", "Medium Distortion", "High Distortion", "Phaser",
-        "Low Phaser", "Medium Phaser", "High Phaser", "Bitcrush", "High Bitcrush",
+// FX tags a Wet prompt can carry, with RC's per-category weights (prompt_common.FX_BY_CAT).
+struct FxCategory {
+    const char* name;
+    std::vector<Weighted> tokens;
+};
+
+inline const std::vector<FxCategory>& fx_categories() {
+    static const std::vector<FxCategory> v = {
+        {"reverb", {{"Low Reverb", 37}, {"Medium Reverb", 45}, {"High Reverb", 17}, {"Plate Reverb", 1}}},
+        {"delay", {{"Low Delay", 28}, {"Medium Delay", 25}, {"Ping Pong Delay", 27}, {"Stereo Delay", 10},
+                   {"Cross Delay", 3}, {"Delay", 4}, {"High Delay", 2}, {"Mono Delay", 1}}},
+        {"distortion", {{"Low Distortion", 35}, {"Medium Distortion", 34}, {"High Distortion", 20},
+                        {"Distortion", 11}}},
+        {"phaser", {{"Phaser", 38}, {"Low Phaser", 24}, {"Medium Phaser", 19}, {"High Phaser", 19}}},
+        {"bitcrush", {{"Bitcrush", 95}, {"High Bitcrush", 5}}},
     };
     return v;
 }
 
+// Every FX tag, in category order; the UI list for a Wet FX picker.
+inline const std::vector<std::string>& fx_choices() {
+    static const std::vector<std::string> v = []() {
+        std::vector<std::string> out;
+        for (const FxCategory& category : fx_categories())
+            for (const Weighted& token : category.tokens) out.emplace_back(token.first);
+        return out;
+    }();
+    return v;
+}
+
 } // namespace vocab
+
+// One or two FX tags for a Wet prompt, following RC's choose_fx_for_wet: a reverb-or-delay
+// primary, and 25% of the time a second category weighted away from another reverb.
+inline std::vector<std::string> random_fx_chain(uint64_t seed, bool allow_two = true) {
+    using foundation_prompt_detail::weighted_choice;
+    std::mt19937_64 rng(seed);
+    const auto& categories = vocab::fx_categories();
+    const auto tokens_of = [&](const std::string& name) -> const std::vector<vocab::Weighted>& {
+        for (const vocab::FxCategory& category : categories)
+            if (name == category.name) return category.tokens;
+        return categories.front().tokens;
+    };
+    auto chance = [&](double p) { return std::uniform_real_distribution<double>(0, 1)(rng) < p; };
+
+    const bool two = allow_two && chance(0.25);
+    const std::vector<vocab::Weighted> primary_choice{{"reverb", 55}, {"delay", 45}};
+    const std::string primary = weighted_choice(rng, primary_choice);
+    std::vector<std::string> out{weighted_choice(rng, tokens_of(primary))};
+    if (two) {
+        const std::vector<vocab::Weighted> secondary_choice{
+            {primary == "reverb" ? "delay" : "reverb", 55},
+            {"distortion", 20},
+            {"phaser", 15},
+            {"bitcrush", 10},
+        };
+        out.push_back(weighted_choice(rng, tokens_of(weighted_choice(rng, secondary_choice))));
+    }
+    return detail::dedupe_keep_order(out);
+}
 
 struct RandomDescriptor {
     std::string descriptor; // family, subfamily, tags (no Wet/Dry or FX)
