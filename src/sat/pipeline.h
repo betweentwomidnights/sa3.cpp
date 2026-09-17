@@ -6,6 +6,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,6 +21,18 @@ struct PipelinePaths {
     std::string dit;
     std::string autoencoder;
     std::string t5;
+};
+
+struct PipelineOptions {
+    int cpu_threads = 0;
+    std::string device;  // empty: SA3_DEVICE env var, then the best GPU
+};
+
+enum class PipelineStage { Loading, Encoding, Sampling, Decoding };
+
+// Thrown from generate() when GenerateParams::should_cancel returns true.
+struct GenerateCancelled : std::runtime_error {
+    GenerateCancelled() : std::runtime_error("SAT generation cancelled") {}
 };
 
 struct StepProgress {
@@ -54,6 +68,12 @@ struct GenerateParams {
     std::vector<float> initial_latent;
     std::vector<float> step_noise;
     std::function<void(const StepProgress&)> progress;
+    std::function<void(PipelineStage)> stage;
+    // Polled before each stage and sampler step; true aborts with GenerateCancelled.
+    std::function<bool()> should_cancel;
+    // Keep T5, DiT, and Oobleck weights loaded after this call so the next generate()
+    // skips loading. Pipeline::unload() releases them.
+    bool keep_models = false;
 };
 
 struct GenerateTiming {
@@ -91,20 +111,28 @@ struct GenerateResult {
     GenerateTiming timing;
 };
 
-// The pipeline intentionally stages T5, DiT, and Oobleck rather than retaining all
-// graphs at once. This keeps the component usable on modest GPUs and leaves residency
-// policy to a future application-facing cache layer.
+// By default the pipeline stages T5, DiT, and Oobleck rather than retaining all weights at
+// once, which keeps it usable on modest GPUs. GenerateParams::keep_models opts into a
+// resident cache for repeated calls (e.g. keybed chunks). A Pipeline is not thread-safe.
 class Pipeline {
 public:
-    Pipeline() = default;
-    explicit Pipeline(PipelinePaths paths) { load(std::move(paths)); }
+    Pipeline();
+    explicit Pipeline(PipelinePaths paths, PipelineOptions options = {});
+    ~Pipeline();
+    Pipeline(Pipeline&&) noexcept;
+    Pipeline& operator=(Pipeline&&) noexcept;
 
-    void load(PipelinePaths paths);
+    void load(PipelinePaths paths, PipelineOptions options = {});
     const PipelinePaths& paths() const { return paths_; }
     GenerateResult generate(const GenerateParams& params) const;
+    // Release resident weights; the next generate() reloads what it needs.
+    void unload() const;
 
 private:
+    struct ResidentModels;
     PipelinePaths paths_;
+    PipelineOptions options_;
+    mutable std::unique_ptr<ResidentModels> resident_;
 };
 
 } // namespace sa3::sat

@@ -39,10 +39,9 @@ struct PromptEncoding {
     int max_tokens = 0;
 };
 
-std::vector<PromptEncoding> encode_t5_prompts(const std::string& path,
+std::vector<PromptEncoding> encode_t5_prompts(const UnigramTokenizer& tokenizer,
+                                               const GgufModel& t5,
                                                const std::vector<std::string>& prompts) {
-    UnigramTokenizer tokenizer = UnigramTokenizer::load(path.c_str());
-    GgufModel t5 = load_gguf(path.c_str());
     const T5EncoderConfig c = T5EncoderConfig::from(t5);
     const int seq = (int)t5.u32("sat.t5.max_length");
 
@@ -123,10 +122,31 @@ Sampler parse_sampler(const std::string& name) {
     throw std::invalid_argument("unknown SAT sampler: " + name);
 }
 
-void Pipeline::load(PipelinePaths paths) {
+struct Pipeline::ResidentModels {
+    std::unique_ptr<UnigramTokenizer> tokenizer;
+    std::unique_ptr<GgufModel> t5;
+    std::unique_ptr<GgufModel> dit;
+    std::unique_ptr<GgufModel> ae;
+};
+
+Pipeline::Pipeline() = default;
+Pipeline::Pipeline(PipelinePaths paths, PipelineOptions options) {
+    load(std::move(paths), std::move(options));
+}
+Pipeline::~Pipeline() = default;
+Pipeline::Pipeline(Pipeline&&) noexcept = default;
+Pipeline& Pipeline::operator=(Pipeline&&) noexcept = default;
+
+void Pipeline::load(PipelinePaths paths, PipelineOptions options) {
     if (paths.dit.empty() || paths.autoencoder.empty())
         throw std::invalid_argument("SAT pipeline requires DiT and autoencoder GGUF paths");
+    unload();
     paths_ = std::move(paths);
+    options_ = std::move(options);
+}
+
+void Pipeline::unload() const {
+    resident_.reset();
 }
 
 GenerateResult Pipeline::generate(const GenerateParams& params) const {
@@ -154,6 +174,29 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
     if (!conditioning_override && (paths_.t5.empty() || params.prompt.empty()))
         throw std::invalid_argument("native SAT conditioning requires T5 and a prompt");
 
+    const auto check_cancel = [&]() {
+        if (params.should_cancel && params.should_cancel()) throw GenerateCancelled();
+    };
+    const auto notify = [&](PipelineStage stage) {
+        if (params.stage) params.stage(stage);
+    };
+    // Frugal calls stage weights in a local cache that is released as each stage ends;
+    // resident calls fill the pipeline's cache and leave it loaded.
+    if (!params.keep_models) unload();
+    else if (!resident_) resident_ = std::make_unique<ResidentModels>();
+    ResidentModels frugal;
+    ResidentModels& models = params.keep_models ? *resident_ : frugal;
+    const auto load_model = [&](std::unique_ptr<GgufModel>& slot, const std::string& path) {
+        if (slot) return;
+        check_cancel();
+        notify(PipelineStage::Loading);
+        ggml_backend_t backend = make_backend(
+            options_.cpu_threads, options_.device.empty() ? nullptr : options_.device.c_str());
+        GgufModel model = load_gguf(path.c_str(), backend);
+        model.owns_backend = true;
+        slot = std::make_unique<GgufModel>(std::move(model));
+    };
+
     GenerateResult result;
     result.loudness = make_loudness_meta(loudness);
     result.seconds_total = params.seconds_total > 0.0f
@@ -162,9 +205,16 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
     std::vector<PromptEncoding> encoded;
     if (!conditioning_override) {
         const double start = now_s();
+        if (!models.tokenizer)
+            models.tokenizer = std::make_unique<UnigramTokenizer>(
+                UnigramTokenizer::load(paths_.t5.c_str()));
+        load_model(models.t5, paths_.t5);
+        check_cancel();
+        notify(PipelineStage::Encoding);
         std::vector<std::string> prompts{params.prompt};
         if (!params.negative_prompt.empty()) prompts.push_back(params.negative_prompt);
-        encoded = encode_t5_prompts(paths_.t5, prompts);
+        encoded = encode_t5_prompts(*models.tokenizer, *models.t5, prompts);
+        if (!params.keep_models) models.t5.reset();
         result.timing.conditioning_s = now_s() - start;
         result.prompt_tokens = encoded.front().valid_tokens;
         result.max_prompt_tokens = encoded.front().max_tokens;
@@ -174,7 +224,8 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
     std::vector<float> x;
     {
         double start = now_s();
-        GgufModel dit = load_gguf(paths_.dit.c_str());
+        load_model(models.dit, paths_.dit);
+        const GgufModel& dit = *models.dit;
         result.timing.dit_load_s = now_s() - start;
         dc = dit_spec_from(dit);
         result.objective = dit.string("sat.diffusion_objective");
@@ -318,8 +369,10 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
                                     output.size() * sizeof(float));
         };
 
+        notify(PipelineStage::Sampling);
         const double denoise_start = now_s();
         for (int i = 0; i < result.steps; ++i) {
+            check_cancel();
             const double step_start = now_s();
             const float current = schedule[(size_t)i];
             const float next = schedule[(size_t)i + 1];
@@ -391,11 +444,15 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
         std::sort(steady.begin(), steady.end());
         result.timing.warm_step_median_ms = steady[steady.size() / 2];
     }
+    if (!params.keep_models) models.dit.reset();
 
     result.latent = x;
     double start = now_s();
-    GgufModel ae = load_gguf(paths_.autoencoder.c_str());
+    load_model(models.ae, paths_.autoencoder);
+    const GgufModel& ae = *models.ae;
     result.timing.ae_load_s = now_s() - start;
+    check_cancel();
+    notify(PipelineStage::Decoding);
     const OobleckSpec ac = oobleck_spec_from(ae);
     if (ac.latent_channels != dc.io_channels)
         throw std::runtime_error("DiT and Oobleck latent widths differ");
