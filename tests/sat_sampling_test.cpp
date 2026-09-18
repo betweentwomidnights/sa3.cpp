@@ -397,6 +397,82 @@ static int test_keybed_audio() {
                              "<region> sample=E3.wav") != std::string::npos,
                     "keybed SFZ is sorted with RC's envelope header");
 
+    // Wet FX chains: RC picks a reverb-or-delay primary and a second category about a quarter
+    // of the time, never a second reverb.
+    {
+        int fails_local = 0, two = 0;
+        const std::vector<std::string>& all = kb::vocab::fx_choices();
+        for (uint64_t seed = 0; seed < 400; ++seed)
+        {
+            const std::vector<std::string> chain = kb::random_fx_chain(seed);
+            if (chain.empty() || chain.size() > 2) { ++fails_local; continue; }
+            two += chain.size() == 2;
+            for (const std::string& tag : chain)
+                if (std::find(all.begin(), all.end(), tag) == all.end() || !kb::is_fx_token(tag))
+                    ++fails_local;
+            const bool primary_is_space = chain[0].find("Reverb") != std::string::npos ||
+                                          chain[0].find("Delay") != std::string::npos;
+            if (!primary_is_space) ++fails_local;
+            if (chain.size() == 2 && chain[0].find("Reverb") != std::string::npos &&
+                chain[1].find("Reverb") != std::string::npos)
+                ++fails_local;
+        }
+        fails += expect(fails_local == 0 && two > 60 && two < 160,
+                        "keybed wet FX chains follow RC's category weights");
+        fails += expect(kb::random_fx_chain(7) == kb::random_fx_chain(7) &&
+                        kb::random_fx_chain(7, false).size() == 1,
+                        "keybed FX chains are seed-stable and can be limited to one tag");
+        fails += expect(all.size() == 22 && all.front() == "Low Reverb" && all.back() == "High Bitcrush",
+                        "keybed FX choices flatten every category");
+    }
+
+    // Structured sounds: free text sorts onto controls, unknown words survive as extras.
+    {
+        const kb::SoundSpec s = kb::classify_descriptor(
+            "keys, rhodes piano, Warm, soft, Staccato, Sine, tape wobble, Plate Reverb, Ping Pong Delay");
+        fails += expect(s.family == "Keys" && s.subfamily == "Rhodes Piano" &&
+                        s.character == std::vector<std::string>{"Warm", "Soft"} &&
+                        s.articulation == "Staccato" && s.oscillator == "Sine" &&
+                        s.extras == std::vector<std::string>{"tape wobble"} && s.wet &&
+                        s.fx == std::vector<std::string>{"Plate Reverb", "Ping Pong Delay"},
+                        "keybed classifier sorts a descriptor onto its controls");
+        fails += expect(kb::descriptor_of(s) == "Keys, Rhodes Piano, Warm, Soft, Staccato, Sine, tape wobble",
+                        "keybed descriptor rebuilds in RC's order");
+        const kb::SoundSpec pasted = kb::classify_descriptor(
+            "Keybed, Sequence, Timbre Profile, Marimba, Bright, Dry, Chromatic Chunk, Note Sequence, C5, C#5");
+        fails += expect(pasted.family == "Mallet" && pasted.subfamily == "Marimba" && !pasted.wet &&
+                        pasted.character == std::vector<std::string>{"Bright"} && pasted.extras.empty(),
+                        "keybed classifier infers the family and strips pasted grammar");
+        kb::SoundSpec fx = s;
+        kb::set_fx(fx, "High Reverb");
+        fails += expect(fx.fx == std::vector<std::string>{"High Reverb", "Ping Pong Delay"},
+                        "keybed FX slots hold one tag per category");
+        int mismatches = 0;
+        for (uint64_t seed = 0; seed < 200; ++seed) {
+            const kb::SoundSpec r = kb::random_sound(seed, seed % 2 == 0);
+            const kb::SoundSpec again = kb::classify_descriptor(kb::descriptor_of(r));
+            if (again.family != r.family || again.subfamily != r.subfamily ||
+                again.character != r.character || again.articulation != r.articulation ||
+                again.oscillator != r.oscillator || !again.extras.empty() ||
+                r.wet != !r.fx.empty() || kb::sequence_prompt_of(r, {60, 61}).empty())
+                ++mismatches;
+        }
+        fails += expect(mismatches == 0, "keybed random sounds round-trip through the classifier");
+    }
+
+    // Layered keybeds: SHA-1 and RC's seed derivation, pinned to Python hashlib outputs.
+    fails += expect(kb::detail::sha1_hex("") == "da39a3ee5e6b4b0d3255bfef95601890afd80709" &&
+                    kb::detail::sha1_hex("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d" &&
+                    kb::detail::sha1_hex(std::string(1000, 'a')) == "291e9a6c66994949b57ba5e650361e98fc36b1ba",
+                    "keybed SHA-1 matches the FIPS vectors");
+    fails += expect(kb::layer_seed(42, 0) == 8162322u && kb::layer_seed(42, 1) == 1324442250u &&
+                    kb::layer_seed(42, 2) == 2901690929u && kb::layer_seed(0, 0) == 4024071094u &&
+                    kb::layer_seed(2147483647, 2) == 3749525202u,
+                    "keybed layer seeds match RC's _layer_generation_seeds");
+    fails += expect(kb::layer_prompt_seed(42, 0) == 2848088190u && kb::layer_prompt_seed(42, 2) == 1775213216u &&
+                    kb::layer_prompt_seed(123456789, 1) == 846938297u,
+                    "keybed layer prompt seeds match RC's _prompt_seed_for_layer");
+
     const kb::RandomDescriptor a = kb::random_descriptor(42), b = kb::random_descriptor(42);
     fails += expect(a.descriptor == b.descriptor && !a.family.empty() &&
                     a.descriptor.rfind(a.family, 0) == 0 &&
