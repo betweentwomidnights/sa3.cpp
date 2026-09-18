@@ -460,6 +460,19 @@ static int test_keybed_audio() {
         fails += expect(mismatches == 0, "keybed random sounds round-trip through the classifier");
     }
 
+    // Layered keybeds: SHA-1 and RC's seed derivation, pinned to Python hashlib outputs.
+    fails += expect(kb::detail::sha1_hex("") == "da39a3ee5e6b4b0d3255bfef95601890afd80709" &&
+                    kb::detail::sha1_hex("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d" &&
+                    kb::detail::sha1_hex(std::string(1000, 'a')) == "291e9a6c66994949b57ba5e650361e98fc36b1ba",
+                    "keybed SHA-1 matches the FIPS vectors");
+    fails += expect(kb::layer_seed(42, 0) == 8162322u && kb::layer_seed(42, 1) == 1324442250u &&
+                    kb::layer_seed(42, 2) == 2901690929u && kb::layer_seed(0, 0) == 4024071094u &&
+                    kb::layer_seed(2147483647, 2) == 3749525202u,
+                    "keybed layer seeds match RC's _layer_generation_seeds");
+    fails += expect(kb::layer_prompt_seed(42, 0) == 2848088190u && kb::layer_prompt_seed(42, 2) == 1775213216u &&
+                    kb::layer_prompt_seed(123456789, 1) == 846938297u,
+                    "keybed layer prompt seeds match RC's _prompt_seed_for_layer");
+
     const kb::RandomDescriptor a = kb::random_descriptor(42), b = kb::random_descriptor(42);
     fails += expect(a.descriptor == b.descriptor && !a.family.empty() &&
                     a.descriptor.rfind(a.family, 0) == 0 &&

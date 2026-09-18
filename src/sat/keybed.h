@@ -992,6 +992,72 @@ inline SoundSpec classify_descriptor(const std::string& text) {
     return s;
 }
 
+// ---------------------------------------------------------------------------------------
+// Layered keybeds (RC layered_keybed_tab.py): three independently rendered keybeds, Main plus
+// two Supports, sharing range, sampler, and wet/dry, mixed only at playback.
+
+inline constexpr int kLayerCount = 3;
+inline constexpr const char* kLayerRoles[kLayerCount] = {"Main", "Support 1", "Support 2"};
+inline constexpr const char* kLayerDirNames[kLayerCount] = {"layer_1_main", "layer_2_support", "layer_3_support"};
+// RC's tri-layer exporter defaults: per-layer volume, applied at playback, never baked in.
+inline constexpr float kLayerDefaultVolumes[kLayerCount] = {0.90f, 0.60f, 0.35f};
+inline constexpr float kLayerMasterVolume = 0.55f;
+
+namespace detail {
+
+// SHA-1 (FIPS 180-1), only to reproduce RC's seed derivation exactly.
+inline std::string sha1_hex(const std::string& message) {
+    uint32_t h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+    std::vector<uint8_t> data(message.begin(), message.end());
+    const uint64_t bits = (uint64_t)data.size() * 8u;
+    data.push_back(0x80u);
+    while (data.size() % 64 != 56) data.push_back(0);
+    for (int i = 7; i >= 0; --i) data.push_back((uint8_t)(bits >> (i * 8)));
+    const auto rotl = [](uint32_t v, int n) { return (v << n) | (v >> (32 - n)); };
+    for (size_t chunk = 0; chunk < data.size(); chunk += 64) {
+        uint32_t w[80];
+        for (int i = 0; i < 16; ++i)
+            w[i] = (uint32_t)data[chunk + 4 * i] << 24 | (uint32_t)data[chunk + 4 * i + 1] << 16 |
+                   (uint32_t)data[chunk + 4 * i + 2] << 8 | (uint32_t)data[chunk + 4 * i + 3];
+        for (int i = 16; i < 80; ++i) w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+        for (int i = 0; i < 80; ++i) {
+            uint32_t f, k;
+            if (i < 20)      { f = (b & c) | (~b & d);           k = 0x5A827999u; }
+            else if (i < 40) { f = b ^ c ^ d;                    k = 0x6ED9EBA1u; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d);  k = 0x8F1BBCDCu; }
+            else             { f = b ^ c ^ d;                    k = 0xCA62C1D6u; }
+            const uint32_t t = rotl(a, 5) + f + e + k + w[i];
+            e = d; d = c; c = rotl(b, 30); b = a; a = t;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    }
+    char out[41];
+    for (int i = 0; i < 5; ++i) std::snprintf(out + 8 * i, 9, "%08x", h[i]);
+    return std::string(out, 40);
+}
+
+} // namespace detail
+
+// RC's _stable_int_seed: the first 32 bits of sha1("part|part|...") as an integer.
+inline uint64_t stable_int_seed(const std::vector<std::string>& parts) {
+    std::string joined;
+    for (size_t i = 0; i < parts.size(); ++i) joined += (i ? "|" : "") + parts[i];
+    return std::stoull(detail::sha1_hex(joined).substr(0, 8), nullptr, 16);
+}
+
+// Per-layer audio seeds from one base seed (RC _layer_generation_seeds); each layer reuses its
+// seed for every one of its chunks, like a single keybed.
+inline uint64_t layer_seed(uint64_t base_seed, int layer) {
+    static const char* keys[kLayerCount] = {"tri_main", "tri_support_1", "tri_support_2"};
+    return stable_int_seed({std::to_string(base_seed), keys[std::clamp(layer, 0, kLayerCount - 1)]});
+}
+
+// Per-layer dice seeds from one base seed (RC _prompt_seed_for_layer): related, distinct rolls.
+inline uint64_t layer_prompt_seed(uint64_t base_seed, int layer) {
+    return stable_int_seed({std::to_string(base_seed), "tri_prompt_" + std::to_string(std::clamp(layer, 0, kLayerCount - 1) + 1)});
+}
+
 // A structured dice roll: RC's simple-profile descriptor, plus an FX chain when wet.
 inline SoundSpec random_sound(uint64_t seed, bool wet) {
     const RandomDescriptor d = random_descriptor(seed, wet);
