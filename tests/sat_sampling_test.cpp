@@ -426,6 +426,40 @@ static int test_keybed_audio() {
                         "keybed FX choices flatten every category");
     }
 
+    // Structured sounds: free text sorts onto controls, unknown words survive as extras.
+    {
+        const kb::SoundSpec s = kb::classify_descriptor(
+            "keys, rhodes piano, Warm, soft, Staccato, Sine, tape wobble, Plate Reverb, Ping Pong Delay");
+        fails += expect(s.family == "Keys" && s.subfamily == "Rhodes Piano" &&
+                        s.character == std::vector<std::string>{"Warm", "Soft"} &&
+                        s.articulation == "Staccato" && s.oscillator == "Sine" &&
+                        s.extras == std::vector<std::string>{"tape wobble"} && s.wet &&
+                        s.fx == std::vector<std::string>{"Plate Reverb", "Ping Pong Delay"},
+                        "keybed classifier sorts a descriptor onto its controls");
+        fails += expect(kb::descriptor_of(s) == "Keys, Rhodes Piano, Warm, Soft, Staccato, Sine, tape wobble",
+                        "keybed descriptor rebuilds in RC's order");
+        const kb::SoundSpec pasted = kb::classify_descriptor(
+            "Keybed, Sequence, Timbre Profile, Marimba, Bright, Dry, Chromatic Chunk, Note Sequence, C5, C#5");
+        fails += expect(pasted.family == "Mallet" && pasted.subfamily == "Marimba" && !pasted.wet &&
+                        pasted.character == std::vector<std::string>{"Bright"} && pasted.extras.empty(),
+                        "keybed classifier infers the family and strips pasted grammar");
+        kb::SoundSpec fx = s;
+        kb::set_fx(fx, "High Reverb");
+        fails += expect(fx.fx == std::vector<std::string>{"High Reverb", "Ping Pong Delay"},
+                        "keybed FX slots hold one tag per category");
+        int mismatches = 0;
+        for (uint64_t seed = 0; seed < 200; ++seed) {
+            const kb::SoundSpec r = kb::random_sound(seed, seed % 2 == 0);
+            const kb::SoundSpec again = kb::classify_descriptor(kb::descriptor_of(r));
+            if (again.family != r.family || again.subfamily != r.subfamily ||
+                again.character != r.character || again.articulation != r.articulation ||
+                again.oscillator != r.oscillator || !again.extras.empty() ||
+                r.wet != !r.fx.empty() || kb::sequence_prompt_of(r, {60, 61}).empty())
+                ++mismatches;
+        }
+        fails += expect(mismatches == 0, "keybed random sounds round-trip through the classifier");
+    }
+
     const kb::RandomDescriptor a = kb::random_descriptor(42), b = kb::random_descriptor(42);
     fails += expect(a.descriptor == b.descriptor && !a.family.empty() &&
                     a.descriptor.rfind(a.family, 0) == 0 &&

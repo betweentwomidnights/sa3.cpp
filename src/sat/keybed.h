@@ -564,7 +564,11 @@ inline const std::vector<Weighted>& subfamilies(const std::string& family) {
     static const std::vector<Weighted> pure = {
         {"Sine", 1}, {"Saw", 1}, {"Triangle", 1}, {"Pulse", 1},
     };
+    static const std::vector<Weighted> plucked = {
+        {"Concert Harp", 1}, {"Celtic Harp", 1},
+    };
     static const std::vector<Weighted> none;
+    if (family == "Plucked Strings") return plucked;
     if (family == "Synth") return synth;
     if (family == "Keys") return keys;
     if (family == "Bass") return bass;
@@ -776,6 +780,227 @@ inline RandomDescriptor random_descriptor(uint64_t seed, bool wet = false) {
     tokens.insert(tokens.end(), tags.begin(), tags.end());
     out.descriptor = detail::join_prompt(detail::dedupe_keep_order(tokens));
     return out;
+}
+
+// ---------------------------------------------------------------------------------------
+// Structured sounds: the descriptor as editable parts (a knob surface), with a classifier
+// that sorts free text into those parts and a builder that turns them back into a prompt.
+
+namespace vocab {
+
+// Every family RC's experimental mode can pick; the dice's weighted list is families().
+inline const std::vector<std::string>& all_families() {
+    static const std::vector<std::string> v = {
+        "Synth", "Keys", "Bass", "Bowed Strings", "Mallet", "Wind", "Brass", "Guitar",
+        "Vocal", "Pure Tone", "White Noise", "Plucked Strings",
+    };
+    return v;
+}
+
+// RC's articulation mutex groups, merged into one exclusive choice.
+inline const std::vector<std::string>& articulation_tags() {
+    static const std::vector<std::string> v = {"Sustained", "Short", "Staccato", "Pizzicato", "Spiccato"};
+    return v;
+}
+
+// RC's oscillator/pure-tone modifier tags.
+inline const std::vector<std::string>& oscillator_tags() {
+    static const std::vector<std::string> v = {"Pure Tone", "Sine", "Saw", "Triangle", "Pulse", "Square", "White Noise"};
+    return v;
+}
+
+// Timbre tags for character knobs: RC's whole keybed timbre list. Articulation and
+// oscillator words have their own controls, but RC's rolls can carry a second one (e.g.
+// Short + Pizzicato), which then lands on a character knob instead of being lost.
+inline const std::vector<std::string>& character_tags() {
+    static const std::vector<std::string> v = []() {
+        std::vector<std::string> out;
+        for (const Weighted& tag : timbre()) out.push_back(tag.first);
+        return out;
+    }();
+    return v;
+}
+
+// Every family and subfamily name, deduplicated, for a second (hybrid) instrument.
+inline const std::vector<std::string>& instruments() {
+    static const std::vector<std::string> v = []() {
+        std::vector<std::string> out;
+        for (const std::string& family : all_families()) {
+            if (family != "White Noise") out.push_back(family);
+            for (const Weighted& sub : subfamilies(family)) out.push_back(sub.first);
+        }
+        return detail::dedupe_keep_order(out);
+    }();
+    return v;
+}
+
+// The family a subfamily most often belongs to (RC's keybed_instrument_context), or empty.
+inline std::string family_of(const std::string& subfamily) {
+    std::string best;
+    int best_weight = 0;
+    for (const std::string& family : all_families())
+        for (const Weighted& sub : subfamilies(family))
+            if (subfamily == sub.first && sub.second > best_weight) {
+                best = family;
+                best_weight = sub.second;
+            }
+    return best;
+}
+
+inline const FxCategory* fx_category_of(const std::string& tag) {
+    for (const FxCategory& category : fx_categories())
+        for (const Weighted& token : category.tokens)
+            if (tag == token.first) return &category;
+    return nullptr;
+}
+
+} // namespace vocab
+
+struct SoundSpec {
+    std::string family;                   // may be empty
+    std::string subfamily;                // may be empty
+    std::string second_instrument;        // RC's hybrid mode; may be empty
+    std::vector<std::string> character;   // timbre tags
+    std::string articulation;             // one of vocab::articulation_tags(), or empty
+    std::string oscillator;               // one of vocab::oscillator_tags(), or empty
+    std::vector<std::string> extras;      // free text the vocabulary does not cover
+    bool wet = false;
+    std::vector<std::string> fx;          // at most one tag per FX category; empty + wet = model picks
+
+    bool operator==(const SoundSpec& o) const {
+        return family == o.family && subfamily == o.subfamily &&
+               second_instrument == o.second_instrument && character == o.character &&
+               articulation == o.articulation && oscillator == o.oscillator &&
+               extras == o.extras && wet == o.wet && fx == o.fx;
+    }
+};
+
+// The descriptor half of a keybed prompt, in RC's order: instruments, character, shape, extras.
+inline std::string descriptor_of(const SoundSpec& s) {
+    std::vector<std::string> tokens{s.family, s.subfamily, s.second_instrument};
+    tokens.insert(tokens.end(), s.character.begin(), s.character.end());
+    tokens.push_back(s.articulation);
+    tokens.push_back(s.oscillator);
+    tokens.insert(tokens.end(), s.extras.begin(), s.extras.end());
+    return detail::join_prompt(detail::dedupe_keep_order(tokens));
+}
+
+// FX tags the prompt should carry (none when dry).
+inline std::vector<std::string> fx_of(const SoundSpec& s) {
+    return s.wet ? s.fx : std::vector<std::string>{};
+}
+
+inline std::string sequence_prompt_of(const SoundSpec& s, const std::vector<int>& label_midis) {
+    const std::vector<std::string> fx = fx_of(s);
+    return build_sequence_prompt(descriptor_of(s), label_midis, s.wet, &fx);
+}
+
+// Put an FX tag in its category's slot (replacing that category's previous tag).
+inline void set_fx(SoundSpec& s, const std::string& tag) {
+    const vocab::FxCategory* category = vocab::fx_category_of(tag);
+    if (!category) return;
+    for (auto it = s.fx.begin(); it != s.fx.end(); ++it)
+        if (vocab::fx_category_of(*it) == category) { *it = tag; return; }
+    s.fx.push_back(tag);
+}
+
+namespace detail {
+inline std::string canonical_in(const std::string& token, const std::vector<std::string>& list) {
+    const std::string low = lower(token);
+    for (const std::string& item : list)
+        if (lower(item) == low) return item;
+    return {};
+}
+} // namespace detail
+
+// Sort free text (a descriptor or a pasted keybed prompt) into a SoundSpec. Known words land
+// on their controls, case-insensitively; anything else becomes an extra so nothing is lost.
+// FX words switch the sound to wet.
+inline SoundSpec classify_descriptor(const std::string& text) {
+    SoundSpec s;
+    const DescriptorTokens tokens = split_descriptor_tokens(text);
+    // Articulation and oscillator slots go to the candidate earliest in their vocabulary, not
+    // the first one typed, so re-sorting an already sorted descriptor is a fixed point.
+    const auto best_of = [&](const std::vector<std::string>& list) {
+        for (const std::string& item : list)
+            for (const std::string& token : tokens.body)
+                if (detail::lower(token) == detail::lower(item)) return item;
+        return std::string();
+    };
+    std::string family_token;
+    for (const std::string& token : tokens.body) {   // the family is claimed before the slots
+        family_token = detail::canonical_in(token, vocab::all_families());
+        if (!family_token.empty()) break;
+    }
+    const auto without_family = [&](const std::vector<std::string>& list) {
+        std::vector<std::string> out;
+        for (const std::string& item : list)
+            if (item != family_token) out.push_back(item);
+        return out;
+    };
+    const std::string articulation = best_of(vocab::articulation_tags());
+    const std::string oscillator = best_of(without_family(vocab::oscillator_tags()));
+    for (const std::string& token : tokens.body) {
+        std::string hit;
+        if (s.family.empty() && !(hit = detail::canonical_in(token, vocab::all_families())).empty()) {
+            s.family = hit;
+            continue;
+        }
+        if (s.subfamily.empty() && !s.family.empty()) {
+            std::vector<std::string> subs;
+            for (const auto& sub : vocab::subfamilies(s.family)) subs.push_back(sub.first);
+            if (!(hit = detail::canonical_in(token, subs)).empty()) { s.subfamily = hit; continue; }
+        }
+        if (s.articulation.empty() && !articulation.empty() && detail::lower(token) == detail::lower(articulation)) {
+            s.articulation = articulation;
+            continue;
+        }
+        if (s.oscillator.empty() && !oscillator.empty() && detail::lower(token) == detail::lower(oscillator)) {
+            s.oscillator = oscillator;
+            continue;
+        }
+        if (!(hit = detail::canonical_in(token, vocab::character_tags())).empty()) {
+            if (std::find(s.character.begin(), s.character.end(), hit) == s.character.end())
+                s.character.push_back(hit);
+            continue;
+        }
+        if (!(hit = detail::canonical_in(token, vocab::instruments())).empty()) {
+            if (s.family.empty()) {            // a bare type implies its family
+                s.family = vocab::family_of(hit);
+                s.subfamily = hit;
+            }
+            else if (s.subfamily.empty()) s.subfamily = hit;
+            else if (s.second_instrument.empty()) s.second_instrument = hit;
+            else s.extras.push_back(token);
+            continue;
+        }
+        s.extras.push_back(token);
+    }
+    for (const std::string& token : tokens.fx) {
+        const std::string hit = detail::canonical_in(token, vocab::fx_choices());
+        if (!hit.empty()) set_fx(s, hit);
+        else s.extras.push_back(token);
+        s.wet = true;
+    }
+    // A pasted full prompt says Wet/Dry explicitly; honor it.
+    for (const std::string& raw : detail::split_commas(text)) {
+        const std::string low = detail::lower(raw);
+        if (low == "wet") s.wet = true;
+        if (low == "dry") s.wet = false;
+    }
+    if (!s.wet) s.fx.clear();
+    return s;
+}
+
+// A structured dice roll: RC's simple-profile descriptor, plus an FX chain when wet.
+inline SoundSpec random_sound(uint64_t seed, bool wet) {
+    const RandomDescriptor d = random_descriptor(seed, wet);
+    SoundSpec s = classify_descriptor(d.descriptor);
+    s.family = d.family;
+    s.subfamily = d.subfamily;
+    s.wet = wet;
+    s.fx = wet ? random_fx_chain(seed ^ 0x9e3779b97f4a7c15ull) : std::vector<std::string>{};
+    return s;
 }
 
 } // namespace sa3::sat::keybed
