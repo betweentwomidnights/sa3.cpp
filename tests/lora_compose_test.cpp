@@ -12,7 +12,7 @@
 
 #include <cmath>
 #include <cstdio>
-#include <random>
+#include "rng.h"
 #include <string>
 #include <vector>
 
@@ -58,8 +58,7 @@ struct AdapterSpec {
 };
 
 int main() {
-    std::mt19937 rng(20260730);
-    std::normal_distribution<float> nd(0.0f, 0.5f);
+    sa3::Rng rng(20260730);
     const int64_t SEQ = 5;
 
     // ---- the shared base weights, generated once and reused by every case ----
@@ -67,14 +66,14 @@ int main() {
     for (const auto& t : kTargets) {
         TensorSpec s{ t.stem + ".weight", t.in, t.out, {} };
         s.data.resize((size_t)t.in * t.out);
-        for (auto& v : s.data) v = nd(rng);
+        for (auto& v : s.data) v = rng.normal() * 0.5f;
         base_specs.push_back(std::move(s));
     }
     // activations, one per distinct input width
     std::vector<std::vector<float>> xs;
     for (const auto& t : kTargets) {
         std::vector<float> v((size_t)t.in * SEQ);
-        for (auto& e : v) e = nd(rng);
+        for (auto& e : v) e = rng.normal() * 0.5f;
         xs.push_back(std::move(v));
     }
 
@@ -82,8 +81,7 @@ int main() {
     // functional path see bit-identical adapters ----
     auto make_adapter_specs = [&](const AdapterSpec& as, uint32_t seed) {
         std::vector<TensorSpec> out;
-        std::mt19937 r(seed);
-        std::normal_distribution<float> n(0.0f, 0.4f);
+        sa3::Rng r(seed);
         const bool xs_fam = sa3::functional_lora_is_xs(as.type);
         for (const auto& t : kTargets) {
             if (as.skip_solo && t.stem == "dit.1.self.out") continue;
@@ -93,15 +91,15 @@ int main() {
                 TensorSpec U{ t.stem + ".U", rk, t.out, {} };  U.data.resize((size_t)rk * t.out);
                 TensorSpec V{ t.stem + ".V", rk, t.in,  {} };  V.data.resize((size_t)rk * t.in);
                 TensorSpec M{ t.stem + ".M_xs", rk, rk, {} };  M.data.resize((size_t)rk * rk);
-                for (auto& v : U.data) v = n(r);
-                for (auto& v : V.data) v = n(r);
-                for (auto& v : M.data) v = n(r);
+                for (auto& v : U.data) v = r.normal() * 0.4f;
+                for (auto& v : V.data) v = r.normal() * 0.4f;
+                for (auto& v : M.data) v = r.normal() * 0.4f;
                 out.push_back(std::move(U)); out.push_back(std::move(V)); out.push_back(std::move(M));
             } else {
                 TensorSpec A{ t.stem + ".lora_A", t.in, rk, {} };  A.data.resize((size_t)t.in * rk);
                 TensorSpec B{ t.stem + ".lora_B", rk, t.out, {} }; B.data.resize((size_t)rk * t.out);
-                for (auto& v : A.data) v = n(r);
-                for (auto& v : B.data) v = n(r);
+                for (auto& v : A.data) v = r.normal() * 0.4f;
+                for (auto& v : B.data) v = r.normal() * 0.4f;
                 out.push_back(std::move(A)); out.push_back(std::move(B));
             }
             if (as.type.rfind("dora-rows", 0) == 0) {

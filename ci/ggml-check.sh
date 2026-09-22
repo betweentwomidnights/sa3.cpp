@@ -51,19 +51,19 @@ cmake --build "$build" --config Release -j "$jobs"
 
 # --output-on-failure so a red test explains itself in the job log rather than
 # only naming which one died.
-# sa3-dit-lin-functional-test is excluded until its inputs are portable.
-# It seeds std::mt19937 identically everywhere, then fills tensors through
-# std::normal_distribution, whose algorithm the standard leaves to the
-# implementation. libstdc++ and MSVC both use Box-Muller and both return the
-# pair it generates in the opposite order, so the same seed lays the same
-# numbers into different elements. The test therefore measures a different
-# problem on each toolchain: at index 5 the analytic gradient is -0.679 under
-# MSVC and -0.0099 under gcc. Its finite-difference tolerances were tuned
-# against one of those layouts and only hold there.
+# sa3-dit-lin-functional-test stays excluded, but for a different reason than
+# before. Its inputs are portable now; what it reports is a real divergence.
 #
-# Not a numerical bug in sa3, and not something to paper over by loosening a
-# tolerance. The fix is to generate test data from a counter-based RNG that
-# does not depend on the standard library, which acestep.cpp already carries
-# as src/philox.h. Remove this exclusion once that lands here.
+# Comparing the f16-base analytic gradient against the f32-base one, B diverges
+# by 0.2% and the magnitude by 0.08%, both about what quantising the base
+# weight to f16 should cost. A diverges by 7.2%, roughly thirty-five times its
+# siblings. The old oracle could not have shown this: it finite-differenced an
+# f16 forward, so it was measuring the quantiser's staircase rather than the
+# derivative, and its tolerances only ever held for the particular data MSVC's
+# std::normal_distribution happened to lay down.
+#
+# Whether 7.2% is expected for this path is a question about sa3's DoRA
+# numerics, not about CI, and it is not one to settle by widening a tolerance
+# until the check goes quiet. Remove this exclusion once that is answered.
 ctest --test-dir "$build" --build-config Release --output-on-failure \
     -E sa3-dit-lin-functional-test

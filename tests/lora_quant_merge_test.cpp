@@ -27,7 +27,7 @@
 
 #include <cmath>
 #include <cstdio>
-#include <random>
+#include "rng.h"
 #include <string>
 #include <vector>
 
@@ -85,13 +85,12 @@ static double rms(const std::vector<float>& a, const std::vector<float>& b) {
 
 static void run_type(ggml_type type) {
     const char* tname = ggml_type_name(type);
-    std::mt19937 rng(1234);
-    std::normal_distribution<float> nd(0.f, 0.05f);
+    sa3::Rng rng(1234);
 
     std::vector<float> W((size_t)kIn * kOut), A((size_t)kRank * kIn), B((size_t)kOut * kRank);
-    for (auto& v : W) v = nd(rng);
-    for (auto& v : A) v = nd(rng);
-    for (auto& v : B) v = nd(rng);
+    for (auto& v : W) v = rng.normal() * 0.05f;
+    for (auto& v : A) v = rng.normal() * 0.05f;
+    for (auto& v : B) v = rng.normal() * 0.05f;
 
     const float alpha = (float)kRank, strength = 1.0f;   // scaling = alpha/rank = 1
     const float sc = (alpha / (float)kRank) * strength;
@@ -187,13 +186,12 @@ static void run_unsupported() {
 // the larger adapter at the wrong stride -- so without a check it merges garbage and reports
 // success.
 static void run_shape_mismatch() {
-    std::mt19937 rng(99);
-    std::normal_distribution<float> nd(0.f, 0.05f);
+    sa3::Rng rng(99);
 
     // Base is HALF the width the adapter was built for, as SAME-S is to SAME-L.
     const int64_t narrow_in = kIn / 2, narrow_out = kOut / 2;
     std::vector<float> W((size_t)narrow_in * narrow_out);
-    for (auto& v : W) v = nd(rng);
+    for (auto& v : W) v = rng.normal() * 0.05f;
 
     sa3::GgufModel base;
     ggml_init_params ip = { 8 * ggml_tensor_overhead(), nullptr, true };
@@ -207,8 +205,8 @@ static void run_shape_mismatch() {
     ggml_backend_tensor_set(t, W.data(), 0, W.size() * sizeof(float));
 
     std::vector<float> A((size_t)kRank * kIn), B((size_t)kOut * kRank);
-    for (auto& v : A) v = nd(rng);
-    for (auto& v : B) v = nd(rng);
+    for (auto& v : A) v = rng.normal() * 0.05f;
+    for (auto& v : B) v = rng.normal() * 0.05f;
     std::vector<sa3::LoraAdapter> stack(1);
     build_adapter(stack[0].gguf, "w", A, B);        // built for the WIDE base
     stack[0].type = "lora";
