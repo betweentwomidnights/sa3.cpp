@@ -38,10 +38,15 @@ printf 'ggml     %s\n' "$(git -C ggml rev-parse HEAD 2>/dev/null || echo unknown
 # SA3_BUILD_SAT is left off, matching the default. It pulls in the classic
 # stable-audio-tools component and its own tests, which is a larger build than
 # this question needs: what is being asked is whether ggml still works here.
+# GGML_METAL has to be turned off rather than merely left alone. ggml defaults
+# it ON for Apple, and SA3_METAL=OFF only declines to force it ON, so a macOS
+# runner would build and run Metal while this script claims to be CPU only.
+# That aborted three of audiocraft.cpp's tests on a virtualised runner.
 cmake -S . -B "$build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DSA3_BUILD_TOOLS=ON \
-    -DBUILD_TESTING=ON
+    -DBUILD_TESTING=ON \
+    -DGGML_METAL=OFF
 cmake --build "$build" --config Release -j "$jobs"
 
 # --output-on-failure so a red test explains itself in the job log rather than
