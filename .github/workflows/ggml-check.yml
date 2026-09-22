@@ -1,0 +1,45 @@
+# ABOUTME: Builds sa3 and runs its test suite against the pinned ggml revision.
+# ABOUTME: Also callable by the shared ggml fork to test an unmerged revision.
+name: ggml check
+
+on:
+  pull_request:
+  workflow_dispatch:
+  # The shared ggml fork calls this to find out whether a change of its own
+  # breaks this consumer, before that change is merged. It passes the revision
+  # to test; without one the pinned submodule is used.
+  workflow_call:
+    inputs:
+      ggml-ref:
+        description: ggml revision to test instead of the pinned one
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Only when asked. A pull request on this repo tests what it pins; the
+      # override exists so ggml can test a revision that is not merged yet and
+      # so has no pointer here to check out.
+      - name: Override ggml revision
+        if: inputs.ggml-ref != ''
+        run: |
+          git -C ggml fetch --depth 1 origin "${{ inputs.ggml-ref }}"
+          git -C ggml checkout --detach FETCH_HEAD
+
+      - name: Build and test
+        run: ./ci/ggml-check.sh
