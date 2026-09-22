@@ -71,3 +71,6 @@ prompts/*.json
 !prompts/defaults.json
 !prompts/kev.json
 !prompts/keygen.json
+
+# scratch build made by ci/ggml-check.sh
+build-ggml-check/
