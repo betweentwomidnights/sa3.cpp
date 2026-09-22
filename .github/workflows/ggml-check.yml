@@ -43,3 +43,37 @@ jobs:
 
       - name: Build and test
         run: ./ci/ggml-check.sh
+  cuda:
+    name: CUDA compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The toolkit as an image, so there is no installer step to age.
+    container:
+      image: nvidia/cuda:12.6.3-devel-ubuntu24.04
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq build-essential cmake git
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Override ggml revision
+        if: inputs.ggml-ref != ''
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/ggml"
+          git -C ggml fetch --depth 1 origin "${{ inputs.ggml-ref }}"
+          git -C ggml checkout --detach FETCH_HEAD
+
+      # Compiles ggml-cuda.cu, which the cpu jobs never touch at all. It does
+      # not run: there is no GPU here, and the script stops after the build.
+      - name: Build
+        env:
+          GGML_CHECK_BACKEND: cuda
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+          ./ci/ggml-check.sh
