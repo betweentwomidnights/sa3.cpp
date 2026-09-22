@@ -51,4 +51,19 @@ cmake --build "$build" --config Release -j "$jobs"
 
 # --output-on-failure so a red test explains itself in the job log rather than
 # only naming which one died.
-ctest --test-dir "$build" --build-config Release --output-on-failure
+# sa3-dit-lin-functional-test is excluded until its inputs are portable.
+# It seeds std::mt19937 identically everywhere, then fills tensors through
+# std::normal_distribution, whose algorithm the standard leaves to the
+# implementation. libstdc++ and MSVC both use Box-Muller and both return the
+# pair it generates in the opposite order, so the same seed lays the same
+# numbers into different elements. The test therefore measures a different
+# problem on each toolchain: at index 5 the analytic gradient is -0.679 under
+# MSVC and -0.0099 under gcc. Its finite-difference tolerances were tuned
+# against one of those layouts and only hold there.
+#
+# Not a numerical bug in sa3, and not something to paper over by loosening a
+# tolerance. The fix is to generate test data from a counter-based RNG that
+# does not depend on the standard library, which acestep.cpp already carries
+# as src/philox.h. Remove this exclusion once that lands here.
+ctest --test-dir "$build" --build-config Release --output-on-failure \
+    -E sa3-dit-lin-functional-test
