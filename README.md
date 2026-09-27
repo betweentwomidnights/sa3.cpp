@@ -1,5 +1,16 @@
 # stable-audio-3 in c++
 
+## built with sa3.cpp
+
+These applications run sa3.cpp outside this repository:
+
+| Application | What it uses | Download |
+|---|---|---|
+| [Foundation Keys](https://github.com/betweentwomidnights/foundation-1.2-iplug2) | Foundation-1.2 Keybeds text-to-synth through the Stable Audio Tools backend | [v0.1.2 for Windows and macOS](https://github.com/betweentwomidnights/foundation-1.2-iplug2/releases/tag/v0.1.2) |
+| [SA3 iPlug2 demo](https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo) | Stable Audio 3 VST3 and REAPER extension using the embedded C ABI | [v0.4.0 for Windows](https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo/releases/tag/v0.4.0) |
+| [SA3 Ableton extension](https://github.com/betweentwomidnights/sa3-ableton-extension) | Stable Audio 3 inside Ableton Live using the embedded C ABI | [v0.2.0 for Windows](https://github.com/betweentwomidnights/sa3-ableton-extension/releases/tag/v0.2.0) |
+| [sa3.cpp iOS](https://github.com/betweentwomidnights/sa3.cpp-ios) | Experimental on-device LoRA training and inference on an iPhone 13 | [Source and build instructions](https://github.com/betweentwomidnights/sa3.cpp-ios) (no release yet) |
+
 > **update 9/6/2026 — little bit of scope creep this week...we now support every stable audio model,
 > including foundation-1, in the CLI and libsa3. trying to figure out the cleanest way to expose it
 > in the sa3-server right now.**
