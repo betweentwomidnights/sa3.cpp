@@ -1,0 +1,79 @@
+# ABOUTME: Builds the portable Windows packages for a published release and
+# ABOUTME: attaches them with SHA256SUMS, for supervisors that install sa3.cpp.
+name: release
+
+on:
+  release:
+    types: [published]
+  # Rebuild and re-attach for a release that already exists, e.g. after a
+  # runner failure. Assets are replaced, not duplicated.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: existing release tag to build and attach to (e.g. v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: windows-x64 (cpu + cuda + vulkan)
+    # Pinned rather than windows-latest: the CUDA toolkit's MSBuild integration
+    # targets Visual Studio 2022, and ci/package-windows.ps1 asks for that
+    # generator by name. A runner image moving to a newer Visual Studio should
+    # be a change made here on purpose, not one that turns up as a red release.
+    runs-on: windows-2022
+    # Every CUDA architecture ggml's portable default covers is compiled, which
+    # is most of this job's time.
+    timeout-minutes: 240
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          submodules: recursive
+
+      # The full toolkit rather than network sub-packages: the runtime pack
+      # redistributes cudart and cuBLAS and ships NVIDIA's EULA with them, and
+      # only a full install is sure to lay all three down.
+      - name: Cache CUDA toolkit
+        id: cache-cuda
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA
+          key: cuda-12.8.1-windows-2022
+
+      - name: Install CUDA toolkit
+        if: steps.cache-cuda.outputs.cache-hit != 'true'
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: '12.8.1'
+
+      # A cache hit skips the installer, which is what normally sets these.
+      - name: Point at the CUDA toolkit
+        shell: pwsh
+        run: |
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8"
+          "CUDA_PATH=$cuda" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$cuda\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Build, test, and package
+        shell: pwsh
+        run: ./ci/package-windows.ps1 -Version $env:TAG
+
+      - name: Attach to release
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload $env:TAG (Get-ChildItem dist -File).FullName --clobber

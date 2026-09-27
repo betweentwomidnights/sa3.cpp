@@ -7,6 +7,10 @@ for progress and, on completion, the base64 audio. That makes it a drop-in for a
 (SA3 on `:8006`). The reusable primitives live in the pipeline (`src/sa3_pipeline.h`, incl.
 `GenParams::on_progress`); a synchronous or SSE transport is left to real apps.
 
+Open `http://127.0.0.1:8006/` for the embedded inference page. To use the linked
+LoRA training page, also start `sa3-train-web` and open `http://127.0.0.1:8016/`.
+The interfaces originated with [pillopaus-project](https://github.com/pillopaus-project/sa3.cpp).
+
 ## Run
 
 ```bash
@@ -19,7 +23,7 @@ for progress and, on completion, the base64 audio. That makes it a drop-in for a
 #       --threads N (or SA3_THREADS, CPU backend only)
 #       --prompts-dir DIR (or SA3_PROMPTS_DIR)
 #       --source-loras-dir DIR (or SA3_SOURCE_LORAS_DIR)
-#       --web-dir DIR (or SA3_WEB_DIR) — serve a front-end at / ; omit for API only
+#       --web-dir DIR (or SA3_WEB_DIR) — override the embedded inference assets
 #       --audio-in-dir DIR (or SA3_AUDIO_IN_DIR) — init-audio pool for browser clients
 ```
 

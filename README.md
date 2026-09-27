@@ -1,19 +1,29 @@
 # stable-audio-3 in c++
 
-> **update 9/6/2026 — little bit of scope creep this week...we now support every stable audio model,
-> including foundation-1, in the CLI and libsa3. trying to figure out the cleanest way to expose it
-> in the sa3-server right now.**
+## built with sa3.cpp
 
-trying to make this as composable and extensible as i can without over-engineering it too much. my hope is that this might eventually replace the sa3 backend i already use in [gary4local](https://github.com/betweentwomidnights/gary-localhost-installer), and start unifying that application for mac/pc. 
+These applications run sa3.cpp outside this repository:
 
-it might also just allow us to embed sa3 directly inside a JUCE/iPlug2 project. see [docs/EMBEDDING.md](docs/EMBEDDING.md).
+| Application | What it uses | Download |
+|---|---|---|
+| [Foundation Keys](https://github.com/betweentwomidnights/foundation-1.2-iplug2) | Foundation-1.2 Keybeds text-to-synth through the Stable Audio Tools backend | [v0.1.2 for Windows and macOS](https://github.com/betweentwomidnights/foundation-1.2-iplug2/releases/tag/v0.1.2) |
+| [SA3 iPlug2 demo](https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo) | Stable Audio 3 VST3 and REAPER extension using the embedded C ABI | [v0.4.0 for Windows](https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo/releases/tag/v0.4.0) |
+| [SA3 Ableton extension](https://github.com/betweentwomidnights/sa3-ableton-extension) | Stable Audio 3 inside Ableton Live using the embedded C ABI | [v0.2.0 for Windows](https://github.com/betweentwomidnights/sa3-ableton-extension/releases/tag/v0.2.0) |
+| [sa3.cpp iOS](https://github.com/betweentwomidnights/sa3.cpp-ios) | Experimental on-device LoRA training and inference on an iPhone 13 | [Source and build instructions](https://github.com/betweentwomidnights/sa3.cpp-ios) (no release yet) |
 
-because this is my first ggml project, i wanted to be the first to actually run it in downstream apps instead of just benchmarking it. so both surfaces are already tested end-to-end:
+sa3.cpp runs Stable Audio 3 and the Stable Audio Tools family locally with ggml.
+It provides generation and LoRA training CLIs, an embeddable C ABI, and a local
+browser studio for Stable Audio 3 inference and training. The released applications above show
+these runtimes in DAWs and on device. See [embedding](docs/EMBEDDING.md),
+[training](docs/TRAINING.md), and [runtime packaging](docs/RUNTIME_RELEASE.md).
 
-- the **http server** (`sa3-server`) as an optional backend in [sa3-ableton-extension](https://github.com/betweentwomidnights/sa3-ableton-extension/tree/backend/sa3.cpp) (branch `backend/sa3.cpp`) — there's an [embedded version of the extension](https://github.com/betweentwomidnights/sa3-ableton-extension/tree/backends/embedded-sa3) now too, running libsa3 in-process
-- **libsa3** (the embedded c abi) runs the model in-process inside [sa3.cpp-iplug2-demo](https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo)
-
-there's also a browser web UI for the `sa3-server` http backend being built and validated on [pillopaus-project's fork](https://github.com/pillopaus-project/sa3.cpp).
+The browser inference and training interfaces originated with
+[pillopaus-project](https://github.com/pillopaus-project/sa3.cpp). Both original
+commit authorship and visible UI credit are preserved. Run `sa3-server` on port
+8006 and `sa3-train-web` on port 8016 to use the two linked views; see
+[server](docs/SERVER.md) and [training web UI](docs/TRAINING_WEB.md).
+The planned sample pad and take workflow is described in the
+[studio roadmap](docs/STUDIO_ROADMAP.md).
 
 ## quickstart
 
