@@ -107,7 +107,8 @@ static int run(ggml_backend_t backend, const char* label, int64_t dim, int64_t m
 }
 
 int main(int argc, char** argv) {
-    ggml_backend_t cpu = ggml_backend_cpu_init();
+    ggml_backend_load_all();
+    ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     ggml_backend_t gpu = nullptr;
     std::string gpu_label = "GPU";
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {

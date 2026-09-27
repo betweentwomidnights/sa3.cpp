@@ -75,8 +75,9 @@ int main(int argc, char** argv) {
     }
     if (!ref_path || !quant_path) { fprintf(stderr, "error: --ref and --quant required\n"); return 1; }
 
-    auto R = sa3::load_gguf(ref_path, ggml_backend_cpu_init());
-    auto Q = sa3::load_gguf(quant_path, ggml_backend_cpu_init());
+    ggml_backend_load_all();
+    auto R = sa3::load_gguf(ref_path, ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr));
+    auto Q = sa3::load_gguf(quant_path, ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr));
 
     fprintf(stdout, "ref tensors=%zu quant tensors=%zu\n", R.tensors.size(), Q.tensors.size());
 

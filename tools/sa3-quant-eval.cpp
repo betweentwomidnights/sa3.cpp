@@ -550,7 +550,8 @@ int main(int argc, char** argv) {
     // If --cpu, create a CPU backend; else null = auto-select
     ggml_backend_t forced_backend = nullptr;
     if (use_cpu) {
-        forced_backend = ggml_backend_cpu_init();
+        ggml_backend_load_all();
+        forced_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
         if (!forced_backend) { fprintf(stderr, "error: failed to init CPU backend\n"); return 1; }
         fprintf(stdout, "using CPU backend\n");
     }
