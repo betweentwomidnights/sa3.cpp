@@ -126,6 +126,22 @@ inline void dist_shift_defaults(const std::string& type, float& p1, float& p2, f
     else                     { p1 = 2000.0f; p2 = -6.2f;  p3 = 0.0f;   p4 = 2.0f;   } // LogSNR (medium, rate=0)
 }
 
+struct Text2MusicDuration {
+    int schedule_frames = 0;
+    float seconds_total = 0.0f;
+};
+
+// Preserve the requested duration for conditioning/schedule length while separately rounding the
+// generated SAME-S canvas to even latent frames. target_n_samp is zero for --frames requests.
+inline Text2MusicDuration text2music_duration(int target_n_samp, int aligned_frames,
+                                              int samples_per_frame) {
+    if (target_n_samp > 0) {
+        const int64_t frames = ((int64_t)target_n_samp + samples_per_frame - 1) / samples_per_frame;
+        return { (int)std::max<int64_t>(1, frames), (float)target_n_samp / 44100.0f };
+    }
+    return { aligned_frames, (float)aligned_frames * (float)samples_per_frame / 44100.0f };
+}
+
 // Build the descending rectified-flow schedule for text generation and audio-to-audio. Distribution
 // shift is defined over normalized diffusion time [1, 0]; sigma_max then selects how far into that
 // curve an audio-to-audio request starts. Warping an already-scaled t (the old behaviour) could map
@@ -922,17 +938,22 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (!TE.ctx) TE = load_gguf(paths_.t5.c_str(), backend_);
 
     // text2music: generate a (frames + duration_padding) canvas so the model isn't forced to "end"
-    // the piece in the kept region, then truncate to `frames` at the very end. eff_frames (= the
-    // requested length) drives seconds_total conditioning + the dist-shift schedule (upstream's
-    // use_effective_length_for_schedule); T (the canvas) drives all latent/DiT/decode sizing. a2a/
-    // inpaint derive frames from the init audio, so they keep pad=0.
+    // the piece in the kept region, then truncate to `frames` at the very end. Exact duration
+    // requests keep their requested seconds_total and effective schedule length; even-aligned
+    // eff_frames and padded T size the latent canvas. a2a/inpaint derive their length from init audio.
     const int max_len = (int)TE.u32("t5g.max_length");
     const int eff_frames = frames;
+    const int samples_per_frame = sc.patch_size * sc.output_seg;
+    const sa3::Text2MusicDuration text_length =
+        sa3::text2music_duration(params.target_n_samp, eff_frames, samples_per_frame);
+    const float conditioned_secs = has_init
+        ? (float)eff_frames * (float)samples_per_frame / 44100.0f
+        : text_length.seconds_total;
+    const int schedule_frames = has_init ? eff_frames : text_length.schedule_frames;
     int pad_frames = 0;
     if (!has_init && duration_padding_sec > 0.0f) {
-        const int per = sc.patch_size * sc.output_seg;          // audio samples per latent frame
         const int mult = sc.chunk ? 2 : 1;                      // SAME-S needs an even latent length
-        int pf = (int)(duration_padding_sec * 44100.0f / (float)per + 0.5f);
+        int pf = (int)(duration_padding_sec * 44100.0f / (float)samples_per_frame + 0.5f);
         pad_frames = ((pf + mult - 1) / mult) * mult;
     }
     const int T = eff_frames + pad_frames;
@@ -959,7 +980,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     };
     std::vector<int32_t> ids, attn;
     const int L = tokenize(prompt, ids, attn);
-    printf("prompt: \"%s\"  (%d tokens, ~%.2fs)\n", prompt.c_str(), L, (float)eff_frames * (sc.patch_size * sc.output_seg) / 44100.0f);
+    printf("prompt: \"%s\"  (%d tokens, ~%.2fs)\n", prompt.c_str(), L, conditioned_secs);
     if (pad_frames) printf("  + %.2fs schedule headroom (canvas T=%d, truncated back to %d)\n",
                            (float)pad_frames * (sc.patch_size * sc.output_seg) / 44100.0f, T, eff_frames);
     throw_if_cancelled(params.should_cancel);
@@ -1012,7 +1033,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // ---------- conditioning assembly (host): [T5 hidden (pad-substituted) | secs embed] ----------
     double t0 = wall_time_s();
     std::vector<float> pad_emb = tensor_to_host(CD(), "te.padding_embedding");
-    const float secs = (float)eff_frames * (sc.patch_size * sc.output_seg) / 44100.0f;
+    const float secs = conditioned_secs;
     const float smin = CD().f32("t5g.secs_min"), smax = CD().f32("t5g.secs_max");
     const int sdim = (int)CD().u32("t5g.secs_dim");
     float sclamp = secs < smin ? smin : (secs > smax ? smax : secs);
@@ -1060,7 +1081,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // ---------- schedule (SA3 distribution shift; default = LogSNR rate=0) ----------
     // Warp normalized diffusion time, then scale the curve by sigma_max for audio-to-audio.
     // Endpoints stay anchored at sigma_max and zero and every step remains descending.
-    std::vector<float> sigmas = sa3::make_sa3_schedule(steps, sigma_max, eff_frames,
+    std::vector<float> sigmas = sa3::make_sa3_schedule(steps, sigma_max, schedule_frames,
                                                        dist_shift, ds_p1, ds_p2, ds_p3, ds_p4);
 
     // ---------- audio2audio: encode init audio -> latent z_init [latent, T] ----------

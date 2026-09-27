@@ -13,6 +13,16 @@ static void expect(bool ok, const std::string& message) {
 
 int main() {
     std::printf("sampling_schedule_test\n");
+
+    const auto one_second = sa3::text2music_duration(44100, 12, 4096);
+    expect(one_second.schedule_frames == 11, "1 s schedule length must use requested samples, not SAME-S even alignment");
+    expect(std::fabs(one_second.seconds_total - 1.0f) < 1e-7f,
+           "1 s conditioner must use exact requested duration");
+    const auto frames_only = sa3::text2music_duration(0, 12, 4096);
+    expect(frames_only.schedule_frames == 12, "--frames schedule length must use its frame count");
+    expect(std::fabs(frames_only.seconds_total - 12.0f * 4096.0f / 44100.0f) < 1e-7f,
+           "--frames conditioner must infer duration from frames");
+
     const std::vector<std::string> shifts = {"LogSNR", "Flux", "Full", "None"};
     const std::vector<float> starts = {0.01f, 0.5f, 0.85f, 1.0f};
 
