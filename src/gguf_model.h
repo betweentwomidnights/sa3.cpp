@@ -122,6 +122,7 @@ inline ggml_backend_t make_backend(int cpu_threads = 0, const char* device = nul
     std::string dev_str = (device && *device) ? device : "";
     if (dev_str.empty()) { const char* e = getenv("SA3_DEVICE"); if (e) dev_str = e; }
     const char* dev = dev_str.empty() ? nullptr : dev_str.c_str();
+    const std::string requested_gpu = dev_str.rfind("gpu:", 0) == 0 ? dev_str.substr(4) : "";
     if (!(dev && strcmp(dev, "cpu") == 0)) {
         // Collect all GPU/iGPU devices in registry order.
         std::vector<ggml_backend_dev_t> gpus;
@@ -133,7 +134,7 @@ inline ggml_backend_t make_backend(int cpu_threads = 0, const char* device = nul
         }
         if (!gpus.empty()) {
             ggml_backend_dev_t chosen = nullptr;
-            const char* sel = getenv("SA3_GPU");
+            const char* sel = requested_gpu.empty() ? getenv("SA3_GPU") : requested_gpu.c_str();
             if (sel && *sel) {
                 // Try index first; a pure-integer string selects by position.
                 char* end = nullptr;

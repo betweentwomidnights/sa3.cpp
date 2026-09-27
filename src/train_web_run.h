@@ -32,7 +32,7 @@ enum class RunStatus {
     Queued,     // accepted, not yet spawned
     Running,    // child process alive
     Completed,  // child exited 0
-    Stopped,    // terminated by user (SIGTERM)
+    Stopped,    // stopped by user
     Failed,     // child exited non-zero or crashed
 };
 
@@ -79,8 +79,12 @@ struct TrainRun {
     RunStatus status = RunStatus::Queued;
 
     // Live process handle (only valid while Running / this process owns it).
-    pid_t pid = -1;
+    std::intptr_t pid = -1;
     int stdout_fd = -1;         // read end of child stdout+stderr pipe
+#ifdef _WIN32
+    void* process_handle = nullptr;
+    void* stdout_pipe = nullptr;
+#endif
 
     // Rolling log captured from the child (raw stdout/stderr text).
     std::string log;
@@ -184,7 +188,7 @@ struct RunRegistry {
 
     // The single owned, currently-running run (if any).
     TrainRun* active_run() {
-        for (auto& e : runs) if (e.status == RunStatus::Running && e.owned_by_us()) return &e;
+        for (auto& e : runs) if (e.owned_by_us()) return &e;
         return nullptr;
     }
 

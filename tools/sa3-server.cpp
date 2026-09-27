@@ -62,7 +62,7 @@ std::string g_models_dir;
 std::string g_adapters_dir;
 std::string g_prompts_dir;
 std::string g_source_loras_dir;
-std::string g_web_dir;                    // --web-dir: serve this directory at /; empty = API only
+std::string g_web_dir;                    // --web-dir: override the embedded inference page with local assets
 std::string g_audio_in_dir;               // --audio-in-dir: init-audio pool a browser can list/upload to
 int g_cpu_threads = 0;
 
@@ -899,8 +899,7 @@ int main(int argc, char** argv) {
     httplib::Server svr;
 
     // --web-dir: serve a directory of static files at /, so a front-end lives beside the server
-    // as plain files instead of being compiled in. Off by default; without it this is API-only
-    // and behaves exactly as before.
+    // as plain files instead of the compiled-in inference page. Off by default.
     //
     // httplib's own file handler does the serving: it rejects ".." and backslashes in the URL,
     // then canonicalizes and re-checks the result against the base directory so a symlink cannot

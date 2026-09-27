@@ -282,24 +282,6 @@ function onDistShiftChange() {
         input.disabled = type === "None";
     }
 }
-// ─── Theme ─────────────────────────────────────────────────────────────────
-function toggleTheme() {
-    const root = document.documentElement;
-    const current = root.dataset.theme || "dark";
-    const next = current === "dark" ? "light" : "dark";
-    root.dataset.theme = next;
-    localStorage.setItem("sa3-theme", next);
-    const btn = $("#theme-btn");
-    btn.textContent = next === "dark" ? "☀️" : "🌙";
-}
-function loadTheme() {
-    const saved = localStorage.getItem("sa3-theme");
-    if (saved === "light" || saved === "dark") {
-        document.documentElement.dataset.theme = saved;
-        const btn = $("#theme-btn");
-        btn.textContent = saved === "dark" ? "☀️" : "🌙";
-    }
-}
 // ─── Past Songs ────────────────────────────────────────────────────────────
 function pushPastSong(entry) {
     pastSongs.push(entry);
@@ -745,7 +727,6 @@ function setupCollapsibles() {
 // ─── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
     setupCollapsibles();
-    loadTheme();
     loadPastSongs();
     // Sync range sliders with their number companions
     syncSliderToNum("#duration", "#duration-num");
@@ -761,7 +742,6 @@ document.addEventListener("DOMContentLoaded", () => {
     $("#save-config-btn").addEventListener("click", saveConfig);
     $("#load-config-btn").addEventListener("click", loadConfig);
     $("#load-config-input").addEventListener("change", onConfigFileSelected);
-    $("#theme-btn").addEventListener("click", toggleTheme);
     $("#init-audio-refresh-btn").addEventListener("click", loadInitAudioList);
     $("#init-audio-upload-btn").addEventListener("click", uploadInitAudio);
     $("#init-audio-select").addEventListener("change", onInitAudioSelect);

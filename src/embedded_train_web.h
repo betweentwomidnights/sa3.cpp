@@ -3,24 +3,26 @@
 // AUTO-GENERATED from web/train.html and web/train.js. Do not edit by hand.
 // Rebuild with: python3 tools/gen_embedded_train_web.py
 
+#include <string>
+
 namespace embedded_train_web {
 
-inline const char* index_html = R"sa3trainweb(
-<!DOCTYPE html>
+inline const std::string index_html =
+    std::string(R"sa3trainweb(<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>sa3-train-web — LoRA Training</title>
+  <title>sa3.cpp studio — LoRA training</title>
   <style>
-    :root { --bg:#0f1117; --panel:#171a23; --panel2:#1f2330; --fg:#e6e8ee; --muted:#8b93a7;
-            --accent:#6ea8fe; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --border:#2a2f3d; }
+    :root { --bg:#090909; --panel:#171313; --panel2:#251a1a; --fg:#f4eded; --muted:#b6a5a5;
+            --accent:#e23b42; --ok:#6cc58b; --warn:#d9a36c; --bad:#ed6268; --border:#493030; }
     * { box-sizing: border-box; }
     body { margin:0; font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
-    header { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; }
+    header { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
     header h1 { font-size:16px; margin:0; font-weight:600; }
     header .spacer { flex:1; }
-    #new-btn { background:var(--accent); color:#0b0e14; border:none; padding:7px 14px; border-radius:6px; cursor:pointer; font-weight:600; }
+    #new-btn { background:#b6222b; color:#fff; border:1px solid var(--accent); padding:7px 14px; border-radius:6px; cursor:pointer; font-weight:600; }
     #new-btn:disabled { opacity:.45; cursor:not-allowed; }
     .layout { display:flex; height:calc(100vh - 49px); }
     .sidebar { width:280px; border-right:1px solid var(--border); overflow-y:auto; background:var(--panel); }
@@ -50,13 +52,20 @@ inline const char* index_html = R"sa3trainweb(
     .actions { display:flex; gap:10px; margin-top:14px; }
     button.sec { background:var(--panel2); color:var(--fg); border:1px solid var(--border); padding:8px 14px; border-radius:6px; cursor:pointer; }
     button.danger { background:rgba(248,113,113,.15); color:var(--bad); border:1px solid rgba(248,113,113,.35); padding:8px 14px; border-radius:6px; cursor:pointer; }
-    button.primary { background:var(--accent); color:#0b0e14; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:600; }
+    button.primary { background:#b6222b; color:#fff; border:1px solid var(--accent); padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:600; }
     .stat { background:var(--panel2); border-radius:8px; padding:12px; }
     .stat .k { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
     .stat .v { font-size:20px; font-weight:600; margin-top:3px; }
-    #spark { width:100%; height:90px; background:var(--panel2); border-radius:8px; display:block; }
-    #log { background:#0b0d12; border:1px solid var(--border); border-radius:8px; padding:10px; height:240px;
-           overflow-y:auto; font:12px/1.4 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; color:#cdd3e0; }
+    #spark { width:100%; height:90px; background:var(--panel2); border-radius:8px; dis)sa3trainweb") +
+    std::string(R"sa3trainweb(play:block; }
+    #log { background:#100d0d; border:1px solid var(--border); border-radius:8px; padding:10px; height:240px;
+           overflow-y:auto; font:12px/1.4 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; color:var(--fg); }
+    .studio-nav { display:flex; gap:8px; }
+    .studio-nav a { color:var(--muted); text-decoration:none; padding:6px 12px; border:1px solid var(--border); border-radius:6px; }
+    .studio-nav a[aria-current="page"] { color:var(--fg); border-color:var(--accent); background:#38171b; }
+    .studio-nav a:hover { color:var(--fg); border-color:var(--accent); }
+    .studio-credit { margin:24px 0 0; color:var(--muted); font-size:12px; }
+    .studio-credit a { color:var(--accent); }
     .art { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); }
     .art a { color:var(--accent); text-decoration:none; font-weight:600; }
     .art .sz { color:var(--muted); font-size:12px; }
@@ -67,7 +76,8 @@ inline const char* index_html = R"sa3trainweb(
 </head>
 <body>
   <header>
-    <h1>sa3-train-web</h1>
+    <h1>SA3.CPP <span style="color:var(--muted);font-weight:400">studio</span></h1>
+    <nav class="studio-nav" aria-label="Studio views"><a id="inference-link" href="http://127.0.0.1:8006/">Inference</a><a href="/" aria-current="page">LoRA training</a></nav>
     <span id="health" class="badge b-queued">…</span>
     <div class="spacer"></div>
     <button id="new-btn">+ New training</button>
@@ -84,6 +94,8 @@ inline const char* index_html = R"sa3trainweb(
         <div class="grid">
           <div><label>Dataset dir</label><input id="f-dataset" placeholder="/path/to/dataset" /></div>
           <div><label>Model</label><select id="f-model"><option>medium</option><option>small-music</option><option>small-sfx</option></select></div>
+          <div><label>Device</label><select id="f-device"><option value="">Auto (best available GPU)</option><option value="cpu">CPU</option></select></div>
+          <div><label>Base model tier</label><select id="f-encoding"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · compact</option><option value="f32">F32</option></select></div>
           <div><label>Adapter type</label><select id="f-adapter"><option>dora-rows</option><option>lora</option><option>dora-cols</option><option>bora</option><option>lora-xs</option><option>dora-rows-xs</option><option>dora-cols-xs</option><option>bora-xs</option></select></div>
           <div><label>Rank</label><input id="f-rank" type="number" value="16" /></div>
           <div><label>Alpha</label><input id="f-alpha" type="number" step="0.1" value="16" /></div>
@@ -97,7 +109,9 @@ inline const char* index_html = R"sa3trainweb(
           <div><label>Grad clip</label><input id="f-gradclip" type="number" step="0.1" value="1.0" /></div>
           <div><label>Output dir (optional)</label><input id="f-out" placeholder="train-runs/… (auto)" /></div>
         </div>
-        <div class="row" style="margin-top:12px;">
+        <p id="device-note" style="color:var(--muted);font-size:12px;margin:8px 0 0;">Detecting devices… Select a tier that is already downloaded for this model.</p>
+        <div class)sa3trainweb") +
+    std::string(R"sa3trainweb(="row" style="margin-top:12px;">
           <label style="display:flex;align-items:center;gap:6px;color:var(--fg);"><input id="f-inpaint" type="checkbox" checked style="width:auto;" /> Inpainting loss</label>
         </div>
         <div class="actions">
@@ -135,16 +149,17 @@ inline const char* index_html = R"sa3trainweb(
         <h3>No run selected</h3>
         <p style="color:var(--muted);">Pick a run from the sidebar, or start a new training.</p>
       </section>
+      <p class="studio-credit">Inference and training web interfaces by <a href="https://github.com/pillopaus-project/sa3.cpp" target="_blank" rel="noopener">pillopaus-project</a>; integrated into sa3.cpp.</p>
     </main>
   </div>
+  <script>document.getElementById('inference-link').href = location.protocol + '//' + location.hostname + ':8006/';</script>
   <script src="train.js"></script>
 </body>
 </html>
+)sa3trainweb");
 
-)sa3trainweb";
-
-inline const char* train_js = R"sa3trainweb(
-"use strict";
+inline const std::string train_js =
+    std::string(R"sa3trainweb("use strict";
 // sa3-train-web frontend — vanilla JS, no build step (mirrors web/app.js).
 // Talks to the companion's HTTP API: /api/train/*
 
@@ -204,6 +219,28 @@ async function refreshHealth() {
   el.title = h.train_bin || "";
 }
 
+async function refreshDevices() {
+  const result = await apiGet("/api/devices");
+  const select = $("f-device");
+  const note = $("device-note");
+  if (!result || !Array.isArray(result.devices)) {
+    note.textContent = "Device detection unavailable. Auto will use the runtime default.";
+    return;
+  }
+  for (const device of result.devices) {
+    if (device.kind === "cpu") continue;
+    const option = document.createElement("option");
+    option.value = device.id;
+    const gib = device.total_bytes ? ` · ${(device.total_bytes / 1073741824).toFixed(1)} GiB` : "";
+    option.textContent = `${device.name}${gib}`;
+    select.appendChild(option);
+  }
+  const gpus = result.devices.filter((d) => d.kind !== "cpu");
+  note.textContent = gpus.length ?
+    `${gpus.length} GPU device${gpus.length === 1 ? "" : "s"} detected. Select a downloaded GGUF tier for the chosen model.` :
+    "CPU only. Select a downloaded GGUF tier for the chosen model.";
+}
+
 // ---- run list (sidebar) ----------------------------------------------------
 function badgeClass(status) {
   return "badge b-" + (status || "queued");
@@ -233,7 +270,8 @@ function renderRunList() {
 async function refreshRuns() {
   const runs = await apiGet("/api/train/runs");
   if (runs) {
-    state.runs = runs;
+    stat)sa3trainweb") +
+    std::string(R"sa3trainweb(e.runs = runs;
     renderRunList();
     // keep "New training" disabled while a run is active
     const active = runs.find((r) => r.status === "running");
@@ -341,7 +379,8 @@ function drawSpark() {
   const n = data.length;
   const x = (i) => (n === 1 ? w / 2 : (i / (n - 1)) * w);
   const yLoss = (v) => h - 6 - ((hi === lo ? 0.5 : (v - lo) / (hi - lo)) * (h - 12));
-  const yLr = (v) => h - 6 - ((lrHi === lrLo ? 0.5 : (Math.log(v) - Math.log(lrLo)) / (Math.log(lrHi) - Math.log(lrLo))) * (h - 12));
+  con)sa3trainweb") +
+    std::string(R"sa3trainweb(st yLr = (v) => h - 6 - ((lrHi === lrLo ? 0.5 : (Math.log(v) - Math.log(lrLo)) / (Math.log(lrHi) - Math.log(lrLo))) * (h - 12));
 
   // loss line
   ctx.strokeStyle = "#6ea8fe"; ctx.lineWidth = 2; ctx.beginPath();
@@ -385,6 +424,8 @@ async function startTraining() {
   const cfg = {
     dataset: $("f-dataset").value.trim(),
     model: $("f-model").value,
+    device: $("f-device").value,
+    encoding: $("f-encoding").value,
     adapter_type: $("f-adapter").value,
     rank: parseInt($("f-rank").value, 10) || 16,
     alpha: parseFloat($("f-alpha").value) || 16,
@@ -436,10 +477,10 @@ $("stop-btn").onclick = stopTraining;
 // initial load
 (async () => {
   await refreshHealth();
+  await refreshDevices();
   await refreshRuns();
   setInterval(refreshHealth, 10000);
 })();
-
-)sa3trainweb";
+)sa3trainweb");
 
 } // namespace embedded_train_web

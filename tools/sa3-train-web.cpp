@@ -17,7 +17,9 @@
 //   GET  /train.js           embedded train.js
 #include "train_web_run.h"
 #include "embedded_train_web.h"
+#include "ggml-backend.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -32,10 +34,15 @@
 #include "httplib.h"
 #include "yyjson.h"
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -133,7 +140,12 @@ std::string resolve_train_bin(const std::string& argv0) {
     std::error_code ec;
     std::filesystem::path self = std::filesystem::canonical(argv0, ec);
     if (!ec) {
-        std::filesystem::path sib = self.parent_path() / "sa3-train";
+        std::filesystem::path sib = self.parent_path() /
+#ifdef _WIN32
+            "sa3-train.exe";
+#else
+            "sa3-train";
+#endif
         if (std::filesystem::is_regular_file(sib, ec)) return sib.string();
     }
     // PATH
@@ -141,17 +153,92 @@ std::string resolve_train_bin(const std::string& argv0) {
     if (path) {
         std::stringstream ss(path);
         std::string seg;
-        while (std::getline(ss, seg, ':')) {
-            std::filesystem::path cand = std::filesystem::path(seg) / "sa3-train";
+        while (std::getline(ss, seg,
+#ifdef _WIN32
+                            ';'
+#else
+                            ':'
+#endif
+                            )) {
+            std::filesystem::path cand = std::filesystem::path(seg) /
+#ifdef _WIN32
+                "sa3-train.exe";
+#else
+                "sa3-train";
+#endif
             if (std::filesystem::is_regular_file(cand, ec)) return cand.string();
         }
     }
     return "";
 }
 
-// Spawn sa3-train with the given config file. Returns pid (>0) on success,
-// or -1 on failure (and sets perr).
-pid_t spawn_train(const std::string& bin, const std::string& cfg_path, int& out_fd, std::string& perr) {
+// Spawn sa3-train with the given config file. Returns a process id (>0) on success.
+#ifdef _WIN32
+std::wstring quote_arg(const std::wstring& value) {
+    std::wstring quoted = L"\"";
+    size_t slashes = 0;
+    for (wchar_t ch : value) {
+        if (ch == L'\\') { ++slashes; continue; }
+        if (ch == L'"') {
+            quoted.append(slashes * 2 + 1, L'\\');
+            quoted += ch;
+        } else {
+            quoted.append(slashes, L'\\');
+            quoted += ch;
+        }
+        slashes = 0;
+    }
+    quoted.append(slashes * 2, L'\\');
+    return quoted + L'"';
+}
+
+std::intptr_t spawn_train(const std::string& bin, const std::string& cfg_path,
+                          void*& out_pipe, void*& process_handle, std::string& perr) {
+    SECURITY_ATTRIBUTES attrs{sizeof(attrs), nullptr, TRUE};
+    HANDLE read_pipe = nullptr, write_pipe = nullptr;
+    if (!CreatePipe(&read_pipe, &write_pipe, &attrs, 0)) {
+        perr = "CreatePipe failed";
+        return -1;
+    }
+    if (!SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(read_pipe); CloseHandle(write_pipe);
+        perr = "SetHandleInformation failed";
+        return -1;
+    }
+    HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               &attrs, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (input == INVALID_HANDLE_VALUE) {
+        CloseHandle(read_pipe); CloseHandle(write_pipe);
+        perr = "Could not open NUL for trainer input";
+        return -1;
+    }
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = input;
+    startup.hStdOutput = write_pipe;
+    startup.hStdError = write_pipe;
+    PROCESS_INFORMATION process{};
+    const std::wstring executable = std::filesystem::u8path(bin).wstring();
+    std::wstring command = quote_arg(executable) + L" --config " +
+                           quote_arg(std::filesystem::u8path(cfg_path).wstring());
+    const BOOL started = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr,
+                                        TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+    const DWORD start_error = started ? 0 : GetLastError();
+    CloseHandle(input);
+    CloseHandle(write_pipe);
+    if (!started) {
+        CloseHandle(read_pipe);
+        perr = "CreateProcess failed (Windows error " + std::to_string(start_error) + ")";
+        return -1;
+    }
+    CloseHandle(process.hThread);
+    out_pipe = read_pipe;
+    process_handle = process.hProcess;
+    return static_cast<std::intptr_t>(process.dwProcessId);
+}
+#else
+std::intptr_t spawn_train(const std::string& bin, const std::string& cfg_path, int& out_fd, std::string& perr) {
     int pipefd[2];
     if (pipe(pipefd) != 0) { perr = "pipe() failed"; return -1; }
     pid_t pid = fork();
@@ -176,21 +263,38 @@ pid_t spawn_train(const std::string& bin, const std::string& cfg_path, int& out_
     out_fd = pipefd[0];
     return pid;
 }
+#endif
 
 // Reader thread: drain the child pipe into the run's log buffer and update
 // latest metrics from metrics.jsonl periodically.
 void reader_loop(TrainRun* run) {
+#ifdef _WIN32
+    HANDLE pipe = static_cast<HANDLE>(run->stdout_pipe);
+    HANDLE process = static_cast<HANDLE>(run->process_handle);
+#else
     const int fd = run->stdout_fd;
+#endif
     char buf[4096];
     while (true) {
+#ifdef _WIN32
+        DWORD available = 0;
+        if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) break;
+        DWORD bytes = 0;
+        const bool read_ok = available > 0 && ReadFile(pipe, buf,
+            static_cast<DWORD>(std::min<size_t>(sizeof(buf), available)), &bytes, nullptr);
+        const int n = read_ok ? static_cast<int>(bytes) : 0;
+#else
         ssize_t n = read(fd, buf, sizeof(buf));
+#endif
         if (n > 0) {
             std::lock_guard<std::mutex> lk(g_mtx);
             run->log.append(buf, (size_t)n);
             if (run->log.size() > (size_t)g_log_tail_max) {
                 run->log.erase(0, run->log.size() - (size_t)g_log_tail_max);
             }
-        } else if (n == 0) {
+        }
+#ifndef _WIN32
+        else if (n == 0) {
             break;  // EOF: child closed its end
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -201,6 +305,7 @@ void reader_loop(TrainRun* run) {
                 break;
             }
         }
+#endif
         // Refresh latest metrics from the file (cheap; last line wins).
         {
             std::lock_guard<std::mutex> lk(g_mtx);
@@ -215,12 +320,23 @@ void reader_loop(TrainRun* run) {
         if (n > 0) continue;  // loop immediately to drain more
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
+#ifdef _WIN32
+    CloseHandle(pipe);
+    WaitForSingleObject(process, INFINITE);
+    DWORD exit_code = 1;
+    GetExitCodeProcess(process, &exit_code);
+    CloseHandle(process);
+#else
     close(fd);
     // Child finished: reap and update status.
     int status = 0;
-    waitpid(run->pid, &status, 0);
+    waitpid(static_cast<pid_t>(run->pid), &status, 0);
+#endif
     std::lock_guard<std::mutex> lk(g_mtx);
     if (run->status == RunStatus::Running) {
+#ifdef _WIN32
+        run->status = exit_code == 0 ? RunStatus::Completed : RunStatus::Failed;
+#else
         if (WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM) {
             run->status = RunStatus::Stopped;
         } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
@@ -228,10 +344,15 @@ void reader_loop(TrainRun* run) {
         } else {
             run->status = RunStatus::Failed;
         }
+#endif
     }
     run->finished_at = now_unix();
     run->stdout_fd = -1;
     run->pid = -1;
+#ifdef _WIN32
+    run->stdout_pipe = nullptr;
+    run->process_handle = nullptr;
+#endif
     g_registry.save(g_index_path);
 }
 
@@ -279,6 +400,12 @@ std::string start_run(yyjson_val* root, TrainRun& out_run) {
     if (lr <= 0) return "learning_rate must be positive";
     if (frames <= 0) return "frames must be positive";
     if (max_steps <= 0) return "max_steps must be positive";
+    const std::string encoding = get_s("encoding", "f16");
+    if (encoding != "f16" && encoding != "f32" && encoding != "q8_0" &&
+        encoding != "q5_k_m" && encoding != "q4_k_m") return "unsupported model tier";
+    const std::string device = get_s("device", "");
+    if (!device.empty() && device != "cpu" && device.rfind("gpu:", 0) != 0)
+        return "unsupported device selection";
 
     // Resolve output_dir.
     std::string out_dir = get_s("out", "");
@@ -304,14 +431,19 @@ std::string start_run(yyjson_val* root, TrainRun& out_run) {
         std::ofstream f(cfg_path, std::ios::trunc);
         if (!f) return "cannot write config: " + cfg_path;
         // Forward a curated set of keys (exact names the trainer accepts).
-        auto w = [&](const char* key, const std::string& val) { f << ",\"" << key << "\":\"" << json_escape(val) << "\""; };
-        auto wi = [&](const char* key, int val) { f << ",\"" << key << "\":" << val; };
-        auto wf = [&](const char* key, double val) { f << ",\"" << key << "\":" << val; };
-        auto wb = [&](const char* key, bool val) { f << ",\"" << key << "\":" << (val ? "true" : "false"); };
+        bool first = true;
+        auto field = [&](const char* key) { if (!first) f << ','; first = false; f << '\"' << key << "\":"; };
+        auto w = [&](const char* key, const std::string& val) { field(key); f << '\"' << json_escape(val) << '\"'; };
+        auto wi = [&](const char* key, int val) { field(key); f << val; };
+        auto wf = [&](const char* key, double val) { field(key); f << val; };
+        auto wb = [&](const char* key, bool val) { field(key); f << (val ? "true" : "false"); };
         f << "{";
         w("dataset", dataset);
         w("model", model);
-        w("encoding", get_s("encoding", "f16"));
+        w("encoding", encoding);
+        w("out", out_dir);
+        if (!g_models_dir.empty()) w("models_dir", g_models_dir);
+        if (!device.empty()) w("device", device);
         w("adapter_type", adapter_type);
         wi("rank", rank);
         wf("alpha", alpha);
@@ -339,9 +471,15 @@ std::string start_run(yyjson_val* root, TrainRun& out_run) {
     }
 
     // Spawn.
-    int out_fd = -1;
     std::string perr;
-    pid_t pid = spawn_train(g_train_bin, cfg_path, out_fd, perr);
+#ifdef _WIN32
+    void* out_pipe = nullptr;
+    void* process_handle = nullptr;
+    std::intptr_t pid = spawn_train(g_train_bin, cfg_path, out_pipe, process_handle, perr);
+#else
+    int out_fd = -1;
+    std::intptr_t pid = spawn_train(g_train_bin, cfg_path, out_fd, perr);
+#endif
     if (pid < 0) return "failed to start sa3-train: " + perr;
 
     TrainRun r;
@@ -355,7 +493,12 @@ std::string start_run(yyjson_val* root, TrainRun& out_run) {
     r.started_at = now_unix();
     r.status = RunStatus::Running;
     r.pid = pid;
+#ifdef _WIN32
+    r.stdout_pipe = out_pipe;
+    r.process_handle = process_handle;
+#else
     r.stdout_fd = out_fd;
+#endif
 
     g_registry.upsert(r);
     g_registry.save(g_index_path);
@@ -428,6 +571,8 @@ int main(int argc, char** argv) {
     g_registry.load(g_index_path);
     std::cerr << "[sa3-train-web] loaded " << g_registry.runs.size() << " historical run(s)\n";
 
+    ggml_backend_load_all();
+
     httplib::Server svr;
 
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
@@ -446,6 +591,31 @@ int main(int argc, char** argv) {
            << ",\"running\":" << (running ? "true" : "false")
            << ",\"models_dir\":\"" << json_escape(g_models_dir) << "\"}";
         send_json(res, ss.str());
+    });
+
+    svr.Get("/api/devices", [](const httplib::Request&, httplib::Response& res) {
+        std::string body = "{\"devices\":[";
+        bool first = true;
+        size_t gpu_index = 0;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            const auto type = ggml_backend_dev_type(dev);
+            if (type != GGML_BACKEND_DEVICE_TYPE_CPU &&
+                type != GGML_BACKEND_DEVICE_TYPE_GPU && type != GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
+            if (!first) body += ",";
+            first = false;
+            size_t free_bytes = 0, total_bytes = 0;
+            ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+            const bool cpu = type == GGML_BACKEND_DEVICE_TYPE_CPU;
+            const std::string id = cpu ? "cpu" : "gpu:" + std::to_string(gpu_index++);
+            body += "{\"id\":\"" + id + "\",\"name\":\"" +
+                    json_escape(ggml_backend_dev_description(dev)) + "\",\"kind\":\"" +
+                    (cpu ? "cpu" : type == GGML_BACKEND_DEVICE_TYPE_IGPU ? "igpu" : "gpu") +
+                    "\",\"free_bytes\":" + std::to_string(free_bytes) +
+                    ",\"total_bytes\":" + std::to_string(total_bytes) + "}";
+        }
+        body += "]}";
+        send_json(res, body);
     });
 
     // List all runs (history + active), newest first.
@@ -569,19 +739,17 @@ int main(int argc, char** argv) {
         if (!r || !req.has_param("file")) { res.status = 400; send_json(res, "{\"error\":\"run_id and file required\"}"); return; }
         std::string name = req.get_param_value("file");
         // prevent path traversal
-        if (name.find("..") != std::string::npos || name.find('/') != std::string::npos) {
+        if (name.find("..") != std::string::npos || name.find('/') != std::string::npos ||
+            name.find('\\') != std::string::npos || name.find(':') != std::string::npos) {
             res.status = 400; send_json(res, "{\"error\":\"invalid file\"}"); return;
         }
         std::filesystem::path p = std::filesystem::path(r->output_dir) / name;
         std::error_code ec;
         if (!std::filesystem::is_regular_file(p, ec)) { res.status = 404; send_json(res, "{\"error\":\"not found\"}"); return; }
-        std::ifstream in(p, std::ios::binary);
-        std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         std::string mime = (p.extension() == ".wav") ? "audio/wav" : "application/octet-stream";
-        res.set_header("Content-Type", mime.c_str());
         res.set_header("Content-Disposition",
                        ("attachment; filename=\"" + name + "\"").c_str());
-        res.set_content(data, mime.c_str());
+        res.set_file_content(p.string(), mime.c_str());
     });
 
     // Stop the active (or ?run_id=) run.
@@ -589,7 +757,15 @@ int main(int argc, char** argv) {
         std::lock_guard<std::mutex> lk(g_mtx);
         TrainRun* r = resolve_run(req);
         if (!r || !r->owned_by_us()) { send_json(res, "{\"error\":\"no active run to stop\"}"); return; }
-        ::kill(r->pid, SIGTERM);
+#ifdef _WIN32
+        if (!TerminateProcess(static_cast<HANDLE>(r->process_handle), 1)) {
+            res.status = 500;
+            send_json(res, "{\"error\":\"could not stop trainer\"}");
+            return;
+        }
+#else
+        ::kill(static_cast<pid_t>(r->pid), SIGTERM);
+#endif
         r->status = RunStatus::Stopped;  // reader thread confirms + finalizes
         g_registry.save(g_index_path);
         send_json(res, "{\"stopped\":true,\"run_id\":\"" + json_escape(r->id) + "\"}");

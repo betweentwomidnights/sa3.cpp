@@ -19,7 +19,7 @@ the inference path (`sa3-server`) untouched.
 
 ```
   browser ──HTTP──►  sa3-train-web  (C++ / cpp-httplib, port 8016)
-                          │  fork + execlp (no shell)
+                          │  spawn subprocess (no shell)
                           ▼
                      sa3-train  --config <out>/run.json
                           │  writes (trainer owns these files)
@@ -34,8 +34,9 @@ the inference path (`sa3-server`) untouched.
 ```
 
 The child process is the single source of truth for training progress. `sa3-train-web`
-never computes gradients or touches ggml — it forwards a config, tails the child's
-stdout/stderr, reads `metrics.jsonl`, and serves the run directory.
+never computes gradients — it forwards a config, tails the child's stdout/stderr,
+reads `metrics.jsonl`, and serves the run directory. It queries ggml for the
+device list shown in the form.
 
 ---
 
@@ -79,20 +80,19 @@ If none is found, the process exits with a clear error before binding the port.
    `src/train_config.h`.
 3. Writes `<output_dir>/run.json` — a curated JSON config whose keys map 1:1 to the
    trainer's `train_set_config_value()` accepted keys.
-4. `fork()`s; the child `dup2()`s a pipe onto stdout **and** stderr, then
-   `execlp(sa3-train, "--config", run.json)`. No shell is involved, so dataset paths with
-   spaces or shell metacharacters are safe.
+4. Starts `sa3-train --config run.json` without a shell: `fork`/`exec` on Unix and
+   `CreateProcessW` on Windows. The pipe captures stdout and stderr; paths with spaces are safe.
 5. Registers a `TrainRun` and detaches a **reader thread** for it.
 
 ### Reader thread (`reader_loop`)
 One detached `std::thread` per run:
 
-- Drains the child pipe (non-blocking read) into an in-memory log buffer, capped at
+- Drains the child pipe into an in-memory log buffer, capped at
   ~1 MiB (`g_log_tail_max`) so a long run cannot exhaust host memory.
 - Periodically re-reads the **last line** of `metrics.jsonl` and parses it into the run's
   `latest` sample (step, lr, loss, grad_norm) for cheap `/status` responses.
-- On child EOF, `waitpid()`s and maps the exit into a terminal status:
-  `Completed` (exit 0), `Stopped` (killed by `SIGTERM`), or `Failed` (anything else),
+- On child EOF, waits for exit and maps it into a terminal status:
+  `Completed` (exit 0), `Stopped` (user requested), or `Failed` (anything else),
   then persists the registry.
 
 ### Concurrency policy
@@ -122,7 +122,7 @@ Run identity is `"<unix_seconds>-<pid>"`, unique per launch.
 
 > **Implementation note:** the reader thread holds a pointer to its `TrainRun` inside the
 > registry's `std::vector`. Because only one run is ever active — and a new run cannot
-> start until the previous one has left the `Running` state — the active element is stable
+> start until the previous child is reaped — the active element is stable
 > in practice. If the concurrency model is ever relaxed to allow parallel runs, switch the
 > registry to a container with pointer stability (e.g. `std::deque` or
 > `std::vector<std::unique_ptr<TrainRun>>`).
@@ -139,6 +139,7 @@ run accept an optional `?run_id=<id>`; without it they target the current **acti
 | `GET`  | `/` | — | embedded `train.html` |
 | `GET`  | `/train.js` | — | embedded `train.js` |
 | `GET`  | `/api/health` | — | `{status, train_bin, running, models_dir}` |
+| `GET`  | `/api/devices` | — | detected CPU/GPU devices and available memory |
 | `POST` | `/api/train/start` | JSON config | `{run_id, output_dir}`; `409` if a run is active; `400` on invalid config |
 | `GET`  | `/api/train/runs` | — | array of run summaries, newest first |
 | `GET`  | `/api/train/runs/<id>` | — | run summary + full `metrics` array + `artifacts` |
@@ -147,7 +148,7 @@ run accept an optional `?run_id=<id>`; without it they target the current **acti
 | `GET`  | `/api/train/metrics` | `?run_id=&limit=N` | array of `metrics.jsonl` objects (last `N`) |
 | `GET`  | `/api/train/artifacts` | `?run_id=` | array of `{name, size, is_wav}` |
 | `GET`  | `/api/train/download` | `?run_id=&file=` | streams the file (`audio/wav` for `.wav`, else octet-stream) |
-| `POST` | `/api/train/stop` | `?run_id=` | `SIGTERM`s the active child → `{stopped, run_id}` |
+| `POST` | `/api/train/stop` | `?run_id=` | stops the active child → `{stopped, run_id}` |
 
 ### Start request body
 Keys map directly to `sa3-train` config keys. `dataset` is required; everything else has
@@ -158,6 +159,7 @@ the same defaults as the CLI's validated recipe.
   "dataset": "/path/to/dataset",
   "model": "medium",                    // medium | small-music | small-sfx
   "encoding": "f16",
+  "device": "gpu:0",                   // optional; auto, gpu:N, or cpu
   "adapter_type": "dora-rows",          // lora|dora-rows|dora-cols|bora (+ -xs variants)
   "rank": 16,
   "alpha": 16,
@@ -205,7 +207,8 @@ Layout:
 - **Sidebar** — the run history list (newest first). Each row shows dataset, model,
   adapter type, a status badge, step progress, and a progress bar. Clicking selects a run.
 - **Config form** — opened by "+ New training"; disabled while a run is active. Submits to
-  `POST /api/train/start`, then auto-selects the new run.
+  `POST /api/train/start`, then auto-selects the new run. It lists detected devices and
+  lets the user choose a downloaded F32, F16, Q8_0, Q5_K_M, or Q4_K_M base tier.
 - **Detail panel** — status/step/loss/lr/grad-norm stat cards, a progress bar, a
   dependency-free `<canvas>` sparkline (loss on a linear axis, learning rate on a log
   axis), a live raw-log pane (incremental via `offset`), and an artifacts list. `.gguf`
@@ -263,8 +266,8 @@ Then open `http://127.0.0.1:8016`. The default port is **8016**, distinct from
   service (and its VRAM/latency profile) is never affected by a long training job, and the
   two evolve independently.
 - **Subprocess over linking.** Spawning `sa3-train` (rather than linking the training
-  library) isolates crashes and OOMs in the child, gives a natural cancel primitive
-  (`SIGTERM`), and reuses the trainer's existing, tested config/checkpoint/resume paths
+  library) isolates crashes and OOMs in the child, gives a cancel primitive, and reuses
+  the trainer's existing, tested config/checkpoint/resume paths
   verbatim.
 - **Files as the contract.** The trainer already writes `metrics.jsonl` and GGUF
   artifacts; the web app reads them. There is no private IPC channel to keep in sync, and
@@ -287,12 +290,14 @@ Then open `http://127.0.0.1:8016`. The default port is **8016**, distinct from
 
 ---
 
-## Verification status (2026-07-20)
+## Verification status
 
-- Builds and links on CPU; `--help` accurate.
+- Builds and links on Windows CPU; both browser views and `/api/devices` respond.
+- Windows subprocess smoke check confirmed the generated config includes the chosen
+  output directory, device, and GGUF tier, and trainer failures appear in run status/log.
 - Live subprocess lifecycle validated with a stand-in trainer: `start` → `running` with
   live `step`/`loss`/`lr`/`grad_norm` from `metrics.jsonl`, incremental log streaming via
-  `offset`, and `stop` → `SIGTERM` → `stopped`.
+  `offset`, and `stop` → `stopped` on Unix.
 - Multi-run history validated by booting with a seeded index: `/api/train/runs`,
   `/api/train/runs/<id>` (metrics + artifacts), and `/api/train/download` (including WAV
   streaming) all return correct data across a restart.

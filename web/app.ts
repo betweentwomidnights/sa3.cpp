@@ -412,27 +412,6 @@ function onDistShiftChange(): void {
   }
 }
 
-// ─── Theme ─────────────────────────────────────────────────────────────────
-
-function toggleTheme(): void {
-  const root = document.documentElement;
-  const current = root.dataset.theme || "dark";
-  const next = current === "dark" ? "light" : "dark";
-  root.dataset.theme = next;
-  localStorage.setItem("sa3-theme", next);
-  const btn = $<HTMLButtonElement>("#theme-btn");
-  btn.textContent = next === "dark" ? "☀️" : "🌙";
-}
-
-function loadTheme(): void {
-  const saved = localStorage.getItem("sa3-theme");
-  if (saved === "light" || saved === "dark") {
-    document.documentElement.dataset.theme = saved;
-    const btn = $<HTMLButtonElement>("#theme-btn");
-    btn.textContent = saved === "dark" ? "☀️" : "🌙";
-  }
-}
-
 // ─── Past Songs ────────────────────────────────────────────────────────────
 
 function pushPastSong(entry: PastSongEntry): void {
@@ -917,7 +896,6 @@ function setupCollapsibles(): void {
 
 document.addEventListener("DOMContentLoaded", () => {
   setupCollapsibles();
-  loadTheme();
   loadPastSongs();
 
   // Sync range sliders with their number companions
@@ -936,7 +914,6 @@ document.addEventListener("DOMContentLoaded", () => {
   $<HTMLButtonElement>("#save-config-btn").addEventListener("click", saveConfig);
   $<HTMLButtonElement>("#load-config-btn").addEventListener("click", loadConfig);
   $<HTMLInputElement>("#load-config-input").addEventListener("change", onConfigFileSelected);
-  $<HTMLButtonElement>("#theme-btn").addEventListener("click", toggleTheme);
   $<HTMLButtonElement>("#init-audio-refresh-btn").addEventListener("click", loadInitAudioList);
   $<HTMLButtonElement>("#init-audio-upload-btn").addEventListener("click", uploadInitAudio);
   $<HTMLSelectElement>("#init-audio-select").addEventListener("change", onInitAudioSelect);

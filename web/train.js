@@ -58,6 +58,28 @@ async function refreshHealth() {
   el.title = h.train_bin || "";
 }
 
+async function refreshDevices() {
+  const result = await apiGet("/api/devices");
+  const select = $("f-device");
+  const note = $("device-note");
+  if (!result || !Array.isArray(result.devices)) {
+    note.textContent = "Device detection unavailable. Auto will use the runtime default.";
+    return;
+  }
+  for (const device of result.devices) {
+    if (device.kind === "cpu") continue;
+    const option = document.createElement("option");
+    option.value = device.id;
+    const gib = device.total_bytes ? ` · ${(device.total_bytes / 1073741824).toFixed(1)} GiB` : "";
+    option.textContent = `${device.name}${gib}`;
+    select.appendChild(option);
+  }
+  const gpus = result.devices.filter((d) => d.kind !== "cpu");
+  note.textContent = gpus.length ?
+    `${gpus.length} GPU device${gpus.length === 1 ? "" : "s"} detected. Select a downloaded GGUF tier for the chosen model.` :
+    "CPU only. Select a downloaded GGUF tier for the chosen model.";
+}
+
 // ---- run list (sidebar) ----------------------------------------------------
 function badgeClass(status) {
   return "badge b-" + (status || "queued");
@@ -239,6 +261,8 @@ async function startTraining() {
   const cfg = {
     dataset: $("f-dataset").value.trim(),
     model: $("f-model").value,
+    device: $("f-device").value,
+    encoding: $("f-encoding").value,
     adapter_type: $("f-adapter").value,
     rank: parseInt($("f-rank").value, 10) || 16,
     alpha: parseFloat($("f-alpha").value) || 16,
@@ -290,6 +314,7 @@ $("stop-btn").onclick = stopTraining;
 // initial load
 (async () => {
   await refreshHealth();
+  await refreshDevices();
   await refreshRuns();
   setInterval(refreshHealth, 10000);
 })();

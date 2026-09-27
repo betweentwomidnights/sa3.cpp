@@ -3,21 +3,23 @@
 // AUTO-GENERATED from web/index.html and web/app.js. Do not edit by hand.
 // Rebuild with: python3 tools/gen_embedded_web.py
 
+#include <string>
+
 namespace embedded_web {
 
-inline const char* index_html = R"sa3web(
-<!DOCTYPE html>
+inline const std::string index_html =
+    std::string(R"sa3web(<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SA3.cpp - PP rework – Web Interface</title>
+<title>sa3.cpp studio — inference</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --bg: #0d1117; --surface: #161b22; --border: #30363d;
-    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
-    --green: #3fb950; --red: #f85149; --orange: #d29922;
+    --bg: #090909; --surface: #171313; --border: #493030;
+    --text: #f4eded; --muted: #b6a5a5; --accent: #e23b42;
+    --green: #6cc58b; --red: #ed6268; --orange: #d9a36c;
     --radius: 6px; --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
   }
   body {
@@ -38,7 +40,7 @@ inline const char* index_html = R"sa3web(
   .col { flex: 1; min-width: 120px; }
   label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 3px; font-weight: 500; }
   input, select, textarea {
-    font-family: inherit; font-size: 0.88rem; background: #010409; color: var(--text);
+    font-family: inherit; font-size: 0.88rem; background: #100d0d; color: var(--text);
     border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px;
     width: 100%; outline: none; transition: border .15s;
   }
@@ -48,15 +50,15 @@ inline const char* index_html = R"sa3web(
   select { cursor: pointer; }
   button {
     font-family: inherit; font-size: 0.85rem; cursor: pointer; border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 7px 16px; background: #21262d; color: var(--text);
+    border-radius: var(--radius); padding: 7px 16px; background: #251a1a; color: var(--text);
     transition: background .15s, border-color .15s; white-space: nowrap;
   }
-  button:hover { background: #30363d; }
-  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; }
-  button.primary:hover { background: #388bfd; }
+  button:hover { background: #392222; }
+  button.primary { background: #b6222b; border-color: #d3323b; color: #fff; font-weight: 600; }
+  button.primary:hover { background: #d3323b; }
   button.primary:disabled { opacity: .5; cursor: not-allowed; }
-  button.loop { background: #6e40c9; border-color: #6e40c9; color: #fff; font-weight: 600; }
-  button.loop:hover { background: #7c4dff; }
+  button.loop { background: #8e2027; border-color: #b42c34; color: #fff; font-weight: 600; }
+  button.loop:hover { background: #b42c34; }
   button.loop:disabled { opacity: .5; cursor: not-allowed; }
   button.small { padding: 2px 8px; font-size: 0.78rem; }
   button.danger { border-color: var(--red); color: var(--red); }
@@ -74,7 +76,8 @@ inline const char* index_html = R"sa3web(
   .collapse-body { overflow: hidden; transition: max-height .2s; max-height: 2000px; }
   .collapse-body.collapsed { max-height: 0; }
   .param-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
-  .range-row { display: flex; align-items: center; gap: 8px; }
+  .range-row { display: flex; )sa3web") +
+    std::string(R"sa3web(align-items: center; gap: 8px; }
   .range-row input[type=range] { flex: 1; accent-color: var(--accent); background: transparent; border: none; padding: 0; }
   .range-row input[type=number] { width: 70px; }
   #progress-wrap { margin-top: 10px; }
@@ -83,8 +86,8 @@ inline const char* index_html = R"sa3web(
   #result-section { margin-top: 12px; }
   #result-section audio { width: 100%; }
   #seed-info { font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
-  .lora-tag { display: inline-flex; align-items: center; gap: 4px; background: #1c2333;
-    border: 1px solid #2d3748; border-radius: 4px; padding: 3px 8px; font-size: 0.82rem; margin: 2px; }
+  .lora-tag { display: inline-flex; align-items: center; gap: 4px; background: #2b181a;
+    border: 1px solid #593338; border-radius: 4px; padding: 3px 8px; font-size: 0.82rem; margin: 2px; }
   .lora-tag .lora-str { color: var(--muted); }
   .lora-tag button { padding: 0 4px; font-size: 1rem; line-height: 1; background: none; border: none; color: var(--muted); }
   .lora-tag button:hover { color: var(--red); }
@@ -100,19 +103,12 @@ inline const char* index_html = R"sa3web(
   .song-entry .song-actions { display:flex; gap:3px; flex:0 0 auto; }
   #past-songs { max-height:none; }
   #past-songs:empty::after { content:"No past songs yet"; display:block; font-size:0.82rem; color:var(--muted); padding:12px 0; }
-  [data-theme="light"] {
-    --bg: #eef0f2; --surface: #ffffff; --border: #d0d7de;
-    --text: #1f2328; --muted: #656d76; --accent: #0969da;
-    --green: #1a7f37; --red: #cf222e; --orange: #bf8700;
-  }
-  [data-theme="light"] input, [data-theme="light"] select, [data-theme="light"] textarea { background: #ffffff; }
-  [data-theme="light"] button { background: #f6f8fa; }
-  [data-theme="light"] button:hover { background: #eaeef2; }
-  [data-theme="light"] button.primary { background: #0969da; border-color: #0969da; }
-  [data-theme="light"] button.loop { background: #8250df; border-color: #8250df; }
-  [data-theme="light"] button.loop:hover { background: #9855ff; }
-  [data-theme="light"] .lora-tag { background: #eef1f6; border-color: #d0d7de; }
-  [data-theme="light"] .lora-tag .lora-str { color: #656d76; }
+  .studio-nav { display:flex; gap:8px; margin: 12px 0 18px; }
+  .studio-nav a { color:var(--muted); text-decoration:none; padding:7px 14px; border:1px solid var(--border); border-radius:var(--radius); }
+  .studio-nav a[aria-current="page"] { color:var(--text); border-color:var(--accent); background:#38171b; }
+  .studio-nav a:hover { color:var(--text); border-color:var(--accent); }
+  .studio-credit { margin-top:24px; color:var(--muted); font-size:.78rem; }
+  .studio-credit a { color:var(--accent); }
   @media (max-width: 600px) {
     .row { flex-direction: column; }
     .col { min-width: 100%; }
@@ -122,7 +118,8 @@ inline const char* index_html = R"sa3web(
 </head>
 <body>
 
-<h1><a href="https://github.com/betweentwomidnights/sa3.cpp" target="_blank" style="color:var(--accent);text-decoration:none">SA3.CPP</a> <small>SA3.cpp Web Interface</small></h1>
+<h1><a href="https://github.com/betweentwomidnights/sa3.cpp" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">SA3.CPP</a> <small>studio</small></h1>
+<nav class="studio-nav" aria-label="Studio views"><a href="/" aria-current="page">Inference</a><a id="training-link" href="http://127.0.0.1:8016/">LoRA training</a></nav>
 
 <!-- ─── Server Status & Presets ──────────────────────────────────────── -->
 <div id="top-bar" class="card" style="padding:8px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
@@ -132,10 +129,10 @@ inline const char* index_html = R"sa3web(
     <label class="inline-label" style="font-size:0.82rem"><input id="keep-models" type="checkbox"> Keep Models Resident</label>
   </div>
   <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-    <button id="theme-btn" class="small" title="Toggle dark/light theme" style="font-size:1.1rem;line-height:1;padding:4px 10px">☀️</button>
     <button id="save-config-btn" class="small" title="Save current config">💾 Save</button>
     <button id="load-config-btn" class="small" title="Load config file">📂 Load</button>
-    <span id="config-filename" style="font-size:0.78rem;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+    <span id="config-filename" style="font-size:0.78rem;colo)sa3web") +
+    std::string(R"sa3web(r:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
     <input id="load-config-input" type="file" accept=".json" style="display:none">
   </div>
 </div>
@@ -218,7 +215,8 @@ inline const char* index_html = R"sa3web(
         </select>
       </div>
       <div class="col"><label for="dsp1">p1</label><input id="dsp1" type="number" step="any"></div>
-      <div class="col"><label for="dsp2">p2</label><input id="dsp2" type="number" step="any"></div>
+      <div class)sa3web") +
+    std::string(R"sa3web(="col"><label for="dsp2">p2</label><input id="dsp2" type="number" step="any"></div>
       <div class="col"><label for="dsp3">p3</label><input id="dsp3" type="number" step="any"></div>
       <div class="col"><label for="dsp4">p4</label><input id="dsp4" type="number" step="any"></div>
     </div>
@@ -275,7 +273,8 @@ inline const char* index_html = R"sa3web(
           <label for="init-audio-upload">Upload WAV</label>
           <div class="row" style="gap:6px">
             <input id="init-audio-upload" type="file" accept=".wav,.WAV" style="flex:1;padding:4px 0">
-            <button id="init-audio-upload-btn" class="small">Upload</button>
+            <button id="init-audio-upload-btn" class="small">Upload</but)sa3web") +
+    std::string(R"sa3web(ton>
           </div>
         </div>
       </div>
@@ -347,14 +346,15 @@ inline const char* index_html = R"sa3web(
 </h2>
 <div id="past-songs" class="card"></div>
 
+<p class="studio-credit">Inference and training web interfaces by <a href="https://github.com/pillopaus-project/sa3.cpp" target="_blank" rel="noopener">pillopaus-project</a>; integrated into sa3.cpp.</p>
+<script>document.getElementById('training-link').href = location.protocol + '//' + location.hostname + ':8016/';</script>
 <script src="app.js"></script>
 </body>
 </html>
+)sa3web");
 
-)sa3web";
-
-inline const char* app_js = R"sa3web(
-"use strict";
+inline const std::string app_js =
+    std::string(R"sa3web("use strict";
 // ─── Types matching the sa3-server HTTP API ────────────────────────────────
 let currentConfigFilename = "";
 const CONFIG_EXT = ".json";
@@ -463,7 +463,8 @@ function readForm() {
         duration_padding_sec: num("#duration-padding"),
         keep_models: isChecked("#keep-models"),
         loras: activeLoras,
-        encode_chunk_size: int("#encode-chunk-size"),
+        encode_chunk_size: int("#enco)sa3web") +
+    std::string(R"sa3web(de-chunk-size"),
         encode_overlap: int("#encode-overlap"),
         decode_chunk_size: int("#decode-chunk-size"),
         decode_overlap: int("#decode-overlap"),
@@ -566,7 +567,8 @@ function renderActiveLoras() {
         const tag = document.createElement("span");
         tag.className = "lora-tag";
         tag.innerHTML = `${escapeHtml(l.name)} <span class="lora-str">(${l.strength.toFixed(2)})</span> <button class="small" data-name="${escapeHtml(l.name)}" title="Remove">&times;</button>`;
-        tag.querySelector("button").addEventListener("click", () => removeLora(l.name));
+        tag.querySelector("button").addEventList)sa3web") +
+    std::string(R"sa3web(ener("click", () => removeLora(l.name));
         container.appendChild(tag);
     }
 }
@@ -638,24 +640,6 @@ function onDistShiftChange() {
         input.disabled = type === "None";
     }
 }
-// ─── Theme ─────────────────────────────────────────────────────────────────
-function toggleTheme() {
-    const root = document.documentElement;
-    const current = root.dataset.theme || "dark";
-    const next = current === "dark" ? "light" : "dark";
-    root.dataset.theme = next;
-    localStorage.setItem("sa3-theme", next);
-    const btn = $("#theme-btn");
-    btn.textContent = next === "dark" ? "☀️" : "🌙";
-}
-function loadTheme() {
-    const saved = localStorage.getItem("sa3-theme");
-    if (saved === "light" || saved === "dark") {
-        document.documentElement.dataset.theme = saved;
-        const btn = $("#theme-btn");
-        btn.textContent = saved === "dark" ? "☀️" : "🌙";
-    }
-}
 // ─── Past Songs ────────────────────────────────────────────────────────────
 function pushPastSong(entry) {
     pastSongs.push(entry);
@@ -690,7 +674,8 @@ function renderPastSongs() {
             renderPastSongs();
         });
     }
-    for (const btn of container.querySelectorAll(".download-song-btn")) {
+    for (const btn of container.querySelectorAll(".d)sa3web") +
+    std::string(R"sa3web(ownload-song-btn")) {
         btn.addEventListener("click", () => {
             const idx = parseInt(btn.dataset.index || "0", 10);
             const s = pastSongs[idx];
@@ -797,7 +782,8 @@ function loadPastSongs() {
             pastSongs = JSON.parse(saved);
             renderPastSongs();
         }
-    }
+    )sa3web") +
+    std::string(R"sa3web(}
     catch {
         // ignore corrupt data
     }
@@ -906,7 +892,8 @@ function startPolling(sessionId) {
                 }
                 clearPolling();
                 enableButtons();
-            }
+            )sa3web") +
+    std::string(R"sa3web(}
             else if (r.status === "failed") {
                 progressLabel.textContent = `failed: ${r.error || "unknown error"}`;
                 clearPolling();
@@ -1012,7 +999,8 @@ function applyConfig(cfg) {
     setVal("#keep-models", cfg.keep_models);
     setVal("#encode-chunk-size", cfg.encode_chunk_size);
     setVal("#encode-overlap", cfg.encode_overlap);
-    setVal("#decode-chunk-size", cfg.decode_chunk_size);
+    setVal("#decode-chunk-size", )sa3web") +
+    std::string(R"sa3web(cfg.decode_chunk_size);
     setVal("#decode-overlap", cfg.decode_overlap);
     setVal("#latent-rescale", cfg.latent_rescale);
     setVal("#latent-shift", cfg.latent_shift);
@@ -1101,7 +1089,6 @@ function setupCollapsibles() {
 // ─── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
     setupCollapsibles();
-    loadTheme();
     loadPastSongs();
     // Sync range sliders with their number companions
     syncSliderToNum("#duration", "#duration-num");
@@ -1115,9 +1102,9 @@ document.addEventListener("DOMContentLoaded", () => {
     $("#lora-add-btn").addEventListener("click", addLora);
     $("#dist-shift").addEventListener("change", onDistShiftChange);
     $("#save-config-btn").addEventListener("click", saveConfig);
-    $("#load-config-btn").addEventListener("click", loadConfig);
+    $("#load-con)sa3web") +
+    std::string(R"sa3web(fig-btn").addEventListener("click", loadConfig);
     $("#load-config-input").addEventListener("change", onConfigFileSelected);
-    $("#theme-btn").addEventListener("click", toggleTheme);
     $("#init-audio-refresh-btn").addEventListener("click", loadInitAudioList);
     $("#init-audio-upload-btn").addEventListener("click", uploadInitAudio);
     $("#init-audio-select").addEventListener("change", onInitAudioSelect);
@@ -1139,7 +1126,6 @@ document.addEventListener("DOMContentLoaded", () => {
     // Auto-connect to server on page load
     checkHealth();
 });
-
-)sa3web";
+)sa3web");
 
 } // namespace embedded_web
