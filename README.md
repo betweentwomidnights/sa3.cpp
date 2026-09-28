@@ -13,8 +13,8 @@ These applications run sa3.cpp outside this repository:
 
 sa3.cpp runs Stable Audio 3 and the Stable Audio Tools family locally with ggml.
 It provides generation and LoRA training CLIs, an embeddable C ABI, and a local
-browser studio for Stable Audio 3 inference and training. The released applications above show
-these runtimes in DAWs and on device. See [embedding](docs/EMBEDDING.md),
+browser studio for Stable Audio 3 inference and training. The applications above show
+these runtimes in DAWs and on device; the iOS project remains source-only. See [embedding](docs/EMBEDDING.md),
 [training](docs/TRAINING.md), and [runtime packaging](docs/RUNTIME_RELEASE.md).
 
 The browser inference and training interfaces originated with
