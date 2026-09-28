@@ -213,7 +213,7 @@ Layout:
   adapter type, a status badge, step progress, and a progress bar. Clicking selects a run.
 - **Config form** — opened by "+ New training"; disabled while a run is active. Submits to
   `POST /api/train/start`, then auto-selects the new run. It lists detected devices and
-  lets the user choose a downloaded F32, F16, Q8_0, Q5_K_M, or Q4_K_M base tier.
+  lets the user choose a downloaded F32, F16, or Q4_K_M base tier.
 - **Detail panel** — status/step/loss/lr/grad-norm stat cards, a progress bar, a
   dependency-free `<canvas>` sparkline (loss on a linear axis, learning rate on a log
   axis), a live raw-log pane (incremental via `offset`), and an artifacts list. `.gguf`

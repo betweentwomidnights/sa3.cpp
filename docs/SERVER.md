@@ -21,7 +21,7 @@ CTest runs that check when Python is available.
 
 ```bash
 ./build/bin/Release/sa3-server.exe --model medium --encoding f16 --port 8006
-# args: --host (default 127.0.0.1) --port (8006) --model <variant> --encoding f16|f32
+# args: --host (default 127.0.0.1) --port (8006) --model <variant> --encoding f16|f32|q8_0|q5_k_m|q4_k_m
 #       --t5-encoding f16|f32|q8_0 — text-encoder precision, resolved apart from --encoding;
 #         default auto (prefers F16). a quantized DiT with an F16 encoder is the combination
 #         worth having on a small box. see docs/DISTRIBUTION.md

@@ -72,6 +72,12 @@ inline const std::string index_html =
     audio { width:100%; margin-top:6px; }
     .hidden { display:none; }
     .err { color:var(--bad); font-size:13px; margin-top:8px; }
+    @media (max-width:700px) {
+      .layout { display:block; height:auto; min-height:calc(100vh - 49px); }
+      .sidebar { width:100%; max-height:180px; border-right:0; border-bottom:1px solid var(--border); }
+      .main { width:100%; min-width:0; overflow:visible; padding:14px; }
+      .grid { grid-template-columns:minmax(0,1fr); }
+    }
   </style>
 </head>
 <body>
@@ -106,12 +112,12 @@ inline const std::string index_html =
           <div><label>Checkpoint every</label><input id="f-ckpt" type="number" value="500" /></div>
           <div><label>Seed</label><input id="f-seed" type="number" value="42" /></div>
           <div><label>CFG dropout</label><input id="f-cfgdo" type="number" step="0.05" value="0.1" /></div>
-          <div><label>Grad clip</label><input id="f-gradclip" type="number" step="0.1" value="1.0" /></div>
+          <div><label>Grad clip</label><input id="f-gradclip" type="number")sa3trainweb") +
+    std::string(R"sa3trainweb( step="0.1" value="1.0" /></div>
           <div><label>Output dir (optional)</label><input id="f-out" placeholder="train-runs/… (auto)" /></div>
         </div>
         <p id="device-note" style="color:var(--muted);font-size:12px;margin:8px 0 0;">Detecting devices… Select a tier that is already downloaded for this model.</p>
-        <div class)sa3trainweb") +
-    std::string(R"sa3trainweb(="row" style="margin-top:12px;">
+        <div class="row" style="margin-top:12px;">
           <label style="display:flex;align-items:center;gap:6px;color:var(--fg);"><input id="f-inpaint" type="checkbox" checked style="width:auto;" /> Inpainting loss</label>
         </div>
         <div class="actions">

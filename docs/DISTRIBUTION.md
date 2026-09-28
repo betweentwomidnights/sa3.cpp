@@ -37,7 +37,7 @@ BaseName + SizeLabel + Version. our application:
   the SAME autoencoder and the tokenizer are convention-exempt (no natural param class — same
   call acestep.cpp makes for its VAE).
 - **Version** — `v1.0` (bump on any weight/conversion change).
-- **Encoding** — `F32`, `F16` now; `Q8_0` / `Q6_K` / `Q5_K_M` / `Q4_K_M` later.
+- **Encoding** — `F32`, `F16`, `Q8_0`, `Q5_K_M`, and `Q4_K_M` are published for DiT and SAME.
 - **Type** — `vocab` for the tokenizer, `LoRA` for adapters; omitted for normal tensor models.
 
 ### filenames
