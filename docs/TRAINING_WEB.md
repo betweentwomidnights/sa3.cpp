@@ -144,7 +144,7 @@ run accept an optional `?run_id=<id>`; without it they target the current **acti
 | `GET`  | `/` | — | embedded `train.html` |
 | `GET`  | `/train.js` | — | embedded `train.js` |
 | `GET`  | `/api/health` | — | `{status, train_bin, running, models_dir}` |
-| `GET`  | `/api/devices` | — | detected CPU/GPU devices and available memory |
+| `GET`  | `/api/devices` | — | detected CPU/GPU devices, ggml backend names, and available memory |
 | `POST` | `/api/train/start` | JSON config | `{run_id, output_dir}`; `409` if a run is active; `400` on invalid config |
 | `GET`  | `/api/train/runs` | — | array of run summaries, newest first |
 | `GET`  | `/api/train/runs/<id>` | — | run summary + full `metrics` array + `artifacts` |

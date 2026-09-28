@@ -71,12 +71,12 @@ async function refreshDevices() {
     const option = document.createElement("option");
     option.value = device.id;
     const gib = device.total_bytes ? ` · ${(device.total_bytes / 1073741824).toFixed(1)} GiB` : "";
-    option.textContent = `${device.name}${gib}`;
+    option.textContent = `${device.backend || device.id} · ${device.name}${gib}`;
     select.appendChild(option);
   }
   const gpus = result.devices.filter((d) => d.kind !== "cpu");
   note.textContent = gpus.length ?
-    `${gpus.length} GPU device${gpus.length === 1 ? "" : "s"} detected. Select a downloaded GGUF tier for the chosen model.` :
+    `${gpus.length} GPU backend${gpus.length === 1 ? "" : "s"} available. Select a downloaded GGUF tier for the chosen model.` :
     "CPU only. Select a downloaded GGUF tier for the chosen model.";
 }
 

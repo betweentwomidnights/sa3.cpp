@@ -232,12 +232,12 @@ async function refreshDevices() {
     const option = document.createElement("option");
     option.value = device.id;
     const gib = device.total_bytes ? ` · ${(device.total_bytes / 1073741824).toFixed(1)} GiB` : "";
-    option.textContent = `${device.name}${gib}`;
+    option.textContent = `${device.backend || device.id} · ${device.name}${gib}`;
     select.appendChild(option);
   }
   const gpus = result.devices.filter((d) => d.kind !== "cpu");
   note.textContent = gpus.length ?
-    `${gpus.length} GPU device${gpus.length === 1 ? "" : "s"} detected. Select a downloaded GGUF tier for the chosen model.` :
+    `${gpus.length} GPU backend${gpus.length === 1 ? "" : "s"} available. Select a downloaded GGUF tier for the chosen model.` :
     "CPU only. Select a downloaded GGUF tier for the chosen model.";
 }
 
@@ -268,10 +268,10 @@ function renderRunList() {
 }
 
 async function refreshRuns() {
-  const runs = await apiGet("/api/train/runs");
+  const runs = await apiGet("/api/t)sa3trainweb") +
+    std::string(R"sa3trainweb(rain/runs");
   if (runs) {
-    stat)sa3trainweb") +
-    std::string(R"sa3trainweb(e.runs = runs;
+    state.runs = runs;
     renderRunList();
     // keep "New training" disabled while a run is active
     const active = runs.find((r) => r.status === "running");
@@ -378,9 +378,9 @@ function drawSpark() {
   const lrLo = lrs.length ? Math.min(...lrs) : 0, lrHi = lrs.length ? Math.max(...lrs) : 1;
   const n = data.length;
   const x = (i) => (n === 1 ? w / 2 : (i / (n - 1)) * w);
-  const yLoss = (v) => h - 6 - ((hi === lo ? 0.5 : (v - lo) / (hi - lo)) * (h - 12));
-  con)sa3trainweb") +
-    std::string(R"sa3trainweb(st yLr = (v) => h - 6 - ((lrHi === lrLo ? 0.5 : (Math.log(v) - Math.log(lrLo)) / (Math.log(lrHi) - Math.log(lrLo))) * (h - 12));
+  const yLoss = (v) => h - 6 - ((hi === lo ? 0.5 : (v - )sa3trainweb") +
+    std::string(R"sa3trainweb(lo) / (hi - lo)) * (h - 12));
+  const yLr = (v) => h - 6 - ((lrHi === lrLo ? 0.5 : (Math.log(v) - Math.log(lrLo)) / (Math.log(lrHi) - Math.log(lrLo))) * (h - 12));
 
   // loss line
   ctx.strokeStyle = "#6ea8fe"; ctx.lineWidth = 2; ctx.beginPath();

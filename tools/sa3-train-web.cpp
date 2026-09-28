@@ -609,7 +609,8 @@ int main(int argc, char** argv) {
             const bool cpu = type == GGML_BACKEND_DEVICE_TYPE_CPU;
             const std::string id = cpu ? "cpu" : "gpu:" + std::to_string(gpu_index++);
             body += "{\"id\":\"" + id + "\",\"name\":\"" +
-                    json_escape(ggml_backend_dev_description(dev)) + "\",\"kind\":\"" +
+                    json_escape(ggml_backend_dev_description(dev)) + "\",\"backend\":\"" +
+                    json_escape(ggml_backend_dev_name(dev)) + "\",\"kind\":\"" +
                     (cpu ? "cpu" : type == GGML_BACKEND_DEVICE_TYPE_IGPU ? "igpu" : "gpu") +
                     "\",\"free_bytes\":" + std::to_string(free_bytes) +
                     ",\"total_bytes\":" + std::to_string(total_bytes) + "}";
