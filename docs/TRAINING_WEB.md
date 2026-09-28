@@ -51,6 +51,11 @@ device list shown in the form.
 | `tools/gen_embedded_train_web.py` | Generates `src/embedded_train_web.h` from the two web assets |
 | `src/embedded_train_web.h` | **AUTO-GENERATED** embedded copies of `train.html` + `train.js` |
 
+After editing `web/train.html` or `web/train.js`, run
+`python tools/gen_embedded_train_web.py` to refresh the embedded header. Pass
+`--check` to compare without writing; CTest runs this check when Python is
+available.
+
 The server, `httplib`, and `yyjson` are the same vendored libraries used by `sa3-server`
 (`vendor/cpp-httplib`, `vendor/yyjson`), so there is no new third-party dependency and no
 Node/npm toolchain.

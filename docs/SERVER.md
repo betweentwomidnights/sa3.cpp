@@ -11,6 +11,12 @@ Open `http://127.0.0.1:8006/` for the embedded inference page. To use the linked
 LoRA training page, also start `sa3-train-web` and open `http://127.0.0.1:8016/`.
 The interfaces originated with [pillopaus-project](https://github.com/pillopaus-project/sa3.cpp).
 
+The inference page is served from `web/index.html` and `web/app.js`; those files
+are embedded into `src/embedded_web.h` for release builds. After editing the
+web assets, run `python tools/gen_embedded_web.py` to refresh the header.
+`python tools/gen_embedded_web.py --check` verifies it without writing, and
+CTest runs that check when Python is available.
+
 ## Run
 
 ```bash

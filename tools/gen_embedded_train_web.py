@@ -1,8 +1,9 @@
 import os
 import sys
 
-web_dir = "./web"
-header_path = "./src/embedded_train_web.h"
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+web_dir = os.path.join(root_dir, "web")
+header_path = os.path.join(root_dir, "src", "embedded_train_web.h")
 
 def read_file(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -39,6 +40,17 @@ inline const std::string train_js =
 }} // namespace embedded_train_web
 """
 
-with open(header_path, "w", encoding="utf-8", newline="\n") as f:
-    f.write(header)
-print(f"Wrote {header_path}")
+if "--check" in sys.argv[1:]:
+    try:
+        with open(header_path, "r", encoding="utf-8") as f:
+            current = f.read()
+    except FileNotFoundError:
+        current = None
+    if current != header:
+        print(f"{header_path} is stale; run python tools/gen_embedded_train_web.py", file=sys.stderr)
+        sys.exit(1)
+    print(f"Up to date: {header_path}")
+else:
+    with open(header_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(header)
+    print(f"Wrote {header_path}")
