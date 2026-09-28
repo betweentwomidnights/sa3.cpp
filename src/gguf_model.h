@@ -364,9 +364,29 @@ inline GgufModel load_gguf(const char* path, ggml_backend_t backend = nullptr) {
 // instant no-ops reading back whatever was already in the buffers -- pre-encode that races through
 // producing all-zero latents, then steps at a fraction of a second reporting loss 0 and gnorm 0.
 // Nothing about that looks like an error, so check the status and say so.
+//
+// Checking the status alone is one graph late on Metal. ggml_backend_graph_compute is
+// compute_async + synchronize, and Metal's async half returns SUCCESS as soon as the command
+// buffers are queued; the failure is only seen by synchronize, which returns void and just latches
+// has_error. So the graph that actually failed reports success, and the NEXT compute is the first
+// to return FAILED -- which never comes when the failing graph is the last one (the final decode
+// chunk). An empty graph costs nothing and returns FAILED immediately on a latched backend, so it
+// asks "did the graph that just finished fail?" without patching ggml.
+inline ggml_status metal_latched_status(ggml_backend_t backend) {
+    const char* name = ggml_backend_name(backend);
+    if (!name || std::strncmp(name, "MTL", 3) != 0) return GGML_STATUS_SUCCESS;
+    ggml_init_params ip = { ggml_graph_overhead(), nullptr, /*no_alloc=*/true };
+    ggml_context* ctx = ggml_init(ip);
+    if (!ctx) return GGML_STATUS_ALLOC_FAILED;
+    const ggml_status st = ggml_backend_graph_compute(backend, ggml_new_graph(ctx));
+    ggml_free(ctx);
+    return st;
+}
+
 inline bool graph_compute_checked(ggml_backend_t backend, ggml_cgraph* graph,
                                   const char* what, std::string& err) {
-    const ggml_status st = ggml_backend_graph_compute(backend, graph);
+    ggml_status st = ggml_backend_graph_compute(backend, graph);
+    if (st == GGML_STATUS_SUCCESS) st = metal_latched_status(backend);
     if (st == GGML_STATUS_SUCCESS) return true;
     const char* name = ggml_backend_name(backend);
     err = std::string(what) + ": backend '" + (name ? name : "(unknown)") + "' returned " +

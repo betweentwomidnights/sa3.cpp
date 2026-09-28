@@ -857,6 +857,19 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         release_all_for_frugal_cancel();
         throw std::runtime_error("generation cancelled");
     };
+    // A backend that fails one graph latches the failure and turns every later compute into a
+    // no-op that leaves its outputs untouched (see graph_compute_checked). Unchecked, a Metal
+    // command buffer lost mid-decode on a 4 GB iPhone came back as a "successful" take of static:
+    // each remaining chunk decoded whatever the output buffer already held. So every compute here
+    // is checked; the first failure is recorded, its graph freed like a cancel would, and thrown.
+    std::string backend_error;
+    auto compute_checked = [&](ggml_backend_t backend, ggml_cgraph* graph, const char* what) {
+        return graph_compute_checked(backend, graph, what, backend_error);
+    };
+    auto throw_backend_failure = [&]() {
+        release_all_for_frugal_cancel();
+        throw std::runtime_error(backend_error);
+    };
     if (encode_chunk_size < 0 || encode_overlap < 0 ||
         (encode_chunk_size > 0 && encode_overlap >= encode_chunk_size))
         throw std::runtime_error("invalid encode_chunk_size/encode_overlap");
@@ -1015,8 +1028,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         ggml_backend_tensor_set(mask_t, mb.data(), 0, mb.size()*sizeof(float));
         profile_log(prof, "t5_upload", wall_time_s() - tp);
         tp = wall_time_s();
-        ggml_backend_graph_compute(TE.backend, gf);
+        const bool t5_ok = compute_checked(TE.backend, gf, "T5 encode");
         profile_log(prof, "t5_compute", wall_time_s() - tp);
+        if (!t5_ok) { ggml_gallocr_free(alloc); ggml_free(ctx); throw_backend_failure(); }
         tp = wall_time_s();
         ggml_backend_tensor_get(h, hidden.data(), 0, hidden.size()*sizeof(float));
         profile_log(prof, "t5_download", wall_time_s() - tp);
@@ -1154,9 +1168,10 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             set_positions(eg.pos, eg.Nenc);
             set_swa_bias(eg.mask, sc, eg.Nenc);
             if (sc.chunk) set_positions(eg.pos2, eg.N2);
-            ggml_backend_graph_compute(AE.backend, eg.graph);
+            if (!compute_checked(AE.backend, eg.graph, "SAME encode")) return false;
             out.resize((size_t)sc.latent * eg.T);
             ggml_backend_tensor_get(eg.z, out.data(), 0, out.size()*sizeof(float));
+            return true;
         };
 
         const bool can_chunk_encode = encode_chunk_size > 0 && !sc.chunk && T >= encode_chunk_size;
@@ -1167,8 +1182,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         if (!can_chunk_encode) {
             throw_if_cancelled(params.should_cancel);
             EncodeGraph eg = build_encode_graph(T);
-            run_encode_graph(eg, init_audio.data(), z_init);
+            const bool encoded = run_encode_graph(eg, init_audio.data(), z_init);
             free_encode_graph(eg);
+            if (!encoded) throw_backend_failure();
             throw_if_cancelled(params.should_cancel);
             if (params.on_progress) params.on_progress({"encoding", 1, 1, 0.1f});
         } else {
@@ -1190,7 +1206,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                     memcpy(&audio_chunk[(size_t)c*eg.n_samp],
                            &init_audio[(size_t)c*init_L + sample_st],
                            (size_t)eg.n_samp*sizeof(float));
-                run_encode_graph(eg, audio_chunk.data(), zchunk);
+                if (!run_encode_graph(eg, audio_chunk.data(), zchunk)) break;
 
                 const int target_start = tl.out + tl.left;
                 const int copy_count = tl.right - tl.left;
@@ -1204,6 +1220,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                 if (params.should_cancel && params.should_cancel()) { cancelled = true; break; }
             }
             free_encode_graph(eg);
+            if (!backend_error.empty())
+                throw_backend_failure();
             if (cancelled)
                 throw_cancelled_after_frugal_cleanup();
         }
@@ -1347,7 +1365,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         ggml_backend_tensor_set(tfeat, tf.data(), 0, tf.size()*sizeof(float));
         dit_upload += wall_time_s() - ts;
         ts = wall_time_s();
-        ggml_backend_graph_compute(DIT.backend, gf_dit);
+        if (!compute_checked(DIT.backend, gf_dit, "DiT sampling step")) break;
         dit_compute += wall_time_s() - ts;
         ts = wall_time_s();
         ggml_backend_tensor_get(vel, vbuf.data(), 0, N*sizeof(float));   // conditioned velocity
@@ -1366,7 +1384,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             ggml_backend_tensor_set(ones,  &one, 0, sizeof(float));
             if (local) ggml_backend_tensor_set(local, localb.data(), 0, localb.size()*sizeof(float));
             ggml_backend_tensor_set(cross, uncond_crossb.data(), 0, uncond_crossb.size()*sizeof(float));
-            ggml_backend_graph_compute(DIT.backend, gf_dit);
+            if (!compute_checked(DIT.backend, gf_dit, "DiT sampling step (unconditioned)")) break;
             dit_compute += wall_time_s() - ts;
             ts = wall_time_s();
             vbuf_unc.resize(N); vcfg.resize(N);
@@ -1393,6 +1411,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     ggml_gallocr_free(alloc_dit); ggml_free(dctx);
     if (!keep_models) { DIT.free(); dit_loras_.clear(); dit_merged_ = false;
                        dit_functional_.free(); dit_adapters_.clear(); }   // DiT gone -> next gen reloads a clean base
+    if (!backend_error.empty())
+        throw_backend_failure();
     if (dit_cancelled)
         throw_cancelled_after_frugal_cleanup();
 
@@ -1470,12 +1490,13 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         if (sc.chunk) set_positions(dg.pos2, dg.N2);
         dec_upload += wall_time_s() - ts;
         ts = wall_time_s();
-        ggml_backend_graph_compute(AE.backend, dg.graph);
+        if (!compute_checked(AE.backend, dg.graph, "SAME decode")) return false;
         dec_compute += wall_time_s() - ts;
         ts = wall_time_s();
         out.resize((size_t)dg.n_samp*dg.n_ch);
         ggml_backend_tensor_get(dg.audio, out.data(), 0, out.size()*sizeof(float));
         dec_download += wall_time_s() - ts;
+        return true;
     };
 
     const bool can_chunk_decode = decode_chunk_size > 0 && !sc.chunk && T >= decode_chunk_size;
@@ -1489,8 +1510,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (!can_chunk_decode) {
         throw_if_cancelled(params.should_cancel);
         DecodeGraph dg = build_decode_graph(T);
-        run_decode_graph(dg, host_x.data(), ab);
+        const bool decoded = run_decode_graph(dg, host_x.data(), ab);
         free_decode_graph(dg);
+        if (!decoded) throw_backend_failure();
         if (params.on_progress) params.on_progress({"decoding", 1, 1, 0.95f});  // match chunked path
         if (params.should_cancel && params.should_cancel())
             throw_cancelled_after_frugal_cleanup();
@@ -1508,7 +1530,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             const ChunkTile& tl = tiles[i];   // decode stitches in samples: scale the plan by ds
             for (int t = 0; t < decode_chunk_size; t++)
                 memcpy(&zchunk[(size_t)t*sc.latent], &host_x[(size_t)(tl.src + t)*sc.latent], sc.latent*sizeof(float));
-            run_decode_graph(dg, zchunk.data(), chunk_audio);
+            if (!run_decode_graph(dg, zchunk.data(), chunk_audio)) break;
             if (params.on_progress)
                 params.on_progress({"decoding", (int)(i+1), (int)tiles.size(),
                                     0.9f + 0.1f * (float)(i+1) / (float)tiles.size()});
@@ -1521,6 +1543,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             if (params.should_cancel && params.should_cancel()) { cancelled = true; break; }
         }
         free_decode_graph(dg);
+        if (!backend_error.empty())
+            throw_backend_failure();
         if (cancelled)
             throw_cancelled_after_frugal_cleanup();
     }
