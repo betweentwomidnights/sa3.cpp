@@ -389,11 +389,12 @@ inline bool graph_compute_checked(ggml_backend_t backend, ggml_cgraph* graph,
     if (st == GGML_STATUS_SUCCESS) st = metal_latched_status(backend);
     if (st == GGML_STATUS_SUCCESS) return true;
     const char* name = ggml_backend_name(backend);
-    err = std::string(what) + ": backend '" + (name ? name : "(unknown)") + "' returned " +
-          ggml_status_to_string(st) +
-          ". The backend is in an error state and cannot be recovered within this run; see the "
-          "backend's own log for the failing command buffer. On Metal this is usually memory "
-          "pressure -- retry with a smaller --frames, a more quantized --encoding, or --device cpu";
+    // Library hosts show this to people, not just the CLI, so it names remedies rather than flags.
+    err = std::string(what) + ": backend '" + (name ? name : "(unknown)") + "' failed (" +
+          ggml_status_to_string(st) + "). Nothing else can run on it; recreate the context to "
+          "continue. On a GPU this is usually memory pressure: a shorter duration, a more quantized "
+          "model, smaller autoencoder chunks, or the CPU device can help. The backend's own log "
+          "names the failing command buffer.";
     return false;
 }
 
