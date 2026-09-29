@@ -16,6 +16,7 @@
 #include "env.h"
 #include "wav.h"
 #include "embedded_web.h"
+#include "lora_convert.h"
 
 #include "httplib.h"
 #include "yyjson.h"
@@ -42,10 +43,17 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
 std::mutex g_mtx;                         // serialize: one generation (one GPU graph) at a time
+std::mutex g_selection_mtx;               // short reads for /health without waiting on inference
 std::unique_ptr<sa3::Pipeline> g_pipe;    // loaded lazily on first generate; freed on /unload
 std::atomic<bool> g_loaded{false};        // lock-free view for /health (won't block during a gen)
 std::string g_variant   = "medium";
@@ -80,6 +88,13 @@ struct Job {
 };
 std::mutex jobs_mtx;
 std::unordered_map<std::string, Job> jobs;
+
+struct ModelDownloadJob {
+    std::string id, status, message, current_file;
+    int done = 0, total = 0;
+};
+std::mutex model_download_mtx;
+ModelDownloadJob model_download;
 
 std::string json_escape(const std::string& s);
 std::string json_err(const std::string& msg) { return "{\"error\":\"" + json_escape(msg) + "\"}"; }
@@ -319,7 +334,23 @@ std::string resolve_lora_path(const std::string& adapters_dir, const std::string
 struct LoraEntry {
     std::string name;
     std::string path;
+    std::string target;
+    std::string base_model;
 };
+
+LoraEntry inspect_lora(const std::string& name, const std::string& path) {
+    LoraEntry entry{name, path, "dit", ""};
+    gguf_init_params params{};
+    params.no_alloc = true;
+    gguf_context* metadata = gguf_init_from_file(path.c_str(), params);
+    if (!metadata) return entry;
+    const int target = gguf_find_key(metadata, "lora.target");
+    if (target >= 0) entry.target = gguf_get_val_str(metadata, target);
+    const int base = gguf_find_key(metadata, "lora.base_model");
+    if (base >= 0) entry.base_model = gguf_get_val_str(metadata, base);
+    gguf_free(metadata);
+    return entry;
+}
 
 struct SourceLoraEntry {
     std::string name;
@@ -343,7 +374,7 @@ std::vector<LoraEntry> scan_loras(const std::string& adapters_dir) {
         if (name.empty()) continue;
         const std::string key = lower_ascii(name);
         if (!seen.insert(key).second) continue;
-        out.push_back({name, e.path().string()});
+        out.push_back(inspect_lora(name, e.path().string()));
     }
     std::sort(out.begin(), out.end(), [](const LoraEntry& a, const LoraEntry& b) {
         return lower_ascii(a.name) < lower_ascii(b.name);
@@ -398,7 +429,9 @@ std::string loras_json(const std::vector<LoraEntry>& loras) {
         if (i) body += ",";
         body += "{\"index\":" + std::to_string(i)
              + ",\"name\":\"" + json_escape(loras[i].name)
-             + "\",\"path\":\"" + json_escape(loras[i].path) + "\"}";
+             + "\",\"path\":\"" + json_escape(loras[i].path)
+             + "\",\"target\":\"" + json_escape(loras[i].target)
+             + "\",\"base_model\":\"" + json_escape(loras[i].base_model) + "\"}";
     }
     body += "]";
     return body;
@@ -544,6 +577,158 @@ std::string new_session_id() {
     std::string s(12, '0');
     for (int i = 0; i < 12; i++) { s[i] = H[r & 0xF]; r >>= 4; }
     return s;
+}
+
+bool valid_model_variant(const std::string& variant) {
+    return variant == "medium" || variant == "small-music" || variant == "small-sfx";
+}
+bool valid_model_encoding(const std::string& encoding) {
+    return encoding == "f16" || encoding == "f32" || encoding == "q4_k_m" ||
+           encoding == "q5_k_m" || encoding == "q8_0";
+}
+
+struct ModelArtifact { std::string repo, filename; };
+std::vector<ModelArtifact> model_download_plan(const std::string& variant, const std::string& encoding) {
+    std::string tier = encoding;
+    std::transform(tier.begin(), tier.end(), tier.begin(), [](unsigned char c) { return (char)std::toupper(c); });
+    const std::string model = "stable-audio-3-" + variant;
+    const std::string repo = "thepatch/" + model + "-GGUF";
+    const std::string shared = "thepatch/t5gemma-b-b-ul2-GGUF";
+    const std::string size = variant == "medium" ? "1.5B" : "0.5B";
+    const std::string same = variant == "medium" ? "same-l" : "same-s";
+    return {
+        {repo, model + "-dit-" + size + "-v1.0-" + tier + ".gguf"},
+        {repo, model + "-" + same + "-v1.0-F32.gguf"},
+        {repo, model + "-conditioner-v1.0-F32.gguf"},
+        {shared, "t5gemma-b-b-ul2-encoder-0.3B-v1.0-F16.gguf"},
+        {shared, "t5gemma-b-b-ul2-v1.0-vocab.gguf"},
+    };
+}
+
+// Pass fixed catalog URLs and a configured destination to curl without a shell.
+// This lets the packaged Windows runtime download weights without Python.
+int run_model_curl(const std::string& url, const std::filesystem::path& part) {
+#ifdef _WIN32
+    const std::wstring wurl(url.begin(), url.end());  // the fixed catalog URL is ASCII
+    std::wstring cmd = L"curl.exe -fL --silent --show-error --retry 3 --continue-at - --output \"" +
+                       part.wstring() + L"\" \"" + wurl + L"\"";
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &startup, &process)) return -1;
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD code = 1; GetExitCodeProcess(process.hProcess, &code);
+    CloseHandle(process.hThread); CloseHandle(process.hProcess);
+    return (int)code;
+#else
+    const std::string output = part.string();
+    pid_t child = fork();
+    if (child == 0) {
+        execlp("curl", "curl", "-fL", "--silent", "--show-error", "--retry", "3",
+               "--continue-at", "-", "--output", output.c_str(), url.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    if (child < 0) return -1;
+    int status = 0;
+    if (waitpid(child, &status, 0) < 0) return -1;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+}
+
+void download_model_set(std::string id, std::string variant, std::string encoding) {
+    const auto plan = model_download_plan(variant, encoding);
+    const std::filesystem::path models = std::filesystem::absolute(g_models_dir);
+    std::error_code ec;
+    std::filesystem::create_directories(models, ec);
+    if (ec) {
+        std::lock_guard<std::mutex> lk(model_download_mtx);
+        model_download.status = "failed"; model_download.message = "Cannot create models folder: " + ec.message();
+        return;
+    }
+    for (const auto& artifact : plan) {
+        const auto target = models / artifact.filename;
+        {
+            std::lock_guard<std::mutex> lk(model_download_mtx);
+            if (model_download.id != id) return;
+            model_download.current_file = artifact.filename;
+            model_download.message = "Downloading " + artifact.filename;
+        }
+        const bool target_ready = std::filesystem::is_regular_file(target, ec) &&
+                                  std::filesystem::file_size(target, ec) > 0 && !ec;
+        if (!target_ready) {
+            const auto part = models / (artifact.filename + ".part");
+            const std::string url = "https://huggingface.co/" + artifact.repo + "/resolve/main/" + artifact.filename;
+            const int code = run_model_curl(url, part);
+            const bool part_ready = std::filesystem::is_regular_file(part, ec) &&
+                                    std::filesystem::file_size(part, ec) > 0 && !ec;
+            if (code != 0 || !part_ready) {
+                std::lock_guard<std::mutex> lk(model_download_mtx);
+                model_download.status = "failed";
+                model_download.message = "Download failed for " + artifact.filename + " (curl exit " + std::to_string(code) + ")";
+                return;
+            }
+            if (std::filesystem::exists(target, ec)) std::filesystem::remove(target, ec);
+            if (ec) {
+                std::lock_guard<std::mutex> lk(model_download_mtx);
+                model_download.status = "failed"; model_download.message = "Cannot replace " + artifact.filename + ": " + ec.message();
+                return;
+            }
+            std::filesystem::rename(part, target, ec);
+            if (ec) {
+                std::lock_guard<std::mutex> lk(model_download_mtx);
+                model_download.status = "failed"; model_download.message = "Cannot store " + artifact.filename + ": " + ec.message();
+                return;
+            }
+        }
+        std::lock_guard<std::mutex> lk(model_download_mtx);
+        model_download.done++;
+    }
+    std::lock_guard<std::mutex> lk(model_download_mtx);
+    model_download.status = "completed";
+    model_download.message = variant + " / " + encoding + " is ready to use";
+    model_download.current_file.clear();
+}
+
+void download_decoder_lora(std::string id) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::absolute(g_adapters_dir);
+    const fs::path gguf = dir / "lora-squeakfix-v3-f32.gguf";
+    const fs::path source = dir / "squeakfix_v3.safetensors";
+    const fs::path part = dir / "squeakfix_v3.safetensors.part";
+    std::error_code ec;
+    auto update = [&](const std::string& status, const std::string& message, int done, const std::string& file) {
+        std::lock_guard<std::mutex> lk(model_download_mtx);
+        if (model_download.id != id) return;
+        model_download.status = status; model_download.message = message;
+        model_download.done = done; model_download.current_file = file;
+    };
+    fs::create_directories(dir, ec);
+    if (ec) { update("failed", "Cannot create adapters folder: " + ec.message(), 0, ""); return; }
+    if (fs::is_regular_file(gguf, ec) && fs::file_size(gguf, ec) > 0 && !ec) {
+        update("completed", "SAME-L decoder correction is ready to use", 2, ""); return;
+    }
+    if (!fs::is_regular_file(source, ec) || fs::file_size(source, ec) == 0 || ec) {
+        update("running", "Downloading SAME-L decoder correction", 0, source.filename().string());
+        const int code = run_model_curl("https://huggingface.co/thepatch/same-l-decoder-lora/resolve/main/squeakfix_v3.safetensors", part);
+        if (code != 0 || !fs::is_regular_file(part, ec) || fs::file_size(part, ec) == 0 || ec) {
+            update("failed", "Decoder correction download failed (curl exit " + std::to_string(code) + ")", 0, ""); return;
+        }
+        if (fs::exists(source, ec)) fs::remove(source, ec);
+        if (ec) { update("failed", "Cannot replace decoder source: " + ec.message(), 0, ""); return; }
+        fs::rename(part, source, ec);
+        if (ec) { update("failed", "Cannot store decoder source: " + ec.message(), 0, ""); return; }
+    }
+    update("running", "Converting decoder correction to GGUF", 1, gguf.filename().string());
+    const fs::path output_part = dir / "lora-squeakfix-v3-f32.gguf.part";
+    std::string error;
+    if (!sa3::convert_lora_safetensors(source.string(), "", output_part.string(), error)) {
+        update("failed", "Decoder correction conversion failed: " + error, 1, ""); return;
+    }
+    if (fs::exists(gguf, ec)) fs::remove(gguf, ec);
+    if (ec) { update("failed", "Cannot replace decoder correction: " + ec.message(), 1, ""); return; }
+    fs::rename(output_part, gguf, ec);
+    if (ec) { update("failed", "Cannot store decoder correction: " + ec.message(), 1, ""); return; }
+    update("completed", "SAME-L decoder correction is ready to use", 2, "");
 }
 
 // Drop finished jobs so the registry does not keep large base64 WAV payloads indefinitely
@@ -850,6 +1035,7 @@ int main(int argc, char** argv) {
     sa3::load_dotenv();
     std::string host = "127.0.0.1";
     int port = 8006;
+    int train_port = 0;
     if (const char* e = getenv("SA3_MODELS_DIR"))   g_models_dir   = e;
     if (const char* e = getenv("SA3_ADAPTERS_DIR")) g_adapters_dir = e;
     if (const char* e = getenv("SA3_PROMPTS_DIR"))  g_prompts_dir  = e;
@@ -866,6 +1052,7 @@ int main(int argc, char** argv) {
         auto next = [&](const char* d){ return i + 1 < argc ? argv[++i] : d; };
         if      (a == "--host")         host = next("127.0.0.1");
         else if (a == "--port")         port = atoi(next("8006"));
+        else if (a == "--train-port")   train_port = atoi(next("0"));
         else if (a == "--model")        g_variant = next("medium");
         else if (a == "--encoding")     g_encoding = next("f16");
         else if (a == "--t5-encoding")  g_t5_encoding = next("");
@@ -899,6 +1086,78 @@ int main(int argc, char** argv) {
 
     httplib::Server svr;
 
+    if (train_port < 0 || train_port > 65535 || (train_port > 0 && train_port == port)) {
+        fprintf(stderr, "--train-port must be a different valid port\n");
+        return 1;
+    }
+    if (train_port > 0) {
+        if (!is_loopback_host(host))
+            fprintf(stderr, "[sa3-server] warning: /training/ exposes the local training API on %s\n", host.c_str());
+        // Keep the training process separate while giving the Studio one origin.
+        // The companion binds to loopback; only /training/* is forwarded.
+        const auto proxy_training = [train_port](const httplib::Request& req, httplib::Response& res) {
+            if (req.path == "/training") {
+                res.set_redirect("/training/");
+                return;
+            }
+            const std::string path = req.target.substr(std::string("/training").size());
+            httplib::Client client("127.0.0.1", train_port);
+            client.set_read_timeout(600);
+            if (req.method == "GET" && req.path == "/training/api/train/download") {
+                // Check status and headers first, then stream the potentially large
+                // adapter or checkpoint without retaining it in server memory.
+                auto head = client.Head(path);
+                if (!head) {
+                    res.status = 502;
+                    res.set_content("Training server is unavailable.", "text/plain");
+                    return;
+                }
+                res.status = head->status;
+                const auto type = head->get_header_value("Content-Type", "application/octet-stream");
+                if (head->has_header("Content-Disposition"))
+                    res.set_header("Content-Disposition", head->get_header_value("Content-Disposition"));
+                if (head->status != 200) {
+                    res.set_content("Training artifact is unavailable.", "text/plain");
+                    return;
+                }
+                res.set_chunked_content_provider(type, [train_port, path, started = false](size_t, httplib::DataSink& sink) mutable {
+                    if (started) { sink.done(); return true; }
+                    started = true;
+                    httplib::Client stream("127.0.0.1", train_port);
+                    stream.set_read_timeout(600);
+                    auto result = stream.Get(path, [&sink](const char* data, size_t size) {
+                        return sink.write(data, size);
+                    });
+                    sink.done();
+                    return result && result->status == 200;
+                });
+                return;
+            }
+            httplib::Result upstream;
+            if (req.method == "GET") upstream = client.Get(path);
+            else if (req.method == "POST")
+                upstream = client.Post(path, req.body, req.get_header_value("Content-Type", "application/json"));
+            else {
+                res.status = 405;
+                return;
+            }
+            if (!upstream) {
+                res.status = 502;
+                res.set_content("{\"error\":\"Training server is unavailable. Start studio.cmd or sa3-train-web.\"}", "application/json");
+                return;
+            }
+            res.status = upstream->status;
+            const auto content_type = upstream->get_header_value("Content-Type", "application/octet-stream");
+            res.set_content(upstream->body, content_type);
+            for (const char* header : {"Content-Disposition", "Cache-Control"}) {
+                if (upstream->has_header(header)) res.set_header(header, upstream->get_header_value(header));
+            }
+        };
+        // Normal routes run after cpp-httplib reads POST bodies into req.body.
+        svr.Get(R"(/training(?:/.*)?)", proxy_training);
+        svr.Post(R"(/training/.*)", proxy_training);
+    }
+
     // --web-dir: serve a directory of static files at /, so a front-end lives beside the server
     // as plain files instead of the compiled-in inference page. Off by default.
     //
@@ -920,7 +1179,7 @@ int main(int argc, char** argv) {
         // path prefix, so a *directory* of that name shadows it just as a file would -- and it
         // is the endpoint clients poll for generation progress, so losing it is not obvious
         // from the symptom. fs::exists covers both file and directory.
-        for (const char* reserved : {"health", "loras", "prompts", "poll_status", "init-audio"}) {
+        for (const char* reserved : {"health", "loras", "prompts", "poll_status", "init-audio", "models"}) {
             if (fs::exists(fs::path(g_web_dir) / reserved, ec))
                 fprintf(stderr, "[sa3-server] warning: %s/%s shadows the GET /%s endpoint\n",
                         g_web_dir.c_str(), reserved, reserved);
@@ -936,6 +1195,7 @@ int main(int argc, char** argv) {
 
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         const bool loaded = g_loaded.load();   // atomic: never blocks behind an in-flight generation
+        std::lock_guard<std::mutex> selection_lk(g_selection_mtx);
         std::string body = "{\"status\":\"ok\",\"model\":\"" + g_variant + "\",\"encoding\":\"" +
                            g_encoding + "\",\"t5_encoding\":\"" +
                            (g_t5_encoding.empty() ? "auto" : g_t5_encoding) +
@@ -943,6 +1203,122 @@ int main(int argc, char** argv) {
                            (g_ae_encoding.empty() ? "auto" : g_ae_encoding) +
                            "\",\"loaded\":" + (loaded ? "true" : "false") +
                            ",\"loudness_defaults\":" + loudness_params_json(sa3::loudness_defaults_from_env()) + "}";
+        res.set_content(body, "application/json");
+    });
+
+    svr.Get("/models/catalog", [](const httplib::Request&, httplib::Response& res) {
+        std::string active_variant, active_encoding;
+        {
+            std::lock_guard<std::mutex> lk(g_selection_mtx);
+            active_variant = g_variant; active_encoding = g_encoding;
+        }
+        const std::vector<std::string> variants = {"medium", "small-music", "small-sfx"};
+        const std::vector<std::string> tiers = {"f16", "q4_k_m", "f32", "q5_k_m", "q8_0"};
+        std::string body = "{\"models_dir\":\"" + json_escape(std::filesystem::absolute(g_models_dir).string()) + "\",\"models\":[";
+        for (size_t i = 0; i < variants.size(); ++i) {
+            const auto& variant = variants[i];
+            if (i) body += ",";
+            const std::string name = variant == "medium" ? "Medium" : variant == "small-music" ? "Small music" : "Small SFX";
+            const std::string description = variant == "medium" ? "Full Stable Audio 3 model for music and sound." :
+                                            variant == "small-music" ? "Compact Stable Audio 3 music model." : "Compact Stable Audio 3 sound effects model.";
+            body += "{\"variant\":\"" + variant + "\",\"name\":\"" + name + "\",\"description\":\"" + description + "\",\"installed\":[";
+            bool first = true;
+            for (const auto& tier : tiers) {
+                sa3::ModelPaths paths;
+                std::string err;
+                if (!sa3::ModelPaths::resolve(g_models_dir, variant, tier, "", "", paths, err)) continue;
+                if (!first) body += ",";
+                body += "\"" + tier + "\""; first = false;
+            }
+            body += "],\"active\":" + std::string(active_variant == variant ? "true" : "false") +
+                    ",\"active_encoding\":\"" + (active_variant == variant ? active_encoding : "") + "\"}";
+        }
+        body += "]}";
+        res.set_content(body, "application/json");
+    });
+
+    svr.Post("/models/select", [](const httplib::Request& req, httplib::Response& res) {
+        yyjson_doc* doc = yyjson_read(req.body.c_str(), req.body.size(), 0);
+        if (!doc) { res.status = 400; res.set_content(json_err("invalid json"), "application/json"); return; }
+        yyjson_val* root = yyjson_doc_get_root(doc);
+        yyjson_val* vv = yyjson_obj_get(root, "variant");
+        yyjson_val* ev = yyjson_obj_get(root, "encoding");
+        const std::string variant = yyjson_is_str(vv) ? yyjson_get_str(vv) : "";
+        const std::string encoding = yyjson_is_str(ev) ? yyjson_get_str(ev) : "";
+        yyjson_doc_free(doc);
+        if (!valid_model_variant(variant) || !valid_model_encoding(encoding)) {
+            res.status = 400; res.set_content(json_err("unknown model variant or DiT tier"), "application/json"); return;
+        }
+        std::string t5_encoding, ae_encoding;
+        { std::lock_guard<std::mutex> lk(g_selection_mtx); t5_encoding = g_t5_encoding; ae_encoding = g_ae_encoding; }
+        sa3::ModelPaths paths;
+        std::string err;
+        if (!sa3::ModelPaths::resolve(g_models_dir, variant, encoding, t5_encoding, ae_encoding, paths, err)) {
+            res.status = 409; res.set_content(json_err("model set is incomplete: " + err), "application/json"); return;
+        }
+        std::lock_guard<std::mutex> inference_lk(g_mtx);
+        {
+            std::lock_guard<std::mutex> jobs_lk(jobs_mtx);
+            jobs_prune();
+            for (const auto& item : jobs) {
+                if (item.second.status == "queued" || item.second.status == "generating" || item.second.status == "encoding") {
+                    res.status = 409; res.set_content(json_err("wait for the current generation before switching models"), "application/json"); return;
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> selection_lk(g_selection_mtx);
+            g_variant = variant; g_encoding = encoding;
+            g_pipe.reset(); g_loaded = false;
+        }
+        res.set_content("{\"success\":true,\"variant\":\"" + variant + "\",\"encoding\":\"" + encoding + "\"}", "application/json");
+    });
+
+    svr.Post("/models/download", [](const httplib::Request& req, httplib::Response& res) {
+        yyjson_doc* doc = yyjson_read(req.body.c_str(), req.body.size(), 0);
+        if (!doc) { res.status = 400; res.set_content(json_err("invalid json"), "application/json"); return; }
+        yyjson_val* root = yyjson_doc_get_root(doc);
+        yyjson_val* vv = yyjson_obj_get(root, "variant");
+        yyjson_val* ev = yyjson_obj_get(root, "encoding");
+        const std::string variant = yyjson_is_str(vv) ? yyjson_get_str(vv) : "";
+        const std::string encoding = yyjson_is_str(ev) ? yyjson_get_str(ev) : "";
+        yyjson_doc_free(doc);
+        if (!valid_model_variant(variant) || !valid_model_encoding(encoding)) {
+            res.status = 400; res.set_content(json_err("unknown model variant or DiT tier"), "application/json"); return;
+        }
+        const std::string id = new_session_id();
+        {
+            std::lock_guard<std::mutex> lk(model_download_mtx);
+            if (model_download.status == "running") {
+                res.status = 409; res.set_content(json_err("a model download is already running"), "application/json"); return;
+            }
+            model_download = {id, "running", "Preparing model download", "", 0, 5};
+        }
+        std::thread(download_model_set, id, variant, encoding).detach();
+        res.set_content("{\"id\":\"" + id + "\"}", "application/json");
+    });
+
+    svr.Post("/models/decoder/download", [](const httplib::Request&, httplib::Response& res) {
+        const std::string id = new_session_id();
+        {
+            std::lock_guard<std::mutex> lk(model_download_mtx);
+            if (model_download.status == "running") {
+                res.status = 409; res.set_content(json_err("a download is already running"), "application/json"); return;
+            }
+            model_download = {id, "running", "Preparing decoder correction", "", 0, 2};
+        }
+        std::thread(download_decoder_lora, id).detach();
+        res.set_content("{\"id\":\"" + id + "\"}", "application/json");
+    });
+
+    svr.Get(R"(/models/download/([0-9a-f]{12}))", [](const httplib::Request& req, httplib::Response& res) {
+        std::lock_guard<std::mutex> lk(model_download_mtx);
+        if (model_download.id != req.matches[1]) {
+            res.status = 404; res.set_content(json_err("download not found"), "application/json"); return;
+        }
+        std::string body = "{\"id\":\"" + model_download.id + "\",\"status\":\"" + model_download.status +
+                           "\",\"message\":\"" + json_escape(model_download.message) + "\",\"done\":" + std::to_string(model_download.done) +
+                           ",\"total\":" + std::to_string(model_download.total) + ",\"current_file\":\"" + json_escape(model_download.current_file) + "\"}";
         res.set_content(body, "application/json");
     });
 
@@ -1044,6 +1420,13 @@ int main(int argc, char** argv) {
 
     svr.Get("/app.js", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(embedded_web::app_js, "application/javascript");
+    });
+
+    svr.Get("/studio.js", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(embedded_web::studio_js, "application/javascript");
+    });
+    svr.Get("/studio.css", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(embedded_web::studio_css, "text/css");
     });
 
     svr.Get("/loras", [&adir, &sldir](const httplib::Request&, httplib::Response& res) {

@@ -2,8 +2,9 @@
 // sa3-train-web frontend — vanilla JS, no build step (mirrors web/app.js).
 // Talks to the companion's HTTP API: /api/train/*
 
-const API = { host: location.hostname, port: location.port || 8016 };
-const base = `http://${API.host}:${API.port}`;
+const base = location.pathname.startsWith("/training/")
+  ? `${location.origin}/training`
+  : location.origin;
 
 const $ = (id) => document.getElementById(id);
 
@@ -310,6 +311,19 @@ $("new-btn").onclick = openForm;
 $("cancel-btn").onclick = () => { closeForm(); $("empty-card").classList.remove("hidden"); };
 $("start-btn").onclick = startTraining;
 $("stop-btn").onclick = stopTraining;
+$("browse-dataset").onclick = async () => {
+  const button = $("browse-dataset");
+  button.disabled = true;
+  $("form-err").textContent = "";
+  try {
+    const result = await apiPost("/api/dataset/browse");
+    if (result?.path) $("f-dataset").value = result.path;
+  } catch (err) {
+    $("form-err").textContent = err.message || "Could not choose a dataset folder.";
+  } finally {
+    button.disabled = false;
+  }
+};
 
 // initial load
 (async () => {

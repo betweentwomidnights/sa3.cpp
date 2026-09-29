@@ -4,11 +4,11 @@
 CLI behind a browser UI. It lets you configure, launch, monitor, and download LoRA/DoRA
 training runs from a web page instead of the command line.
 
-It is deliberately **decoupled**: it does **not** modify `sa3-server`, the training
-library (`src/train_*.h`), or the trainer itself (`tools/sa3-train.cpp`). It only spawns
-`sa3-train` as a subprocess, reads the artifacts that the trainer already writes, and
-serves them over HTTP. This mirrors the "companion, not a fork" relationship that keeps
-the inference path (`sa3-server`) untouched.
+It is deliberately **decoupled** from the training library (`src/train_*.h`) and
+trainer (`tools/sa3-train.cpp`). It spawns `sa3-train` as a subprocess, reads the
+artifacts that the trainer already writes, and serves them over HTTP. In the
+combined Studio, `sa3-server` forwards `/training/` requests to this companion;
+inference and training still run in separate processes.
 
 > Proof-of-concept status, same as `sa3-server`: it binds to `127.0.0.1` by default and
 > has no authentication. Run it locally.
@@ -18,7 +18,8 @@ the inference path (`sa3-server`) untouched.
 ## System overview
 
 ```
-  browser ──HTTP──►  sa3-train-web  (C++ / cpp-httplib, port 8016)
+  browser ──HTTP──►  sa3-server /training/ ──► sa3-train-web (port 8016)
+                       or directly ────────────► │
                           │  spawn subprocess (no shell)
                           ▼
                      sa3-train  --config <out>/run.json
@@ -253,6 +254,8 @@ Run it (defaults shown):
 
 Then open `http://127.0.0.1:8016`. The default port is **8016**, distinct from
 `sa3-server`'s 8006, so both can run side by side.
+On Windows, `.\studio.cmd` starts both and exposes Training at
+`http://127.0.0.1:8006/training/` through the inference server.
 
 ### CLI flags
 
@@ -267,9 +270,9 @@ Then open `http://127.0.0.1:8016`. The default port is **8016**, distinct from
 
 ## Design decisions
 
-- **Companion, not integration.** Keeping training out of `sa3-server` means the inference
-  service (and its VRAM/latency profile) is never affected by a long training job, and the
-  two evolve independently.
+- **Separate training process.** Training keeps its own model and run lifecycle.
+  The Studio forwards HTTP requests to it but does not run training inside the
+  inference process.
 - **Subprocess over linking.** Spawning `sa3-train` (rather than linking the training
   library) isolates crashes and OOMs in the child, gives a cancel primitive, and reuses
   the trainer's existing, tested config/checkpoint/resume paths

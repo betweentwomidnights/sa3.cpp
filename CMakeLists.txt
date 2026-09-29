@@ -200,6 +200,9 @@ add_executable(sa3-train-web tools/sa3-train-web.cpp
     vendor/cpp-httplib/httplib.cpp
     vendor/yyjson/yyjson.c)
 target_link_libraries(sa3-train-web PRIVATE sa3 Threads::Threads)
+if(WIN32)
+    target_link_libraries(sa3-train-web PRIVATE ole32 uuid user32)
+endif()
 target_include_directories(sa3-train-web PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cpp-httplib
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson

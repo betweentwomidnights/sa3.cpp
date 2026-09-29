@@ -7,15 +7,35 @@ for progress and, on completion, the base64 audio. That makes it a drop-in for a
 (SA3 on `:8006`). The reusable primitives live in the pipeline (`src/sa3_pipeline.h`, incl.
 `GenParams::on_progress`); a synchronous or SSE transport is left to real apps.
 
-Open `http://127.0.0.1:8006/` for the embedded inference page. To use the linked
-LoRA training page, also start `sa3-train-web` and open `http://127.0.0.1:8016/`.
+Open `http://127.0.0.1:8006/` for the browser studio. Its Studio, LoRA training,
+Models, and Settings views share one page; switching views keeps the training view
+mounted. On Windows, `studio.cmd` starts both services from one terminal and serves
+Training through `/training/` on the Studio URL. The training server still listens
+locally on its own port and works directly at `http://127.0.0.1:8016/`.
 The interfaces originated with [pillopaus-project](https://github.com/pillopaus-project/sa3.cpp).
 
-The inference page is served from `web/index.html` and `web/app.js`; those files
+The inference page is served from `web/index.html`, `web/app.js`, `web/studio.js`,
+and `web/studio.css`; those files
 are embedded into `src/embedded_web.h` for release builds. After editing the
 web assets, run `python tools/gen_embedded_web.py` to refresh the header.
 `python tools/gen_embedded_web.py --check` verifies it without writing, and
 CTest runs that check when Python is available.
+The training page is generated separately with `python tools/gen_embedded_train_web.py`.
+
+Studio displays each generated take as a waveform with one playback transport. Click
+to seek, use the crop icon and handles to select a range, or upload a WAV with the icon
+on the waveform or Explorer drag and drop. Create, Continue, and Transform use focused
+dialogs. Create includes a loop toggle; Create and Continue offer **Ends here** (no
+duration padding) and **Keeps going** (six seconds of padding). CFG and distribution
+shift controls live in each dialog's Advanced section. Transform strength and optional
+inpaint range live in Transform. Settings keeps model residency and audio processing.
+The Models view lists installed Stable Audio 3 variants and DiT tiers, downloads
+published inference weight sets into `--models-dir`, and selects compatible decoder
+corrections. Decoder corrections apply to every render for their selected model family
+and can stack with creative LoRAs, which are selected with strength sliders in the
+render dialogs. The published SAME-L decoder correction can be downloaded and converted
+to GGUF in the Models view. Training base weights and Stable Audio Tools models still
+use the command-line downloader.
 
 ## Run
 
@@ -33,11 +53,20 @@ CTest runs that check when Python is available.
 #       --audio-in-dir DIR (or SA3_AUDIO_IN_DIR) — init-audio pool for browser clients
 ```
 
-on Windows, after `.\build.cmd cuda`, `server.cmd` picks the built backend and keeps the server in the terminal (close it or Ctrl+C to stop). extra args pass through:
+On Windows, after `.\build.cmd cuda`, start the complete browser studio with one command. The training companion starts in the background and stops when the foreground inference server exits. Open the printed URL; the browser needs only the inference port:
+
+```powershell
+.\studio.cmd
+# optional: .\studio.cmd -Port 8046 -TrainPort 8047 -Model small-sfx -Encoding q4_k_m
+```
+
+The dataset folder icon in Training opens a native Windows folder picker and fills in the local path. You can still type a path. For inference only, `server.cmd` keeps the server in the terminal and accepts server arguments:
 
 ```powershell
 .\server.cmd                       # or: .\server.cmd --model small-music --port 9000
 ```
+
+Both services can also run independently: start `sa3-server` or `server.cmd` for inference, or start `sa3-train-web` for training. To connect separately started processes behind one browser URL, give `sa3-server` `--train-port <training-port>`.
 
 it binds to `127.0.0.1` by default (local only). The model loads lazily on the first `/generate`.
 
@@ -45,19 +74,24 @@ it binds to `127.0.0.1` by default (local only). The model loads lazily on the f
 
 | method | path | body / result |
 |---|---|---|
-| `GET`  | `/loras`    | `{success, loras:[{index,name,path}], adapters_dir, model_loaded}` |
+| `GET`  | `/loras`    | `{success, loras:[{index,name,path,target,base_model}], adapters_dir, model_loaded}` |
 | `GET`  | `/prompts`  | prompt dice pools, optionally blended with `?lora=name` or `?lora=a,b` |
-| `GET`  | `/health`   | `{status, model, encoding, t5_encoding, loaded}` (lock-free — never blocks behind a gen) |
+| `GET`  | `/health`   | `{status, model, encoding, t5_encoding, loaded}` (does not wait for generation) |
 | `POST` | `/generate` | JSON request (below) → **`{success, session_id, seed}`** immediately; generation runs in the background |
 | `POST` | `/generate/loop` | same request plus `bpm`/prompt BPM and `bars` for exact-length loop generation |
 | `GET`  | `/poll_status/<session_id>` | `{success, generation_in_progress, progress, step, total_steps, status, queue_status, ...}`; on `status:"completed"` also `audio_data` (base64 wav) + `meta:{seed}` |
 | `POST` | `/unload`   | frees the model (full VRAM release) → `{status:"unloaded"}` |
 | `GET`  | `/init-audio` | `{success, files:[{name,path,bytes}], audio_in_dir, max_upload_bytes}` — the init-audio pool |
 | `POST` | `/init-audio/upload` | multipart `file=` → `{success, name, path, bytes}`; the returned `path` is what you pass as `init_path` |
+| `GET` | `/models/catalog` | installed Stable Audio 3 inference variants and DiT tiers, active selection, models folder |
+| `POST` | `/models/select` | `{variant, encoding}` → switch the inference model after current jobs finish |
+| `POST` | `/models/download` | `{variant, encoding}` → `{id}`; download one published inference weight set |
+| `POST` | `/models/decoder/download` | `{}` → `{id}`; download and convert the published SAME-L decoder correction |
+| `GET` | `/models/download/<id>` | `{status, message, done, total, current_file}` for the active download |
 
 `status` runs `queued → generating → encoding → completed` (or `failed`); `progress` is `0..100`
 (sampling `0→90`, decode `→100`). poll until `status == "completed"`, then base64-decode `audio_data`.
-Finished jobs are pruned after 2 min. clients can poll `/poll_status/<id>?consume=1` to return the
+Finished jobs are pruned after 10 min. clients can poll `/poll_status/<id>?consume=1` to return the
 completed audio once and immediately remove that job from server memory. completed jobs include
 `meta.loudness` with the decoded peak, final peak, peak-normalize gain, and limiter fraction.
 `/health` also reports the current `loudness_defaults`.
@@ -149,14 +183,15 @@ disable the limiter. See [`LOUDNESS.md`](LOUDNESS.md) for the short rationale an
 
 ## lora and prompt discovery
 
-`GET /loras` scans the adapters directory and returns GGUF adapter names that can be passed back in a
-generation request. it also reports source `.ckpt` / `.safetensors` exports from `--source-loras-dir`
+`GET /loras` scans the adapters directory and returns GGUF adapter names and targets
+(`dit`, `decoder`, or `encoder`) that can be passed back in a generation request.
+It also reports source `.ckpt` / `.safetensors` exports from `--source-loras-dir`
 under `source_loras`; those need conversion before the C++ runtime can load them.
 
 ```json
 {
   "success": true,
-  "loras": [{"index": 0, "name": "kev", "path": "models/lora-kev-f32.gguf"}]
+  "loras": [{"index": 0, "name": "kev", "path": "models/lora-kev-f32.gguf", "target": "dit", "base_model": ""}]
 }
 ```
 
@@ -278,17 +313,16 @@ The checks above are what keep that from being interesting.
 
 ## serving a front-end (`--web-dir`)
 
-off by default. without it the server is API only and `GET /` is a 404, unchanged from before
-this existed.
+The studio assets are embedded by default. Use `--web-dir` to serve edited assets
+directly while developing the front end.
 
 ```sh
 sa3-server --web-dir ./web          # or SA3_WEB_DIR=./web
 ```
 
 everything under that directory is served at `/`: `GET /` resolves to `index.html`, `GET /app.js`
-to `web/app.js`, and so on. the point is that a front-end can live as plain files next to the
-server, kept and versioned wherever its author wants, without being compiled into the binary and
-without patching `sa3-server.cpp` to add a route per asset.
+to `web/app.js`, and so on. This lets you edit the plain files without rebuilding
+the binary.
 
 the serving is httplib's own file handler, not hand-rolled. it rejects `..`, backslashes and nulls
 in the request path, then canonicalizes the result and re-checks it against the base directory so a
@@ -298,7 +332,7 @@ directory to its trailing-slash form.
 two behaviours worth knowing:
 
 - **static files are matched before route handlers, and only for GET/HEAD.** so a file named
-  `health`, `loras` or `prompts`, or a *directory* named `poll_status`, would shadow that GET
+  `health`, `loras` or `prompts`, or a *directory* named `poll_status` or `models`, would shadow that GET
   endpoint. the server warns at startup if it finds one. `POST` routes (`/generate`,
   `/generate/loop`, `/unload`) can never be shadowed. `poll_status` is the one to care about:
   clients poll it for generation progress, so shadowing it breaks generation in a way that does
@@ -306,8 +340,8 @@ two behaviours worth knowing:
 - **a bad `--web-dir` is fatal.** pointing it at something that is not a directory exits non-zero
   rather than starting up and quietly serving nothing.
 
-if the directory has no `index.html` the server still starts, notes it, and `/` will 404 until one
-exists — useful when the assets are built into place after launch.
+If the directory has no `index.html`, the server notes it and falls back to the
+embedded page at `/`.
 
 ## notes
 

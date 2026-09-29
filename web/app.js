@@ -46,7 +46,7 @@ function setVal(s, v) {
         el.value = String(v);
 }
 function apiBase() {
-    return `http://${server.host}:${server.port}`;
+    return location.origin;
 }
 // ─── API calls ──────────────────────────────────────────────────────────────
 async function apiGet(path) {
@@ -61,9 +61,10 @@ async function apiPost(path, body) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
     });
+    const data = await r.json();
     if (!r.ok)
-        throw new Error(`HTTP ${r.status}: ${r.statusText}`);
-    return r.json();
+        throw new Error(data.error || `HTTP ${r.status}: ${r.statusText}`);
+    return data;
 }
 // ─── Slider-number sync ─────────────────────────────────────────────────────
 function syncSliderToNum(sliderId, numId) {
@@ -106,7 +107,7 @@ function readForm() {
         dist_shift_params: dsParams,
         duration_padding_sec: num("#duration-padding"),
         keep_models: isChecked("#keep-models"),
-        loras: activeLoras,
+        loras: [...activeLoras, ...(window.studioDecoderAdapter?.() || [])],
         encode_chunk_size: int("#encode-chunk-size"),
         encode_overlap: int("#encode-overlap"),
         decode_chunk_size: int("#decode-chunk-size"),
@@ -170,7 +171,9 @@ async function loadLoras() {
     try {
         const r = await apiGet("/loras");
         loraList = r.loras;
+        activeLoras = activeLoras.filter((l) => !loraList.some((known) => known.name === l.name && known.target === "decoder"));
         renderLoraDropdown();
+        window.studioLorasReady?.();
     }
     catch {
         // server not connected yet
@@ -179,7 +182,7 @@ async function loadLoras() {
 function renderLoraDropdown() {
     const sel = $("#lora-select");
     sel.innerHTML = '<option value="">— select —</option>';
-    for (const l of loraList) {
+    for (const l of loraList.filter((item) => item.target !== "decoder" && item.target !== "encoder")) {
         const opt = document.createElement("option");
         opt.value = l.name;
         opt.textContent = l.name;
@@ -192,10 +195,9 @@ function addLora() {
     const name = sel.value;
     if (!name)
         return;
-    const strength = num("#lora-strength");
     if (activeLoras.some((l) => l.name === name))
         return;
-    activeLoras.push({ name, strength });
+    activeLoras.push({ name, strength: 1 });
     sel.value = "";
     renderActiveLoras();
 }
@@ -207,11 +209,15 @@ function renderActiveLoras() {
     const container = $("#active-loras");
     container.innerHTML = "";
     for (const l of activeLoras) {
-        const tag = document.createElement("span");
-        tag.className = "lora-tag";
-        tag.innerHTML = `${escapeHtml(l.name)} <span class="lora-str">(${l.strength.toFixed(2)})</span> <button class="small" data-name="${escapeHtml(l.name)}" title="Remove">&times;</button>`;
-        tag.querySelector("button").addEventListener("click", () => removeLora(l.name));
-        container.appendChild(tag);
+        const row = document.createElement("div"); row.className = "studio-lora-row";
+        const name = document.createElement("span"); name.textContent = l.name;
+        const slider = document.createElement("input"); slider.type = "range"; slider.min = "0"; slider.max = "2"; slider.step = "0.05"; slider.value = String(l.strength);
+        slider.setAttribute("aria-label", `${l.name} strength`);
+        const value = document.createElement("output"); value.textContent = Number(l.strength).toFixed(2);
+        slider.addEventListener("input", () => { l.strength = Number(slider.value); value.textContent = l.strength.toFixed(2); });
+        const remove = document.createElement("button"); remove.type = "button"; remove.className = "small"; remove.textContent = "Remove";
+        remove.addEventListener("click", () => removeLora(l.name));
+        row.append(name, slider, value, remove); container.appendChild(row);
     }
 }
 // ─── Init Audio ────────────────────────────────────────────────────────────
@@ -285,7 +291,8 @@ function onDistShiftChange() {
 // ─── Past Songs ────────────────────────────────────────────────────────────
 function pushPastSong(entry) {
     pastSongs.push(entry);
-    localStorage.setItem("sa3-past-songs", JSON.stringify(pastSongs));
+    try { localStorage.setItem("sa3-past-songs", JSON.stringify(pastSongs)); }
+    catch { /* Large WAV data can exceed browser storage; keep this session's history. */ }
     renderPastSongs();
 }
 function renderPastSongs() {
@@ -299,20 +306,27 @@ function renderPastSongs() {
         const div = document.createElement("div");
         div.className = "song-entry";
         div.innerHTML = `<span class="song-name" title="${escapeHtml(s.prompt || "")}">${escapeHtml((s.prompt || "(no prompt)").slice(0, 30))}</span>
-      <audio controls src="${s.audioUrl}"></audio>
       <span class="song-params">seed: ${s.seed}</span>
       <span class="song-actions">
-        <button class="small load-params-btn" data-index="${i}" title="Load generation params">📋</button>
-        <button class="small download-song-btn" data-index="${i}" title="Download WAV">⬇</button>
-        <button class="small danger delete-song-btn" data-index="${i}" title="Delete">&times;</button>
+        <button class="small open-song-btn" data-index="${i}" title="Open in waveform">Open</button>
+        <button class="small load-params-btn" data-index="${i}" title="Open audio and restore generation settings">Reuse</button>
+        <button class="small download-song-btn" data-index="${i}" title="Download WAV">Download</button>
+        <button class="small danger delete-song-btn" data-index="${i}" title="Delete">Remove</button>
       </span>`;
         container.appendChild(div);
+    }
+    for (const btn of container.querySelectorAll(".open-song-btn")) {
+        btn.addEventListener("click", () => {
+            const s = pastSongs[parseInt(btn.dataset.index || "0", 10)];
+            if (s) window.studioLoadTake?.(s);
+        });
     }
     for (const btn of container.querySelectorAll(".delete-song-btn")) {
         btn.addEventListener("click", () => {
             const idx = parseInt(btn.dataset.index || "0", 10);
             pastSongs.splice(idx, 1);
-            localStorage.setItem("sa3-past-songs", JSON.stringify(pastSongs));
+            try { localStorage.setItem("sa3-past-songs", JSON.stringify(pastSongs)); }
+            catch { /* Keep in-memory history if storage is full. */ }
             renderPastSongs();
         });
     }
@@ -333,9 +347,11 @@ function renderPastSongs() {
         btn.addEventListener("click", () => {
             const idx = parseInt(btn.dataset.index || "0", 10);
             const s = pastSongs[idx];
-            if (!s || !s.params)
+            if (!s)
                 return;
-            loadParamsFromSnapshot(s.params);
+            if (s.params)
+                loadParamsFromSnapshot(s.params);
+            window.studioLoadTake?.(s);
         });
     }
 }
@@ -398,7 +414,7 @@ function loadParamsFromSnapshot(params) {
     // restore LoRAs
     const loras = params.loras;
     if (loras) {
-        activeLoras = loras.map((l) => ({ ...l }));
+        activeLoras = loras.filter((l) => !loraList.some((known) => known.name === l.name && known.target === "decoder")).map((l) => ({ ...l }));
         renderActiveLoras();
     }
 }
@@ -430,13 +446,13 @@ function loadPastSongs() {
 }
 // ─── Generate ───────────────────────────────────────────────────────────────
 let pollTimer = null;
-async function generate() {
+async function generate(overrides = {}) {
     clearPolling();
     if (currentResult) {
         pushPastSong(currentResult);
         currentResult = null;
     }
-    const body = readForm();
+    const body = { ...readForm(), ...overrides };
     lastGenParams = { ...body };
     const btn = $("#gen-btn");
     btn.disabled = true;
@@ -453,14 +469,14 @@ async function generate() {
         btn.textContent = "Generate";
     }
 }
-async function generateLoop() {
+async function generateLoop(overrides = {}) {
     clearPolling();
     if (currentResult) {
         pushPastSong(currentResult);
         currentResult = null;
     }
     const body = {
-        ...readForm(),
+        ...readForm(), ...overrides,
         bpm: num("#loop-bpm"),
         bars: int("#loop-bars"),
     };
@@ -528,6 +544,7 @@ function startPolling(sessionId) {
                         params: { ...lastGenParams },
                         prompt: lastGenParams.prompt || "",
                     };
+                    window.studioResultReady?.(currentResult);
                     lastGenParams = null;
                 }
                 clearPolling();
@@ -559,6 +576,7 @@ function enableButtons() {
     const loopBtn = $("#loop-btn");
     loopBtn.disabled = false;
     loopBtn.textContent = "Generate Loop";
+    window.studioSetBusy?.(false);
 }
 function showError(msg) {
     const el = $("#error-msg");

@@ -19,10 +19,14 @@ these runtimes in DAWs and on device; the iOS project remains source-only. See [
 
 The browser inference and training interfaces originated with
 [pillopaus-project](https://github.com/pillopaus-project/sa3.cpp). Both original
-commit authorship and visible UI credit are preserved. Run `sa3-server` on port
-8006 and `sa3-train-web` on port 8016 to use the two linked views; see
+commit authorship and visible UI credit are preserved. On Windows, run
+`studio.cmd` after building to start both browser services in one terminal and
+use one browser URL; see
 [server](docs/SERVER.md) and [training web UI](docs/TRAINING_WEB.md).
-The planned sample pad and take workflow is described in the
+The studio now supports waveform playback and selection, crop, WAV upload, Create,
+Continue, Transform, inference model selection, creative and decoder LoRAs, and
+in-app SA3 weight downloads. The planned sample
+pad workflow is described in the
 [studio roadmap](docs/STUDIO_ROADMAP.md).
 
 ## quickstart

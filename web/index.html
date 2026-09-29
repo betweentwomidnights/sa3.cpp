@@ -91,7 +91,7 @@
   .song-entry .song-params { flex:1; font-size:0.75rem; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
   .song-entry .song-actions { display:flex; gap:3px; flex:0 0 auto; }
   #past-songs { max-height:none; }
-  #past-songs:empty::after { content:"No past songs yet"; display:block; font-size:0.82rem; color:var(--muted); padding:12px 0; }
+  #past-songs:empty::after { content:"No past takes yet"; display:block; font-size:0.82rem; color:var(--muted); padding:12px 0; }
   .studio-nav { display:flex; gap:8px; margin: 12px 0 18px; }
   .studio-nav a { color:var(--muted); text-decoration:none; padding:7px 14px; border:1px solid var(--border); border-radius:var(--radius); }
   .studio-nav a[aria-current="page"] { color:var(--text); border-color:var(--accent); background:#38171b; }
@@ -104,8 +104,12 @@
     .param-grid { grid-template-columns: 1fr; }
   }
 </style>
+<link rel="stylesheet" href="studio.css?v=2">
 </head>
 <body>
+
+<div id="studio-root"></div>
+<div id="legacy-root">
 
 <h1><a href="https://github.com/betweentwomidnights/sa3.cpp" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">SA3.CPP</a> <small>studio</small></h1>
 <nav class="studio-nav" aria-label="Studio views"><a href="/" aria-current="page">Inference</a><a id="training-link" href="http://127.0.0.1:8016/">LoRA training</a></nav>
@@ -118,8 +122,8 @@
     <label class="inline-label" style="font-size:0.82rem"><input id="keep-models" type="checkbox"> Keep Models Resident</label>
   </div>
   <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-    <button id="save-config-btn" class="small" title="Save current config">💾 Save</button>
-    <button id="load-config-btn" class="small" title="Load config file">📂 Load</button>
+    <button id="save-config-btn" class="small" title="Save current config">Save preset</button>
+    <button id="load-config-btn" class="small" title="Load config file">Load preset</button>
     <span id="config-filename" style="font-size:0.78rem;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
     <input id="load-config-input" type="file" accept=".json" style="display:none">
   </div>
@@ -147,8 +151,8 @@
     <div>
       <label for="duration">Duration (seconds)</label>
       <div class="range-row">
-        <input id="duration" type="range" min="1" max="300" step="0.5" value="30">
-        <input id="duration-num" type="number" min="1" max="300" step="0.5" value="30">
+        <input id="duration" type="range" min="0.1" max="300" step="0.1" value="30">
+        <input id="duration-num" type="number" min="0.1" max="300" step="0.1" value="30">
       </div>
     </div>
     <div>
@@ -276,20 +280,19 @@
 
 <!-- ─── LoRAs ─────────────────────────────────────────────────────────── -->
 <div class="card">
-  <button class="collapse-toggle collapsed" data-target="lora-section" type="button">LoRA Adapters</button>
+  <button class="collapse-toggle collapsed" data-target="lora-section" type="button">Creative LoRAs</button>
   <div id="lora-section" class="collapse-body collapsed">
   <div class="row gapped">
     <div class="col" style="flex:2">
       <label for="lora-select">Name</label>
       <div class="row" style="gap:6px">
         <select id="lora-select" style="flex:1"></select>
-        <input id="lora-strength" type="number" step="0.05" min="0" style="width:70px" placeholder="str">
         <button id="lora-add-btn" class="small">Add</button>
       </div>
     </div>
   </div>
   <div id="active-loras"></div>
-  <div class="small-note">Click Connect above to load available LoRAs from the server.</div>
+  <div class="small-note">Add a creative adapter, then set its strength. Decoder corrections are in Models.</div>
   </div>
 </div>
 
@@ -297,9 +300,9 @@
 <h2>Generate</h2>
 <div class="card">
   <div class="row gapped">
-    <div class="col"><button id="gen-btn" class="primary" style="width:100%">🎵 Generate</button></div>
+    <div class="col"><button id="gen-btn" class="primary" style="width:100%">Generate</button></div>
     <div class="col">
-      <button id="loop-btn" class="loop" style="width:100%">🔄 Generate Loop</button>
+      <button id="loop-btn" class="loop" style="width:100%">Generate Loop</button>
     </div>
   </div>
   <div class="row gapped" style="margin-top:8px">
@@ -319,7 +322,7 @@
   <hr>
   <div id="result-section" style="display:none">
     <div style="display:flex;align-items:center;gap:8px">
-      <audio id="result-audio" controls style="flex:1;min-width:0"></audio>
+      <audio id="result-audio"></audio>
       <button id="delete-current-btn" class="small danger" style="flex:none">✕ Delete</button>
     </div>
     <div id="seed-info"></div>
@@ -328,12 +331,14 @@
 
 <!-- ─── Past Songs ──────────────────────────────────────────── -->
 <h2 style="display:flex;align-items:center;gap:8px">Past Songs <span id="past-count" class="badge">0</span>
-  <button id="clear-all-btn" class="small danger" style="margin-left:auto">🗑 Clear All</button>
+  <button id="clear-all-btn" class="small danger" style="margin-left:auto">Clear history</button>
 </h2>
 <div id="past-songs" class="card"></div>
 
 <p class="studio-credit">Inference and training web interfaces by <a href="https://github.com/pillopaus-project/sa3.cpp" target="_blank" rel="noopener">pillopaus-project</a>; integrated into sa3.cpp.</p>
+</div>
 <script>document.getElementById('training-link').href = location.protocol + '//' + location.hostname + ':8016/';</script>
-<script src="app.js"></script>
+<script src="app.js?v=6"></script>
+<script src="studio.js?v=9"></script>
 </body>
 </html>

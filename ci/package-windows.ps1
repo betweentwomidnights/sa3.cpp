@@ -167,6 +167,8 @@ $coreDir = Stage "core" @(
     "ggml-cpu-*.dll"
 ) $bin
 Copy-Item (Join-Path $root "LICENSE") $coreDir
+Copy-Item (Join-Path $root "studio.cmd") $coreDir
+Copy-Item (Join-Path $root "studio.ps1") $coreDir
 Copy-Item (Join-Path $root "docs\RUNTIME_RELEASE.md") (Join-Path $coreDir "RUNTIME_README.md")
 Copy-Item (Join-Path $root "docs\THIRD_PARTY_NOTICES.md") (Join-Path $coreDir "THIRD_PARTY_NOTICES.md")
 Copy-Item (Join-Path $root "ggml\LICENSE") (Join-Path $coreDir "LICENSE-ggml.txt")
