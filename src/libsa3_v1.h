@@ -219,6 +219,10 @@ typedef struct {
     float sigma_max;
     double conditioning_seconds_start;
     double conditioning_seconds_total;
+
+    /* SA3 variants only. Zero (default) follows the upstream shift of the already-scaled
+     * init-noise schedule; one selects the former C++ shift-then-scale schedule. */
+    uint32_t legacy_schedule;
 } sa3_request_v1;
 
 /* Library-owned planar float audio plus generation metadata. Set size before
@@ -311,6 +315,10 @@ typedef struct sa3_api_v1 {
 #define SA3_REQUEST_V1_SAT_SIZE \
     ((uint32_t)(offsetof(sa3_request_v1, conditioning_seconds_total) + \
                 sizeof(((sa3_request_v1*)0)->conditioning_seconds_total)))
+/* A request at least this large carries the optional SA3 legacy schedule switch. */
+#define SA3_REQUEST_V1_LEGACY_SCHEDULE_SIZE \
+    ((uint32_t)(offsetof(sa3_request_v1, legacy_schedule) + \
+                sizeof(((sa3_request_v1*)0)->legacy_schedule)))
 #define SA3_RESULT_V1_MIN_SIZE \
     ((uint32_t)(offsetof(sa3_result_v1, mask_overlap_seconds) + sizeof(((sa3_result_v1*)0)->mask_overlap_seconds)))
 #define SA3_LORA_CONVERT_V1_MIN_SIZE \

@@ -41,14 +41,19 @@ The operation describes intent, not the model plumbing:
 | Transform | required | ignored | resampled input length |
 | Continue | required | seconds to add | resampled input + added length |
 
-The library converts seconds to model frames, satisfies SAME-S frame alignment, supplies generation
-or continuation tail headroom, resamples input to 44.1 kHz, performs continuation source splicing,
+The library converts seconds to model frames, satisfies SAME-S frame alignment, supplies generation,
+transform, or continuation tail headroom, resamples input to 44.1 kHz, performs continuation source splicing,
 and trims the planar result to the promised sample count. Frontends should not repeat that logic.
 
 Input may be planar or interleaved. Output V1 audio is always planar at the pipeline's 44.1 kHz
 rate. Transform noise is in `[0, 1]`. The initialized request uses an 0.85 transform noise level,
-six seconds of generation and continuation headroom, resident model loading, the LogSNR schedule,
+six seconds of generation, transform, and continuation headroom, resident model loading, the LogSNR schedule,
 and the tuned loudness and continuation-splice defaults.
+
+For SA3, `legacy_schedule = 1` opts into the former C++ distribution schedule that shifts a
+full-noise curve and scales it by `transform_noise_level`. Zero follows upstream, which shifts
+the curve after applying the transform noise level. The field is read only when
+`request.size >= SA3_REQUEST_V1_LEGACY_SCHEDULE_SIZE`; older V1 callers keep the upstream default.
 
 ## SAT variants
 
