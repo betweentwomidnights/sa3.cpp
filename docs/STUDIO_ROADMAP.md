@@ -1,11 +1,15 @@
 # Studio direction
 
-The current sa3.cpp studio has two linked localhost views: inference on
-`sa3-server` (`:8006`) and LoRA training on `sa3-train-web` (`:8016`). The
-inference view supports prompt generation, audio input for transform and
-continuation, LoRA selection, progress, and a history of generated audio. The
-training view starts and monitors a native trainer subprocess, lists detected
-devices, and lets the user choose a downloaded base model tier. Both views
+The current sa3.cpp studio has one browser shell at `:8006`. Its inference view
+runs on `sa3-server`; its persistent LoRA training view uses `sa3-train-web` at
+`:8016`. The Studio view renders the current audio as a waveform with range
+selection, crop, upload, a single playback transport, and Create, Continue, and
+Transform dialogs. Each dialog includes its relevant advanced generation controls;
+Settings holds model residency and audio processing. The Models view can select
+installed Stable Audio 3 inference models, download published weight sets, and toggle
+compatible decoder corrections independently of creative LoRAs. The training view starts
+and monitors a native trainer subprocess, lists detected devices, and lets the
+user choose a downloaded base model tier. Both views
 originated with [pillopaus-project](https://github.com/pillopaus-project/sa3.cpp);
 the original commits retain that authorship.
 
@@ -13,7 +17,7 @@ The iOS experiment suggests a useful next step for inference: turn short
 generations into a playable kit. This is a later studio milestone, after the
 native runtime release is sound. The smallest useful version would:
 
-1. Let the user select and audition a time range from the current result.
+1. Audition a selected time range independently of the full take.
 2. Save that range to one of several pads, with name, gain, and trim handles.
 3. Play pads by pointer, touch, and keyboard with low latency.
 4. Record pad events into a current take, then play back and export that take.

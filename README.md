@@ -8,21 +8,25 @@ These applications run sa3.cpp outside this repository:
 |---|---|---|
 | [Foundation Keys](https://github.com/betweentwomidnights/foundation-1.2-iplug2) | Foundation-1.2 Keybeds text-to-synth through the Stable Audio Tools backend | [v0.1.2 for Windows and macOS](https://github.com/betweentwomidnights/foundation-1.2-iplug2/releases/tag/v0.1.2) |
 | [SA3 iPlug2 demo](https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo) | Stable Audio 3 VST3 and REAPER extension using the embedded C ABI | [v0.4.0 for Windows](https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo/releases/tag/v0.4.0) |
-| [SA3 Ableton extension](https://github.com/betweentwomidnights/sa3-ableton-extension) | Stable Audio 3 inside Ableton Live using the embedded C ABI | [v0.2.0 for Windows](https://github.com/betweentwomidnights/sa3-ableton-extension/releases/tag/v0.2.0) |
+| [SA3 Ableton extension](https://github.com/betweentwomidnights/sa3-ableton-extension) | Stable Audio 3 inside Ableton Live using the embedded C ABI | [v0.2.0 prerelease for Windows](https://github.com/betweentwomidnights/sa3-ableton-extension/releases/tag/v0.2.0) |
 | [sa3.cpp iOS](https://github.com/betweentwomidnights/sa3.cpp-ios) | Experimental on-device LoRA training and inference on an iPhone 13 | [Source and build instructions](https://github.com/betweentwomidnights/sa3.cpp-ios) (no release yet) |
 
 sa3.cpp runs Stable Audio 3 and the Stable Audio Tools family locally with ggml.
 It provides generation and LoRA training CLIs, an embeddable C ABI, and a local
-browser studio for Stable Audio 3 inference and training. The released applications above show
-these runtimes in DAWs and on device. See [embedding](docs/EMBEDDING.md),
+browser studio for Stable Audio 3 inference and training. The applications above show
+these runtimes in DAWs and on device; the iOS project remains source-only. See [embedding](docs/EMBEDDING.md),
 [training](docs/TRAINING.md), and [runtime packaging](docs/RUNTIME_RELEASE.md).
 
 The browser inference and training interfaces originated with
 [pillopaus-project](https://github.com/pillopaus-project/sa3.cpp). Both original
-commit authorship and visible UI credit are preserved. Run `sa3-server` on port
-8006 and `sa3-train-web` on port 8016 to use the two linked views; see
+commit authorship and visible UI credit are preserved. On Windows, run
+`studio.cmd` after building to start both browser services in one terminal and
+use one browser URL; see
 [server](docs/SERVER.md) and [training web UI](docs/TRAINING_WEB.md).
-The planned sample pad and take workflow is described in the
+The studio now supports waveform playback and selection, crop, WAV upload, Create,
+Continue, Transform, inference model selection, creative and decoder LoRAs, and
+in-app SA3 weight downloads. The planned sample
+pad workflow is described in the
 [studio roadmap](docs/STUDIO_ROADMAP.md).
 
 ## quickstart
@@ -144,63 +148,36 @@ output settings remain available as overrides for advanced runs. Periodic checkp
 restart-safe: `--resume trainer-state-step-N.gguf --steps TOTAL` restores the adapter, AdamW,
 dataset cursor, and stochastic streams exactly.
 
-what works:
+## supported features
 
-- text2music, audio2audio, inpainting / continuation
-- both sizes: medium (same-l) + small-music (same-s)
-- lora / dora / bora adapters (+ xs variants) — runtime strength + multi-adapter blending,
-  applied in weight space (not a static merge)
-- cuda backend + fp16 — medium generation ~3.5s end-to-end on an 8gb laptop 5070, and long-form
-  (sliding-window decoder) scales linearly. see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
-- vulkan backend + fp16 — validated on NVIDIA dGPU, Intel iGPU, and AMD Radeon 780M/RADV,
-  including long-form via `--chunked-decode`. this is the working path on AMD (not HIP).
-  see [docs/VULKAN.md](docs/VULKAN.md).
+| Area | Coverage |
+|---|---|
+| Stable Audio 3 inference | Medium, small-music, and small-sfx; text-to-music, transform, continuation, and inpainting |
+| Adapter inference | LoRA, DoRA, and BoRA families, including XS variants, with runtime strength and multi-adapter composition |
+| Adapter training | Native CLI and browser workflow with resumable checkpoints; see [training](docs/TRAINING.md) and [training benchmarks](docs/TRAINING_BENCHMARKS.md) |
+| Stable Audio Tools models | Stable Audio Open Small, Stable Audio Open 1.0, and Foundation-1 through the optional `SA3_BUILD_SAT` build |
+| Embedding | Stable C ABI V1 for inference and training; see [embedding](docs/EMBEDDING.md) and [C ABI V1](docs/C_ABI_V1.md) |
+| Local browser tools | `sa3-server` for inference and `sa3-train-web` for training; both bind to loopback by default |
+| Compute backends | CPU, CUDA, Vulkan, and Metal; HIP/ROCm remains unvalidated (see [HIP notes](docs/HIP.md)) |
 
-what's next:
+Backend support, validation results, and performance vary by device. See the [CUDA and generation
+benchmarks](docs/BENCHMARKS.md), [Vulkan notes](docs/VULKAN.md), and [Metal notes](docs/METAL.md).
+For adapters, the training guide distinguishes checkpoint-validated types from types that have
+formula-level validation only.
 
-- [x] same-s / stable-audio-3-small-music and sfx
-- [x] audio2audio
-- [x] inpainting
-- [x] loras (lora/dora/bora + xs variants, runtime strength + multi-adapter blending)
-- [x] cuda backend + fp16
-- [x] benchmark generation times and stuff ([docs/BENCHMARKS.md](docs/BENCHMARKS.md))
-- [x] vulkan backend, including iGPU/APU selection ([docs/VULKAN.md](docs/VULKAN.md))
-- [x] vulkan/radv long-form stability — 780M/RADV lost the device around 200s on a monolithic
-  decode; `--chunked-decode` fixes it (thanks @bakamomi for confirming on 780M/RADV)
-- [x] metal backend builds + smoke-tests on Apple M4
-- [ ] hip/rocm for amd — not working: selects the device but gfx1103/780M aborts in HIP
-  code-object loading (#6). on that hardware use the vulkan backend + `--chunked-decode` instead.
-  **[ROCm tester wanted](docs/HIP.md)** 🙏
-- [ ] cross-backend seed reproducibility — the same seed gives a *different-but-valid* result on cuda vs vulkan
-  (tensor-core matmul accumulation, not the RNG — the noise is already deterministic). worth a "precise mode"
-  toggle / philox-style approach (cf. [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp)) so a seed
-  carries across backends for A/B testing
+## credits and references
 
-> note: **generation** handles all eight families. dora-rows and bora are validated against trained
-> checkpoints at cossim 1.0 (kev/keygen for dora-rows; a trained koan bora adapter for bora);
-> dora-cols and the -xs variants are formula-validated only (no trained checkpoint to a/b yet) but
-> share the same apply path.
->
-> **training an adapter here** covers all eight, at 0.8–2.5 s/step on a laptop 5070 (medium, rank
-> 16, the reference 512 frames) — a 2000-step run measured 34 min for dora-rows and 64 min for
-> dora-cols. see [docs/TRAINING.md](docs/TRAINING.md).
+[dada-bots/underfit](https://github.com/dada-bots/underfit) informed the native Stable Audio 3
+LoRA and DoRA training path. [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) was
+another useful C++ reference.
 
-credits:
+[Stability AI/stable-audio-tools](https://github.com/Stability-AI/stable-audio-tools) is the
+original PyTorch implementation for the classic Stable Audio family. The
+[RoyalCities Foundation fork](https://github.com/RoyalCities/RC-stable-audio-tools) and its
+[Foundation-1 model card](https://huggingface.co/RoyalCities/Foundation-1) document the
+Foundation inference path.
 
-[dada-bots/underfit](https://github.com/dada-bots/underfit) is our source of truth for all things
-LoRA/DoRA training with Stable Audio 3.
-
-[acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) was used as a bit of a guide here.
-
-classic stable-audio-tools references:
-
-[Stability AI/stable-audio-tools](https://github.com/Stability-AI/stable-audio-tools) is the original
-PyTorch implementation. [RoyalCities/RC-stable-audio-tools](https://github.com/RoyalCities/RC-stable-audio-tools)
-is the Foundation inference fork, and the original
-[Foundation-1 model card](https://huggingface.co/RoyalCities/Foundation-1) documents the checkpoint.
-
-official upstream repo:
-
-https://github.com/Stability-AI/stable-audio-3
+The official [Stable Audio 3 repository](https://github.com/Stability-AI/stable-audio-3) is the
+reference implementation for Stable Audio 3.
 
 License: MIT

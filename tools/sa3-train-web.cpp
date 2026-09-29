@@ -37,6 +37,7 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <shobjidl.h>
 #else
 #include <fcntl.h>
 #include <signal.h>
@@ -586,11 +587,64 @@ int main(int argc, char** argv) {
         std::lock_guard<std::mutex> lk(g_mtx);
         bool running = g_registry.active_run() != nullptr;
         std::stringstream ss;
-        ss << "{\"status\":\"ok\""
+        ss << "{\"status\":\"ok\",\"studio_api\":2"
            << ",\"train_bin\":\"" << json_escape(g_train_bin) << "\""
            << ",\"running\":" << (running ? "true" : "false")
            << ",\"models_dir\":\"" << json_escape(g_models_dir) << "\"}";
         send_json(res, ss.str());
+    });
+
+    svr.Post("/api/dataset/browse", [](const httplib::Request&, httplib::Response& res) {
+#ifdef _WIN32
+        // The trainer runs on this machine, so the browser must receive a real
+        // filesystem path rather than a browser-only directory upload handle.
+        const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        if (FAILED(init)) {
+            res.status = 500;
+            send_json(res, "{\"error\":\"Could not initialize the folder picker.\"}");
+            return;
+        }
+        IFileDialog* dialog = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                      IID_PPV_ARGS(&dialog));
+        if (SUCCEEDED(hr)) {
+            DWORD options = 0;
+            hr = dialog->GetOptions(&options);
+            if (SUCCEEDED(hr)) hr = dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+            // The request originates from a click in the foreground browser.
+            // Owning the dialog to that window keeps it above the browser and
+            // avoids a separate taskbar entry for the hidden trainer process.
+            if (SUCCEEDED(hr)) hr = dialog->Show(GetForegroundWindow());
+        }
+        if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+            send_json(res, "{\"cancelled\":true}");
+        } else if (SUCCEEDED(hr)) {
+            IShellItem* item = nullptr;
+            hr = dialog->GetResult(&item);
+            PWSTR wide = nullptr;
+            if (SUCCEEDED(hr)) hr = item->GetDisplayName(SIGDN_FILESYSPATH, &wide);
+            if (SUCCEEDED(hr)) {
+                const int bytes = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
+                std::string path(bytes > 0 ? static_cast<size_t>(bytes) : 0, '\0');
+                if (bytes > 0) {
+                    WideCharToMultiByte(CP_UTF8, 0, wide, -1, path.data(), bytes, nullptr, nullptr);
+                    path.pop_back();
+                }
+                send_json(res, "{\"path\":\"" + json_escape(path) + "\"}");
+            }
+            if (wide) CoTaskMemFree(wide);
+            if (item) item->Release();
+        }
+        if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+            res.status = 500;
+            send_json(res, "{\"error\":\"Could not choose a dataset folder.\"}");
+        }
+        if (dialog) dialog->Release();
+        CoUninitialize();
+#else
+        res.status = 501;
+        send_json(res, "{\"error\":\"Folder browsing is available on Windows; enter the dataset path here.\"}");
+#endif
     });
 
     svr.Get("/api/devices", [](const httplib::Request&, httplib::Response& res) {
@@ -609,7 +663,8 @@ int main(int argc, char** argv) {
             const bool cpu = type == GGML_BACKEND_DEVICE_TYPE_CPU;
             const std::string id = cpu ? "cpu" : "gpu:" + std::to_string(gpu_index++);
             body += "{\"id\":\"" + id + "\",\"name\":\"" +
-                    json_escape(ggml_backend_dev_description(dev)) + "\",\"kind\":\"" +
+                    json_escape(ggml_backend_dev_description(dev)) + "\",\"backend\":\"" +
+                    json_escape(ggml_backend_dev_name(dev)) + "\",\"kind\":\"" +
                     (cpu ? "cpu" : type == GGML_BACKEND_DEVICE_TYPE_IGPU ? "igpu" : "gpu") +
                     "\",\"free_bytes\":" + std::to_string(free_bytes) +
                     ",\"total_bytes\":" + std::to_string(total_bytes) + "}";

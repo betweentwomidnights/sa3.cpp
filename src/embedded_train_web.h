@@ -14,11 +14,13 @@ inline const std::string index_html =
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>sa3.cpp studio — LoRA training</title>
+  <script>if (window.top !== window || new URLSearchParams(location.search).has('embedded')) document.documentElement.classList.add('embedded');</script>
   <style>
     :root { --bg:#090909; --panel:#171313; --panel2:#251a1a; --fg:#f4eded; --muted:#b6a5a5;
             --accent:#e23b42; --ok:#6cc58b; --warn:#d9a36c; --bad:#ed6268; --border:#493030; }
     * { box-sizing: border-box; }
     body { margin:0; font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+    button { text-transform:lowercase; }
     header { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
     header h1 { font-size:16px; margin:0; font-weight:600; }
     header .spacer { flex:1; }
@@ -48,16 +50,21 @@ inline const std::string index_html =
     label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
     input, select { width:100%; background:var(--panel2); border:1px solid var(--border); color:var(--fg);
                     padding:8px 10px; border-radius:6px; font-size:13px; }
+    .dataset-field { display:flex; gap:6px; }
+    .dataset-field input { min-width:0; flex:1; }
+    .dataset-field button { width:39px; flex:none; display:grid; place-items:center; padding:6px; background:var(--panel2); border:1px solid var(--border); border-radius:6px; color:var(--fg); cursor:pointer; }
+    .dataset-field button:hover { border-color:var(--accent); }
+    .dataset-field svg { width:20px; height:20px; }
     .row { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
     .actions { display:flex; gap:10px; margin-top:14px; }
     button.sec { background:var(--panel2); color:var(--fg); border:1px solid var(--border); padding:8px 14px; border-radius:6px; cursor:pointer; }
-    button.danger { background:rgba(248,113,113,.15); color:var(--bad); border:1px solid rgba(248,113,113,.35); padding:8px 14px; border-radius:6px; cursor:pointer; }
+    button.danger { background:rg)sa3trainweb") +
+    std::string(R"sa3trainweb(ba(248,113,113,.15); color:var(--bad); border:1px solid rgba(248,113,113,.35); padding:8px 14px; border-radius:6px; cursor:pointer; }
     button.primary { background:#b6222b; color:#fff; border:1px solid var(--accent); padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:600; }
     .stat { background:var(--panel2); border-radius:8px; padding:12px; }
     .stat .k { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
     .stat .v { font-size:20px; font-weight:600; margin-top:3px; }
-    #spark { width:100%; height:90px; background:var(--panel2); border-radius:8px; dis)sa3trainweb") +
-    std::string(R"sa3trainweb(play:block; }
+    #spark { width:100%; height:90px; background:var(--panel2); border-radius:8px; display:block; }
     #log { background:#100d0d; border:1px solid var(--border); border-radius:8px; padding:10px; height:240px;
            overflow-y:auto; font:12px/1.4 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; color:var(--fg); }
     .studio-nav { display:flex; gap:8px; }
@@ -72,6 +79,18 @@ inline const std::string index_html =
     audio { width:100%; margin-top:6px; }
     .hidden { display:none; }
     .err { color:var(--bad); font-size:13px; margin-top:8px; }
+    .embedded header { display:none; }
+    .embedded .layout { height:100vh; }
+    .embedded .main { padding:18px; }
+    .embedded .sidebar #new-btn { display:block; width:100%; margin:12px 0 16px; }
+    .embedded .sidebar #health { display:inline-block; margin-bottom:10px; }
+    @media (max-width:700px) {
+      .layout { display:block; height:auto; min-height:calc(100vh - 49px); }
+      .sidebar { width:100%; max-height:180px; border-right:0; border-bottom:1px solid var(--border); }
+      .main { width:100%; min-width:0; overflow:visible; padding:14px; }
+      .grid { grid-template-columns:minmax(0,1fr); }
+      .embedded .layout { min-height:100vh; }
+    }
   </style>
 </head>
 <body>
@@ -92,10 +111,11 @@ inline const std::string index_html =
       <section id="form-card" class="card hidden">
         <h3>New training run</h3>
         <div class="grid">
-          <div><label>Dataset dir</label><input id="f-dataset" placeholder="/path/to/dataset" /></div>
+          <div><label for="f-dataset">Dataset dir</label><div class="dataset-field"><input id="f-dataset" placeholder="/path/to/dataset" /><button id="browse-dataset" type="button" aria-label="Choose dataset folder" title="Choose dataset folder"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button></div></div>
           <div><label>Model</label><select id="f-model"><option>medium</option><option>small-music</option><option>small-sfx</option></select></div>
           <div><label>Device</label><select id="f-device"><option value="">Auto (best available GPU)</option><option value="cpu">CPU</option></select></div>
-          <div><label>Base model tier</label><select id="f-encoding"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · compact</option><option value="f32">F32</option></select></div>
+          <div><label>Base model tier</label><select id="f-encoding"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · com)sa3trainweb") +
+    std::string(R"sa3trainweb(pact</option><option value="f32">F32</option></select></div>
           <div><label>Adapter type</label><select id="f-adapter"><option>dora-rows</option><option>lora</option><option>dora-cols</option><option>bora</option><option>lora-xs</option><option>dora-rows-xs</option><option>dora-cols-xs</option><option>bora-xs</option></select></div>
           <div><label>Rank</label><input id="f-rank" type="number" value="16" /></div>
           <div><label>Alpha</label><input id="f-alpha" type="number" step="0.1" value="16" /></div>
@@ -110,8 +130,7 @@ inline const std::string index_html =
           <div><label>Output dir (optional)</label><input id="f-out" placeholder="train-runs/… (auto)" /></div>
         </div>
         <p id="device-note" style="color:var(--muted);font-size:12px;margin:8px 0 0;">Detecting devices… Select a tier that is already downloaded for this model.</p>
-        <div class)sa3trainweb") +
-    std::string(R"sa3trainweb(="row" style="margin-top:12px;">
+        <div class="row" style="margin-top:12px;">
           <label style="display:flex;align-items:center;gap:6px;color:var(--fg);"><input id="f-inpaint" type="checkbox" checked style="width:auto;" /> Inpainting loss</label>
         </div>
         <div class="actions">
@@ -152,7 +171,17 @@ inline const std::string index_html =
       <p class="studio-credit">Inference and training web interfaces by <a href="https://github.com/pillopaus-project/sa3.cpp" target="_blank" rel="noopener">pillopaus-project</a>; integrated into sa3.cpp.</p>
     </main>
   </div>
-  <script>document.getElementById('inference-link').href = location.protocol + '//' + location.hostname + ':8006/';</script>
+  <script>
+    document.getElementById('inference-link').href = location.pathname.startsWith('/training/')
+      ? location.origin + '/'
+      : location.protocol + '//' + location.hostname + ':8006/')sa3trainweb") +
+    std::string(R"sa3trainweb(;
+    if (document.documentElement.classList.contains('embedded')) {
+      const sidebar = document.querySelector('.sidebar');
+      sidebar.insertBefore(document.getElementById('new-btn'), document.getElementById('run-list'));
+      sidebar.insertBefore(document.getElementById('health'), document.getElementById('run-list'));
+    }
+  </script>
   <script src="train.js"></script>
 </body>
 </html>
@@ -163,8 +192,9 @@ inline const std::string train_js =
 // sa3-train-web frontend — vanilla JS, no build step (mirrors web/app.js).
 // Talks to the companion's HTTP API: /api/train/*
 
-const API = { host: location.hostname, port: location.port || 8016 };
-const base = `http://${API.host}:${API.port}`;
+const base = location.pathname.startsWith("/training/")
+  ? `${location.origin}/training`
+  : location.origin;
 
 const $ = (id) => document.getElementById(id);
 
@@ -232,12 +262,12 @@ async function refreshDevices() {
     const option = document.createElement("option");
     option.value = device.id;
     const gib = device.total_bytes ? ` · ${(device.total_bytes / 1073741824).toFixed(1)} GiB` : "";
-    option.textContent = `${device.name}${gib}`;
+    option.textContent = `${device.backend || device.id} · ${device.name}${gib}`;
     select.appendChild(option);
   }
   const gpus = result.devices.filter((d) => d.kind !== "cpu");
   note.textContent = gpus.length ?
-    `${gpus.length} GPU device${gpus.length === 1 ? "" : "s"} detected. Select a downloaded GGUF tier for the chosen model.` :
+    `${gpus.length} GPU backend${gpus.length === 1 ? "" : "s"} available. Select a downloaded GGUF tier for the chosen model.` :
     "CPU only. Select a downloaded GGUF tier for the chosen model.";
 }
 
@@ -268,10 +298,10 @@ function renderRunList() {
 }
 
 async function refreshRuns() {
-  const runs = await apiGet("/api/train/runs");
+  const runs = await apiGet("/api/train/r)sa3trainweb") +
+    std::string(R"sa3trainweb(uns");
   if (runs) {
-    stat)sa3trainweb") +
-    std::string(R"sa3trainweb(e.runs = runs;
+    state.runs = runs;
     renderRunList();
     // keep "New training" disabled while a run is active
     const active = runs.find((r) => r.status === "running");
@@ -378,9 +408,9 @@ function drawSpark() {
   const lrLo = lrs.length ? Math.min(...lrs) : 0, lrHi = lrs.length ? Math.max(...lrs) : 1;
   const n = data.length;
   const x = (i) => (n === 1 ? w / 2 : (i / (n - 1)) * w);
-  const yLoss = (v) => h - 6 - ((hi === lo ? 0.5 : (v - lo) / (hi - lo)) * (h - 12));
-  con)sa3trainweb") +
-    std::string(R"sa3trainweb(st yLr = (v) => h - 6 - ((lrHi === lrLo ? 0.5 : (Math.log(v) - Math.log(lrLo)) / (Math.log(lrHi) - Math.log(lrLo))) * (h - 12));
+  const yLoss = (v) => h - 6 - ((hi === lo ? 0.5 : (v - lo) / )sa3trainweb") +
+    std::string(R"sa3trainweb((hi - lo)) * (h - 12));
+  const yLr = (v) => h - 6 - ((lrHi === lrLo ? 0.5 : (Math.log(v) - Math.log(lrLo)) / (Math.log(lrHi) - Math.log(lrLo))) * (h - 12));
 
   // loss line
   ctx.strokeStyle = "#6ea8fe"; ctx.lineWidth = 2; ctx.beginPath();
@@ -473,6 +503,19 @@ $("new-btn").onclick = openForm;
 $("cancel-btn").onclick = () => { closeForm(); $("empty-card").classList.remove("hidden"); };
 $("start-btn").onclick = startTraining;
 $("stop-btn").onclick = stopTraining;
+$("browse-dataset").onclick = async () => {
+  const button = $("browse-dataset");
+  button.disabled = true;
+  $("form-err").textContent = "";
+  try {
+    const result = await apiPost("/api/dataset/browse");
+    if (result?.path) $("f-dataset").value = result.path;
+  } catch (err) {
+    $("form-err").textContent = err.message || "Could not choose a dataset folder.";
+  } finally {
+    button.disabled = false;
+  }
+};
 
 // initial load
 (async () => {

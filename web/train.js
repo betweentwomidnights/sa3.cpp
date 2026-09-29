@@ -2,8 +2,9 @@
 // sa3-train-web frontend — vanilla JS, no build step (mirrors web/app.js).
 // Talks to the companion's HTTP API: /api/train/*
 
-const API = { host: location.hostname, port: location.port || 8016 };
-const base = `http://${API.host}:${API.port}`;
+const base = location.pathname.startsWith("/training/")
+  ? `${location.origin}/training`
+  : location.origin;
 
 const $ = (id) => document.getElementById(id);
 
@@ -71,12 +72,12 @@ async function refreshDevices() {
     const option = document.createElement("option");
     option.value = device.id;
     const gib = device.total_bytes ? ` · ${(device.total_bytes / 1073741824).toFixed(1)} GiB` : "";
-    option.textContent = `${device.name}${gib}`;
+    option.textContent = `${device.backend || device.id} · ${device.name}${gib}`;
     select.appendChild(option);
   }
   const gpus = result.devices.filter((d) => d.kind !== "cpu");
   note.textContent = gpus.length ?
-    `${gpus.length} GPU device${gpus.length === 1 ? "" : "s"} detected. Select a downloaded GGUF tier for the chosen model.` :
+    `${gpus.length} GPU backend${gpus.length === 1 ? "" : "s"} available. Select a downloaded GGUF tier for the chosen model.` :
     "CPU only. Select a downloaded GGUF tier for the chosen model.";
 }
 
@@ -310,6 +311,19 @@ $("new-btn").onclick = openForm;
 $("cancel-btn").onclick = () => { closeForm(); $("empty-card").classList.remove("hidden"); };
 $("start-btn").onclick = startTraining;
 $("stop-btn").onclick = stopTraining;
+$("browse-dataset").onclick = async () => {
+  const button = $("browse-dataset");
+  button.disabled = true;
+  $("form-err").textContent = "";
+  try {
+    const result = await apiPost("/api/dataset/browse");
+    if (result?.path) $("f-dataset").value = result.path;
+  } catch (err) {
+    $("form-err").textContent = err.message || "Could not choose a dataset folder.";
+  } finally {
+    button.disabled = false;
+  }
+};
 
 // initial load
 (async () => {

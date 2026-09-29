@@ -200,6 +200,9 @@ add_executable(sa3-train-web tools/sa3-train-web.cpp
     vendor/cpp-httplib/httplib.cpp
     vendor/yyjson/yyjson.c)
 target_link_libraries(sa3-train-web PRIVATE sa3 Threads::Threads)
+if(WIN32)
+    target_link_libraries(sa3-train-web PRIVATE ole32 uuid user32)
+endif()
 target_include_directories(sa3-train-web PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cpp-httplib
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson
@@ -354,6 +357,10 @@ if(BUILD_TESTING)
     if(Python3_Interpreter_FOUND)
         add_test(NAME sa3-model-artifacts-test
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_artifacts_test.py")
+        add_test(NAME sa3-web-assets-current
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_embedded_web.py" --check)
+        add_test(NAME sa3-train-web-assets-current
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_embedded_train_web.py" --check)
         if(SA3_BUILD_SAT)
             add_test(NAME sa3-sat-oobleck-converter-test
                      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_oobleck_converter_test.py")
@@ -363,6 +370,8 @@ if(BUILD_TESTING)
                      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_t5_converter_test.py")
         endif()
         set_tests_properties(sa3-model-artifacts-test PROPERTIES LABELS "non-gpu;tooling")
+        set_tests_properties(sa3-web-assets-current sa3-train-web-assets-current
+                             PROPERTIES LABELS "non-gpu;web;tooling")
         if(SA3_BUILD_SAT)
             set_tests_properties(sa3-sat-oobleck-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
             set_tests_properties(sa3-sat-dit-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
