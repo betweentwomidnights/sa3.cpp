@@ -80,10 +80,13 @@ int main(void) {
     /* Appended SAT fields: zero means "profile default", and the frozen prefix is unchanged. */
     CHECK(SA3_REQUEST_V1_MIN_SIZE <= SA3_REQUEST_V1_SAT_SIZE);
     CHECK(SA3_REQUEST_V1_SAT_SIZE <= sizeof(request));
+    CHECK(SA3_REQUEST_V1_SAT_SIZE < SA3_REQUEST_V1_LEGACY_SCHEDULE_SIZE);
+    CHECK(SA3_REQUEST_V1_LEGACY_SCHEDULE_SIZE <= sizeof(request));
     CHECK(request.sampler == SA3_SAMPLER_AUTO_V1);
     CHECK(request.sigma_min == 0.0f && request.sigma_max == 0.0f);
     CHECK(request.conditioning_seconds_start == 0.0);
     CHECK(request.conditioning_seconds_total == 0.0);
+    CHECK(request.legacy_schedule == 0);
 
     struct future_request {
         sa3_request_v1 known;

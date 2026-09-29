@@ -649,6 +649,7 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     params.seed             = seed_resolved;
     params.keep_models      = B("keep_models", false);        // FRUGAL default
     params.init_noise_level = (float)D("init_noise_level", 0.85);
+    params.legacy_schedule  = B("legacy_schedule", false);
     params.inpaint_start    = (float)D("inpaint_start", -1.0);
     params.inpaint_end      = (float)D("inpaint_end", -1.0);
     params.duration_padding_sec = (float)D("duration_padding_sec", 6.0);

@@ -60,7 +60,7 @@ bool has_v1_size(const T* value, uint32_t minimum_size) {
 
 /// Both tables publish this. Bumped when the exported surface changes, which is now only ever a
 /// V1 table growing -- the legacy entry points it used to sit beside are gone.
-const char* SA3_CALL v1_runtime_version(void) { return "sa3.cpp libsa3 7 (ABI 1)"; }
+const char* SA3_CALL v1_runtime_version(void) { return "sa3.cpp libsa3 8 (ABI 1)"; }
 
 void SA3_CALL v1_error_init(sa3_error_v1* error) {
     init_v1_struct(error);
@@ -696,6 +696,11 @@ sa3_status_v1 v1_generate_body(sa3_context* context,
     if (context->sat) return generate_sat_v1(context, request, result, error);
 #endif
 
+    const bool legacy_schedule = has_v1_size(request, SA3_REQUEST_V1_LEGACY_SCHEDULE_SIZE)
+        && request->legacy_schedule != 0;
+    if (legacy_schedule && request->legacy_schedule != 1)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
+                       "legacy_schedule must be zero or one");
     V1CallbackBridge bridge{request};
     sa3::GenParams p;
     p.prompt = request->prompt ? request->prompt : "";
@@ -711,6 +716,7 @@ sa3_status_v1 v1_generate_body(sa3_context* context,
     p.target_n_samp = target_samples;
     p.keep_models = request->residency == SA3_RESIDENCY_RESIDENT_V1;
     p.dist_shift = distribution;
+    p.legacy_schedule = legacy_schedule;
     p.ds_p1 = distribution_params[0];
     p.ds_p2 = distribution_params[1];
     p.ds_p3 = distribution_params[2];

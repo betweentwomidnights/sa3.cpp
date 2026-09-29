@@ -173,7 +173,8 @@ inline TransformDuration transform_duration(int source_samples, int samples_per_
 // sigma_max; the upstream ping-pong sampler accepts that first upward step.
 inline std::vector<float> make_sa3_schedule(int steps, float sigma_max, int seq_len,
                                             const std::string& type,
-                                            float p1, float p2, float p3, float p4) {
+                                            float p1, float p2, float p3, float p4,
+                                            bool legacy_schedule = false) {
     if (steps < 1) throw std::invalid_argument("sampling steps must be positive");
     if (!(sigma_max > 0.0f && sigma_max <= 1.0f))
         throw std::invalid_argument("sigma_max must be in (0, 1]");
@@ -181,6 +182,13 @@ inline std::vector<float> make_sa3_schedule(int steps, float sigma_max, int seq_
     std::vector<float> schedule((size_t)steps + 1);
     schedule.front() = sigma_max;
     for (int i = 1; i < steps; ++i) {
+        if (legacy_schedule) {
+            const float normalized_t = 1.0f - (float)i / (float)steps;
+            float warped = dist_shift_warp(type, normalized_t, seq_len, p1, p2, p3, p4);
+            if (!std::isfinite(warped)) warped = normalized_t;
+            schedule[(size_t)i] = std::clamp(sigma_max * warped, 0.0f, schedule[(size_t)i - 1]);
+            continue;
+        }
         const float linear_t = sigma_max * (1.0f - (float)i / (float)steps);
         const float warped = dist_shift_warp(type, linear_t, seq_len, p1, p2, p3, p4);
         if (!std::isfinite(warped) || warped < 0.0f || warped > 1.0f)
@@ -635,6 +643,7 @@ struct GenParams {
     // sa3::dist_shift_warp / dist_shift_defaults). The defaults below are the medium model's
     // LogSNR with rate=0, i.e. byte-identical to the previously-hardcoded schedule.
     std::string dist_shift = "LogSNR";   // "LogSNR" | "Flux" | "Full" | "None"
+    bool legacy_schedule = false;        // opt in to the former shift-then-scale C++ schedule
     float ds_p1 = 2000.0f;  // LogSNR:anchor_length  Flux:min_length  Full:base_shift
     float ds_p2 = -6.2f;    // LogSNR:anchor_logsnr  Flux:max_length  Full:max_shift
     float ds_p3 = 0.0f;     // LogSNR:rate           Flux:alpha_min   Full:min_length
@@ -1117,7 +1126,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // Apply distribution shift to the sigma_max-to-zero schedule, as upstream does.
     // The first shifted interior point can be higher than sigma_max for audio-to-audio.
     std::vector<float> sigmas = sa3::make_sa3_schedule(steps, sigma_max, schedule_frames,
-                                                       dist_shift, ds_p1, ds_p2, ds_p3, ds_p4);
+                                                       dist_shift, ds_p1, ds_p2, ds_p3, ds_p4,
+                                                       params.legacy_schedule);
 
     // ---------- audio2audio: encode init audio -> latent z_init [latent, T] ----------
     // ---------- route this request's adapters ----------

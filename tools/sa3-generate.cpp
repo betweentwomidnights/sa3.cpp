@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
     bool frames_set = false, duration_set = false, threads_set = false;
     double duration_sec = 0.0;
     std::string dist_shift = "LogSNR";                  // schedule warp: LogSNR|Flux|Full|None
+    bool legacy_schedule = false;
     float ds_p1 = 2000.0f, ds_p2 = -6.2f, ds_p3 = 0.0f, ds_p4 = 2.0f;   // LogSNR defaults (per-type, see --dist-shift)
     float duration_padding_sec = 6.0f;                  // text2music schedule headroom (0 = let the model end the piece)
     std::string negative_prompt;                        // CFG negative prompt (only used when cfg_scale != 1)
@@ -81,6 +82,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--out")    && i+1 < argc) wav_p = argv[++i];
         else if (!strcmp(argv[i], "--init")   && i+1 < argc) init_p = argv[++i];
         else if (!strcmp(argv[i], "--init-noise-level") && i+1 < argc) init_noise_level = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--legacy-schedule")) legacy_schedule = true;
         else if (!strcmp(argv[i], "--inpaint-start") && i+1 < argc) inpaint_start = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--inpaint-end")   && i+1 < argc) inpaint_end   = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--lora")   && i+1 < argc) lora_specs.push_back({argv[++i], 1.0f});
@@ -207,7 +209,7 @@ int main(int argc, char** argv) {
                         "                     [--ae-encoding ENC  autoencoder precision; default auto, prefers F32]\n"
                         "                     | --tok <f> --t5 <f> --cond <f> --dit <f> --same <f>)\n"
                         "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
-                        "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--duration-padding SEC]\n"
+                        "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--legacy-schedule] [--duration-padding SEC]\n"
                         "                     [--cfg-scale S [--negative-prompt \"...\"] [--cfg-rescale R] [--cfg-interval min,max] [--apg-scale A] [--cfg-norm-threshold T]] [--out song.wav]\n"
                         "                     continuation splice (with --init + --inpaint-start): [--no-splice] [--mask-overlap SEC] [--splice-xfade SEC] [--no-splice-gain-match]\n");
         return 1;
@@ -284,6 +286,7 @@ int main(int argc, char** argv) {
     params.loudness          = loudness;
     params.splice            = splice;
     params.dist_shift        = dist_shift;
+    params.legacy_schedule   = legacy_schedule;
     params.ds_p1 = ds_p1; params.ds_p2 = ds_p2; params.ds_p3 = ds_p3; params.ds_p4 = ds_p4;
     params.duration_padding_sec = duration_padding_sec;
     params.negative_prompt   = negative_prompt;

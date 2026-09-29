@@ -66,6 +66,12 @@ int main() {
     const float logsnr = p4 - (0.5f * 7.0f / 8.0f) * (p4 - p2);
     expect(std::fabs(transform[1] - 1.0f / (1.0f + std::exp(logsnr))) < 1e-6f,
            "transform LogSNR must match the upstream first interior timestep");
+    const auto legacy = sa3::make_sa3_schedule(8, 0.5f, 128, "LogSNR", p1, p2, p3, p4, true);
+    expect(legacy[1] < legacy[0], "legacy schedule must remain descending");
+    const float old_logsnr = p4 - (7.0f / 8.0f) * (p4 - p2);
+    const float old_first = 0.5f / (1.0f + std::exp(old_logsnr));
+    expect(std::fabs(legacy[1] - old_first) < 1e-6f,
+           "legacy schedule must preserve the former shift-then-scale calculation");
     float x = 0.25f, velocity = 0.1f, noise = -0.4f;
     sa3::sampling::rf_pingpong_step(&x, &velocity, &noise, 1, transform[0], transform[1]);
     const float expected = (1.0f - transform[1]) * (0.25f - transform[0] * velocity)
