@@ -81,3 +81,6 @@ prompts/*.json
 
 # scratch build made by ci/ggml-check.sh
 build-ggml-check/
+
+# clangd index, written into the checkout by editors
+.cache/
