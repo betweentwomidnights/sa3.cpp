@@ -453,6 +453,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                                        have_bases ? &svd_bases : nullptr)) {
             throw std::runtime_error(err);
         }
+        lora.model_variant = cfg.model_variant;
         if (have_bases) svd_bases.free();
 
         const std::string resume_compatibility =

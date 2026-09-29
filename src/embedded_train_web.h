@@ -111,11 +111,12 @@ inline const std::string index_html =
       <section id="form-card" class="card hidden">
         <h3>New training run</h3>
         <div class="grid">
+          <div><label for="f-name">Run / LoRA name</label><input id="f-name" maxlength="64" placeholder="my-style" autocomplete="off" /></div>
           <div><label for="f-dataset">Dataset dir</label><div class="dataset-field"><input id="f-dataset" placeholder="/path/to/dataset" /><button id="browse-dataset" type="button" aria-label="Choose dataset folder" title="Choose dataset folder"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button></div></div>
           <div><label>Model</label><select id="f-model"><option>medium</option><option>small-music</option><option>small-sfx</option></select></div>
-          <div><label>Device</label><select id="f-device"><option value="">Auto (best available GPU)</option><option value="cpu">CPU</option></select></div>
-          <div><label>Base model tier</label><select id="f-encoding"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · com)sa3trainweb") +
-    std::string(R"sa3trainweb(pact</option><option value="f32">F32</option></select></div>
+          <div><label>Device</label><select id="f-device"><option value="">Auto (best available GPU)</option><option value="cpu">CPU</option></select>)sa3trainweb") +
+    std::string(R"sa3trainweb(</div>
+          <div><label>Base model tier</label><select id="f-encoding"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · compact</option><option value="f32">F32</option></select></div>
           <div><label>Adapter type</label><select id="f-adapter"><option>dora-rows</option><option>lora</option><option>dora-cols</option><option>bora</option><option>lora-xs</option><option>dora-rows-xs</option><option>dora-cols-xs</option><option>bora-xs</option></select></div>
           <div><label>Rank</label><input id="f-rank" type="number" value="16" /></div>
           <div><label>Alpha</label><input id="f-alpha" type="number" step="0.1" value="16" /></div>
@@ -158,13 +159,14 @@ inline const std::string index_html =
         <div class="bar" style="height:6px;background:var(--border);border-radius:4px;overflow:hidden;margin-bottom:14px;">
           <i id="d-progress" style="display:block;height:100%;width:0;background:var(--accent);"></i>
         </div>
+        <p id="registration-note" class="small-not)sa3trainweb") +
+    std::string(R"sa3trainweb(e" role="status"></p>
         <h3>Loss / LR</h3>
         <canvas id="spark"></canvas>
         <h3 style="margin-top:16px;">Log</h3>
         <div id="log"></div>
         <h3 style="margin-top:16px;">Artifacts</h3>
-  )sa3trainweb") +
-    std::string(R"sa3trainweb(      <div id="artifacts"></div>
+        <div id="artifacts"></div>
         <div class="actions">
           <button class="danger hidden" id="stop-btn">Stop training</button>
         </div>
@@ -210,6 +212,7 @@ let state = {
   logOffset: 0,
   metricsCache: [],  // [{step,lr,loss,grad_norm}] for sparkline
 };
+const announcedRegistrations = new Set();
 
 // ---- API helpers -----------------------------------------------------------
 async function apiGet(path) {
@@ -293,7 +296,7 @@ function renderRunList() {
     div.className = "run" + (r.id === state.selectedId ? " active" : "");
     const pct = r.max_steps > 0 ? Math.min(100, Math.round((r.step || 0) / r.max_steps * 100)) : 0;
     div.innerHTML =
-      `<div class="top"><span class="ds" title="${escapeHtml(r.dataset)}">${escapeHtml(r.dataset || r.id)}</span>` +
+      `<div class="top"><span class="ds" title="${escapeHtml(r.dataset)}">${escapeHtml(r.name || r.dataset || r.id)}</span>` +
       `<span class="${badgeClass(r.status)}">${r.status}</span></div>` +
       `<div class="meta">${escapeHtml(r.model || "")} · ${escapeHtml(r.adapter_type || "")} · step ${r.step || 0}/${r.max_steps || 0}</div>` +
       `<div class="bar"><i style="width:${pct}%"></i></div>`;
@@ -302,12 +305,18 @@ function renderRunList() {
   }
 }
 
-async function refreshRuns() {
-  const runs = await apiGet("/api/train/r)sa3trainweb") +
-    std::string(R"sa3trainweb(uns");
+async function refre)sa3trainweb") +
+    std::string(R"sa3trainweb(shRuns() {
+  const runs = await apiGet("/api/train/runs");
   if (runs) {
     state.runs = runs;
     renderRunList();
+    for (const run of runs) {
+      if (run.registered_path && !announcedRegistrations.has(run.id)) {
+        announcedRegistrations.add(run.id);
+        if (window.parent !== window) window.parent.postMessage({ type: "sa3-lora-registered", name: run.name }, location.origin);
+      }
+    }
     // keep "New training" disabled while a run is active
     const active = runs.find((r) => r.status === "running");
     $("new-btn").disabled = !!active;
@@ -334,7 +343,10 @@ function findSelected() {
 async function refreshDetail() {
   const r = findSelected();
   if (!r) return;
-  $("detail-title").textContent = `${r.dataset || r.id} · ${r.model} · ${r.adapter_type}`;
+  $("detail-title").textContent = `${r.name || r.dataset || r.id} · ${r.model} · ${r.adapter_type}`;
+  $("registration-note").textContent = r.registered_path ? `Available in Studio as ${r.name}. Training prompts are ready for the dice button.` :
+    r.registration_error ? `LoRA registration failed: ${r.registration_error}` :
+    r.status === "completed" ? "Publishing LoRA and training prompts…" : "";
   $("d-status").textContent = r.status;
   $("d-step").textContent = `${r.step || 0} / ${r.max_steps || 0}`;
   $("d-loss").textContent = (r.loss != null && r.loss !== 0) ? r.loss.toFixed(5) : "—";
@@ -400,7 +412,8 @@ function drawSpark() {
   const canvas = $("spark");
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const w = canvas.clientWidth, h = )sa3trainweb") +
+    std::string(R"sa3trainweb(canvas.clientHeight;
   canvas.width = w * dpr; canvas.height = h * dpr;
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, h);
@@ -413,8 +426,7 @@ function drawSpark() {
   const lrLo = lrs.length ? Math.min(...lrs) : 0, lrHi = lrs.length ? Math.max(...lrs) : 1;
   const n = data.length;
   const x = (i) => (n === 1 ? w / 2 : (i / (n - 1)) * w);
-  const yLoss = (v) => h - 6 - ((hi === lo ? 0.5 : (v - lo) / )sa3trainweb") +
-    std::string(R"sa3trainweb((hi - lo)) * (h - 12));
+  const yLoss = (v) => h - 6 - ((hi === lo ? 0.5 : (v - lo) / (hi - lo)) * (h - 12));
   const yLr = (v) => h - 6 - ((lrHi === lrLo ? 0.5 : (Math.log(v) - Math.log(lrLo)) / (Math.log(lrHi) - Math.log(lrLo))) * (h - 12));
 
   // loss line
@@ -456,7 +468,9 @@ function closeForm() {
 }
 
 async function startTraining() {
+  suggestNameFromDataset();
   const cfg = {
+    name: $("f-name").value.trim(),
     dataset: $("f-dataset").value.trim(),
     model: $("f-model").value,
     device: $("f-device").value,
@@ -476,6 +490,9 @@ async function startTraining() {
     out: $("f-out").value.trim(),
   };
   if (!cfg.dataset) { $("form-err").textContent = "Dataset dir is required."; return; }
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(cfg.name)) {
+    $("form-err").textContent = "Choose a run name using letters, numbers, hyphens, or underscores."; return;
+  }
   if (!Number.isFinite(cfg.duration) || cfg.duration < 1) {
     $("form-err").textContent = "Choose a crop duration of at least one second."; return;
   }
@@ -490,7 +507,8 @@ async function startTraining() {
       await selectRun(res.run_id);
     }
   } catch (err) {
-    $("form-err").textContent = err.message || "start failed";
+    $("for)sa3trainweb") +
+    std::string(R"sa3trainweb(m-err").textContent = err.message || "start failed";
   }
 }
 
@@ -515,19 +533,25 @@ $("cancel-btn").onclick = () => { closeForm(); $("empty-card").classList.remove(
 $("start-btn").onclick = startTraining;
 $("stop-btn").onclick = stopTraining;
 $("f-full-tracks").onchange = () => {
-  $("crop-duration-field").classList.toggle("hidden", $("f-full-tracks").checke)sa3trainweb") +
-    std::string(R"sa3trainweb(d);
+  $("crop-duration-field").classList.toggle("hidden", $("f-full-tracks").checked);
 };
 $("f-loudness").onchange = () => {
   $("loudness-target-field").classList.toggle("hidden", !$("f-loudness").checked);
 };
+function suggestNameFromDataset() {
+  if ($("f-name").value.trim()) return;
+  const folder = $("f-dataset").value.trim().replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
+  $("f-name").value = folder.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+}
+$("f-dataset").addEventListener("change", suggestNameFromDataset);
+$("f-dataset").addEventListener("blur", suggestNameFromDataset);
 $("browse-dataset").onclick = async () => {
   const button = $("browse-dataset");
   button.disabled = true;
   $("form-err").textContent = "";
   try {
     const result = await apiPost("/api/dataset/browse");
-    if (result?.path) $("f-dataset").value = result.path;
+    if (result?.path) { $("f-dataset").value = result.path; suggestNameFromDataset(); }
   } catch (err) {
     $("form-err").textContent = err.message || "Could not choose a dataset folder.";
   } finally {

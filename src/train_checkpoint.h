@@ -60,6 +60,8 @@ inline bool write_train_lora_gguf(const TrainLoraState& state, const std::string
     gguf_set_val_str(g, "general.architecture", "sa3-lora");
     gguf_set_val_str(g, "general.name", "sa3 native trained adapter");
     gguf_set_val_str(g, "lora.adapter_type", state.adapter_type.c_str());
+    gguf_set_val_str(g, "lora.target", "dit");
+    if (!state.model_variant.empty()) gguf_set_val_str(g, "lora.base_model", state.model_variant.c_str());
     gguf_set_val_u32(g, "lora.rank", (uint32_t)state.rank);
     gguf_set_val_f32(g, "lora.alpha", state.alpha);
     gguf_set_val_u32(g, "lora.n_targets", (uint32_t)state.params.size());
@@ -115,6 +117,8 @@ inline bool load_train_lora_gguf(const std::string& path, TrainLoraState& state,
         int ti = gguf_find_key(g.gguf, "lora.adapter_type");
         state = TrainLoraState{};
         state.adapter_type = ti < 0 ? "lora" : gguf_get_val_str(g.gguf, ti);
+        const int mi = gguf_find_key(g.gguf, "lora.base_model");
+        if (mi >= 0) state.model_variant = gguf_get_val_str(g.gguf, mi);
         state.rank = (int)g.u32("lora.rank");
         state.alpha = g.f32("lora.alpha");
         std::map<std::string, TrainLoraParam> by_stem;

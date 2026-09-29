@@ -20,6 +20,7 @@ int main() {
     int fails = 0;
     sa3::TrainLoraState st;
     st.adapter_type = "lora";
+    st.model_variant = "small-music";
     st.rank = 2;
     st.alpha = 4.0f;
     sa3::TrainLoraParam p;
@@ -47,6 +48,7 @@ int main() {
     err.clear();
     fails += expect(sa3::load_train_lora_gguf(out.string(), resumed, err), err.c_str());
     fails += expect(resumed.adapter_type == "lora", "resumed type");
+    fails += expect(resumed.model_variant == "small-music", "resumed model variant");
     fails += expect(resumed.rank == 2 && resumed.params.size() == 1, "resumed shape metadata");
     fails += expect(resumed.params[0].target.stem == "dit.0.self.qkv", "resumed stem");
     fails += expect(resumed.params[0].lora_A == p.lora_A, "resumed A values");

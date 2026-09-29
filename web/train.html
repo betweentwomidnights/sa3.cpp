@@ -100,6 +100,7 @@
       <section id="form-card" class="card hidden">
         <h3>New training run</h3>
         <div class="grid">
+          <div><label for="f-name">Run / LoRA name</label><input id="f-name" maxlength="64" placeholder="my-style" autocomplete="off" /></div>
           <div><label for="f-dataset">Dataset dir</label><div class="dataset-field"><input id="f-dataset" placeholder="/path/to/dataset" /><button id="browse-dataset" type="button" aria-label="Choose dataset folder" title="Choose dataset folder"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button></div></div>
           <div><label>Model</label><select id="f-model"><option>medium</option><option>small-music</option><option>small-sfx</option></select></div>
           <div><label>Device</label><select id="f-device"><option value="">Auto (best available GPU)</option><option value="cpu">CPU</option></select></div>
@@ -146,6 +147,7 @@
         <div class="bar" style="height:6px;background:var(--border);border-radius:4px;overflow:hidden;margin-bottom:14px;">
           <i id="d-progress" style="display:block;height:100%;width:0;background:var(--accent);"></i>
         </div>
+        <p id="registration-note" class="small-note" role="status"></p>
         <h3>Loss / LR</h3>
         <canvas id="spark"></canvas>
         <h3 style="margin-top:16px;">Log</h3>

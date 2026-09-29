@@ -55,6 +55,10 @@ body { max-width:none; padding:0; margin:0; }
 .song-entry audio { min-width:150px; flex:1; }
 .studio-shell > .studio-credit { margin:24px 0 0; }
 #studio-training-frame { width:100%; height:calc(100vh - 145px); min-height:580px; border:1px solid var(--border); border-radius:12px; background:var(--bg); }
+.prompt-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.prompt-heading label { margin:0; }
+#prompt-dice { width:34px; height:34px; display:grid; place-items:center; padding:6px; }
+#prompt-dice svg { width:19px; height:19px; }
 .studio-model-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; }
 .studio-model-card { background:#211818; border:1px solid var(--border); border-radius:10px; padding:16px; }
 .studio-model-card strong { display:block; margin-bottom:5px; }

@@ -15,6 +15,7 @@ let state = {
   logOffset: 0,
   metricsCache: [],  // [{step,lr,loss,grad_norm}] for sparkline
 };
+const announcedRegistrations = new Set();
 
 // ---- API helpers -----------------------------------------------------------
 async function apiGet(path) {
@@ -98,7 +99,7 @@ function renderRunList() {
     div.className = "run" + (r.id === state.selectedId ? " active" : "");
     const pct = r.max_steps > 0 ? Math.min(100, Math.round((r.step || 0) / r.max_steps * 100)) : 0;
     div.innerHTML =
-      `<div class="top"><span class="ds" title="${escapeHtml(r.dataset)}">${escapeHtml(r.dataset || r.id)}</span>` +
+      `<div class="top"><span class="ds" title="${escapeHtml(r.dataset)}">${escapeHtml(r.name || r.dataset || r.id)}</span>` +
       `<span class="${badgeClass(r.status)}">${r.status}</span></div>` +
       `<div class="meta">${escapeHtml(r.model || "")} · ${escapeHtml(r.adapter_type || "")} · step ${r.step || 0}/${r.max_steps || 0}</div>` +
       `<div class="bar"><i style="width:${pct}%"></i></div>`;
@@ -112,6 +113,12 @@ async function refreshRuns() {
   if (runs) {
     state.runs = runs;
     renderRunList();
+    for (const run of runs) {
+      if (run.registered_path && !announcedRegistrations.has(run.id)) {
+        announcedRegistrations.add(run.id);
+        if (window.parent !== window) window.parent.postMessage({ type: "sa3-lora-registered", name: run.name }, location.origin);
+      }
+    }
     // keep "New training" disabled while a run is active
     const active = runs.find((r) => r.status === "running");
     $("new-btn").disabled = !!active;
@@ -138,7 +145,10 @@ function findSelected() {
 async function refreshDetail() {
   const r = findSelected();
   if (!r) return;
-  $("detail-title").textContent = `${r.dataset || r.id} · ${r.model} · ${r.adapter_type}`;
+  $("detail-title").textContent = `${r.name || r.dataset || r.id} · ${r.model} · ${r.adapter_type}`;
+  $("registration-note").textContent = r.registered_path ? `Available in Studio as ${r.name}. Training prompts are ready for the dice button.` :
+    r.registration_error ? `LoRA registration failed: ${r.registration_error}` :
+    r.status === "completed" ? "Publishing LoRA and training prompts…" : "";
   $("d-status").textContent = r.status;
   $("d-step").textContent = `${r.step || 0} / ${r.max_steps || 0}`;
   $("d-loss").textContent = (r.loss != null && r.loss !== 0) ? r.loss.toFixed(5) : "—";
@@ -259,7 +269,9 @@ function closeForm() {
 }
 
 async function startTraining() {
+  suggestNameFromDataset();
   const cfg = {
+    name: $("f-name").value.trim(),
     dataset: $("f-dataset").value.trim(),
     model: $("f-model").value,
     device: $("f-device").value,
@@ -279,6 +291,9 @@ async function startTraining() {
     out: $("f-out").value.trim(),
   };
   if (!cfg.dataset) { $("form-err").textContent = "Dataset dir is required."; return; }
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(cfg.name)) {
+    $("form-err").textContent = "Choose a run name using letters, numbers, hyphens, or underscores."; return;
+  }
   if (!Number.isFinite(cfg.duration) || cfg.duration < 1) {
     $("form-err").textContent = "Choose a crop duration of at least one second."; return;
   }
@@ -323,13 +338,20 @@ $("f-full-tracks").onchange = () => {
 $("f-loudness").onchange = () => {
   $("loudness-target-field").classList.toggle("hidden", !$("f-loudness").checked);
 };
+function suggestNameFromDataset() {
+  if ($("f-name").value.trim()) return;
+  const folder = $("f-dataset").value.trim().replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
+  $("f-name").value = folder.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+}
+$("f-dataset").addEventListener("change", suggestNameFromDataset);
+$("f-dataset").addEventListener("blur", suggestNameFromDataset);
 $("browse-dataset").onclick = async () => {
   const button = $("browse-dataset");
   button.disabled = true;
   $("form-err").textContent = "";
   try {
     const result = await apiPost("/api/dataset/browse");
-    if (result?.path) $("f-dataset").value = result.path;
+    if (result?.path) { $("f-dataset").value = result.path; suggestNameFromDataset(); }
   } catch (err) {
     $("form-err").textContent = err.message || "Could not choose a dataset folder.";
   } finally {

@@ -36,6 +36,7 @@ struct TrainLoraParam {
 
 struct TrainLoraState {
     std::string adapter_type = "lora";
+    std::string model_variant;  // medium | small-music | small-sfx, written to GGUF for discovery
     int rank = 0;
     float alpha = 1.0f;
     std::vector<TrainLoraParam> params;

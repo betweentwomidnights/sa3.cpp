@@ -145,7 +145,7 @@ inline const std::string index_html =
 <div class="card">
   <div class="row gapped">
     <div class="col" style="flex:3">
-      <label for="prompt">Prompt</label>
+      <div class="prompt-heading"><label for="prompt">Prompt</label><button id="prompt-dice" type="button" class="small" title="Use a random prompt from the selected LoRA's training captions" aria-label="Random prompt from selected LoRA"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="8" cy="8" r="1.3" fill="currentColor"/><circle cx="16" cy="8" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="8" cy="16" r="1.3" fill="currentColor"/><circle cx="16" cy="16" r="1.3" fill="currentColor"/></svg></button></div>
       <textarea id="prompt" rows="4" placeholder="e.g. upbeat funk groove with slap bass, bright horns, tight drums">upbeat funk groove with slap bass, bright horns, tight drums</textarea>
     </div>
   </div>
@@ -200,7 +200,8 @@ inline const std::string index_html =
       <div><label for="apg-scale">APG Scale</label><input id="apg-scale" type="number" step="0.05" min="0" max="1" value="1.0"></div>
       <div><label for="cfg-norm-threshold">CFG Norm Threshold</label><input id="cfg-norm-threshold" type="number" step="0.1" min="0" value="0.0"></div>
       <div><label for="cfg-interval-min">CFG Interval Min</label><input id="cfg-interval-min" type="number" step="0.05" min="0" max="1" value="0.0"></div>
-      <div><label for="cfg-interval-max">CFG Interval Max</label><input id="cfg-interval-max" type="number" step="0.05" min="0" max="1" value="1.0"></div>
+      <div><label for="cfg-interval-max">CFG Interval Max</label><input id="cfg-interval-max" type="number" step="0.05" min="0" max="1" value="1.0">)sa3web") +
+    std::string(R"sa3web(</div>
     </div>
   </div>
 </div>
@@ -218,8 +219,7 @@ inline const std::string index_html =
           <option value="None">None</option>
         </select>
       </div>
-   )sa3web") +
-    std::string(R"sa3web(   <div class="col"><label for="dsp1">p1</label><input id="dsp1" type="number" step="any"></div>
+      <div class="col"><label for="dsp1">p1</label><input id="dsp1" type="number" step="any"></div>
       <div class="col"><label for="dsp2">p2</label><input id="dsp2" type="number" step="any"></div>
       <div class="col"><label for="dsp3">p3</label><input id="dsp3" type="number" step="any"></div>
       <div class="col"><label for="dsp4">p4</label><input id="dsp4" type="number" step="any"></div>
@@ -264,7 +264,8 @@ inline const std::string index_html =
   <div class="param-grid">
     <div style="grid-column:1/-1">
       <div class="row" style="gap:6px;align-items:end">
-        <div style="flex:3">
+      )sa3web") +
+    std::string(R"sa3web(  <div style="flex:3">
           <label for="init-audio-select">Active init audio (audio-in/)</label>
           <div class="row" style="gap:6px">
             <select id="init-audio-select" style="flex:1">
@@ -276,8 +277,7 @@ inline const std::string index_html =
         <div style="flex:2">
           <label for="init-audio-upload">Upload WAV</label>
           <div class="row" style="gap:6px">
-            <input id="init-audio-upload" type="file" accept=")sa3web") +
-    std::string(R"sa3web(.wav,.WAV" style="flex:1;padding:4px 0">
+            <input id="init-audio-upload" type="file" accept=".wav,.WAV" style="flex:1;padding:4px 0">
             <button id="init-audio-upload-btn" class="small">Upload</button>
           </div>
         </div>
@@ -349,7 +349,8 @@ inline const std::string index_html =
 </h2>
 <div id="past-songs" class="card"></div>
 
-<p class="studio-credit">Inference and training web interfaces by <a href="https://github.com/pillopaus-project/sa3.cpp" target="_blank" rel="noopener">pillopaus-project</a>; integrated into sa3.cpp.</p>
+<p class="studio-credit">Inference and training web interfaces by <a )sa3web") +
+    std::string(R"sa3web(href="https://github.com/pillopaus-project/sa3.cpp" target="_blank" rel="noopener">pillopaus-project</a>; integrated into sa3.cpp.</p>
 </div>
 <script>document.getElementById('training-link').href = location.protocol + '//' + location.hostname + ':8016/';</script>
 <script src="app.js?v=6"></script>
@@ -380,6 +381,7 @@ const DIST_SHIFT_LABELS = {
 const server = { host: "127.0.0.1", port: 8006 };
 let loraList = [];
 let activeLoras = [];
+let currentModelVariant = "medium";
 let pastSongs = [];
 let lastGenParams = null;
 let lastGenSeed = 0;
@@ -468,8 +470,8 @@ function readForm() {
         dist_shift_params: dsParams,
         duration_padding_sec: num("#duration-padding"),
         keep_models: isChecked("#keep-models"),
-        loras: [...activeLoras, ...(window.st)sa3web") +
-    std::string(R"sa3web(udioDecoderAdapter?.() || [])],
+        l)sa3web") +
+    std::string(R"sa3web(oras: [...activeLoras, ...(window.studioDecoderAdapter?.() || [])],
         encode_chunk_size: int("#encode-chunk-size"),
         encode_overlap: int("#encode-overlap"),
         decode_chunk_size: int("#decode-chunk-size"),
@@ -493,6 +495,7 @@ async function checkHealth() {
     statusEl.style.display = "";
     try {
         const h = await apiGet("/health");
+        currentModelVariant = h.model;
         statusEl.textContent = "✓ Connected";
         statusEl.className = "ok";
         modelInfo.textContent = `${h.model} / ${h.encoding} ${h.loaded ? "(loaded)" : "(unloaded)"}`;
@@ -533,7 +536,7 @@ async function loadLoras() {
     try {
         const r = await apiGet("/loras");
         loraList = r.loras;
-        activeLoras = activeLoras.filter((l) => !loraList.some((known) => known.name === l.name && known.target === "decoder"));
+        activeLoras = activeLoras.filter((l) => loraList.some((known) => known.name === l.name && known.target === "dit"));
         renderLoraDropdown();
         window.studioLorasReady?.();
     }
@@ -541,9 +544,29 @@ async function loadLoras() {
         // server not connected yet
     }
 }
+async function randomPrompt() {
+    const button = $("#prompt-dice");
+    button.disabled = true;
+    try {
+        const query = new URLSearchParams();
+        for (const lora of activeLoras) query.append("lora", lora.name);
+        const result = await apiGet(`/prompts${query.size ? "?" + query : ""}`);
+        const dice = result.prompts?.dice || {};
+        const bucket = currentModelVariant === "small-sfx" ? "drums" : "instrumental";
+        const pool = dice[bucket]?.length ? dice[bucket] : Object.values(dice).flat();
+        if (!pool.length) throw new Error("No prompts are available for this model.");
+        setVal("#prompt", pool[Math.floor(Math.random() * pool.length)]);
+        showError("");
+    } catch (error) {
+        showError(`Could not load prompts: ${error.message}`);
+    } finally {
+        button.disabled = false;
+    }
+}
 function renderLoraDropdown() {
     const sel = $("#lora-select");
-    sel.innerHTML = '<option value="">— select —</option>';
+    sel.i)sa3web") +
+    std::string(R"sa3web(nnerHTML = '<option value="">— select —</option>';
     for (const l of loraList.filter((item) => item.target !== "decoder" && item.target !== "encoder")) {
         const opt = document.createElement("option");
         opt.value = l.name;
@@ -571,8 +594,7 @@ function renderActiveLoras() {
     const container = $("#active-loras");
     container.innerHTML = "";
     for (const l of activeLoras) {
-        const row = document.createElement("div"); row.classNam)sa3web") +
-    std::string(R"sa3web(e = "studio-lora-row";
+        const row = document.createElement("div"); row.className = "studio-lora-row";
         const name = document.createElement("span"); name.textContent = l.name;
         const slider = document.createElement("input"); slider.type = "range"; slider.min = "0"; slider.max = "2"; slider.step = "0.05"; slider.value = String(l.strength);
         slider.setAttribute("aria-label", `${l.name} strength`);
@@ -648,7 +670,8 @@ function onDistShiftChange() {
         if (input.dataset.userEdited === undefined) {
             input.value = String(defaults[i]);
         }
-        input.disabled = type === "None";
+        inp)sa3web") +
+    std::string(R"sa3web(ut.disabled = type === "None";
     }
 }
 // ─── Past Songs ────────────────────────────────────────────────────────────
@@ -669,8 +692,7 @@ function renderPastSongs() {
         const div = document.createElement("div");
         div.className = "song-entry";
         div.innerHTML = `<span class="song-name" title="${escapeHtml(s.prompt || "")}">${escapeHtml((s.prompt || "(no prompt)").slice(0, 30))}</span>
-      <span class=")sa3web") +
-    std::string(R"sa3web(song-params">seed: ${s.seed}</span>
+      <span class="song-params">seed: ${s.seed}</span>
       <span class="song-actions">
         <button class="small open-song-btn" data-index="${i}" title="Open in waveform">Open</button>
         <button class="small load-params-btn" data-index="${i}" title="Open audio and restore generation settings">Reuse</button>
@@ -739,7 +761,8 @@ function loadParamsFromSnapshot(params) {
     set("#cfg-norm-threshold", params.cfg_norm_threshold);
     set("#cfg-interval-min", params.cfg_interval_min);
     set("#cfg-interval-max", params.cfg_interval_max);
-    set("#dist-shift", params.dist_shift);
+    set("#dist-shift", params.dist_shift);)sa3web") +
+    std::string(R"sa3web(
     const dsp = params.dist_shift_params;
     if (dsp) {
         for (let i = 0; i < 4 && i < dsp.length; i++) {
@@ -761,8 +784,7 @@ function loadParamsFromSnapshot(params) {
     set("#latent-adapt-min", params.latent_adapt_min);
     set("#latent-adapt-max", params.latent_adapt_max);
     const pndb = params.peak_normalize_db;
-    set(")sa3web") +
-    std::string(R"sa3web(#peak-normalize-db", pndb != null && pndb !== false ? String(pndb) : "");
+    set("#peak-normalize-db", pndb != null && pndb !== false ? String(pndb) : "");
     const lcdb = params.limiter_ceiling_db;
     set("#limiter-ceiling-db", lcdb != null && lcdb !== false ? String(lcdb) : "");
     set("#limiter-knee", params.limiter_knee);
@@ -779,7 +801,7 @@ function loadParamsFromSnapshot(params) {
     // restore LoRAs
     const loras = params.loras;
     if (loras) {
-        activeLoras = loras.filter((l) => !loraList.some((known) => known.name === l.name && known.target === "decoder")).map((l) => ({ ...l }));
+        activeLoras = loras.filter((l) => loraList.some((known) => known.name === l.name && known.target === "dit")).map((l) => ({ ...l }));
         renderActiveLoras();
     }
 }
@@ -862,7 +884,8 @@ async function generateLoop(overrides = {}) {
     }
 }
 function startPolling(sessionId) {
-    const progressBar = $("#progress-bar");
+    const progress)sa3web") +
+    std::string(R"sa3web(Bar = $("#progress-bar");
     const progressLabel = $("#progress-label");
     const resultAudio = $("#result-audio");
     const resultSection = $("#result-section");
@@ -881,8 +904,7 @@ function startPolling(sessionId) {
                 progressLabel.textContent = "queued…";
             }
             else if (r.status === "generating" || r.status === "encoding" || r.status === "decoding" || r.status === "finalizing") {
-                progressLabel.textContent = `${r.status} step ${r.step}/${r.total_steps} (${r.progres)sa3web") +
-    std::string(R"sa3web(s}%)`;
+                progressLabel.textContent = `${r.status} step ${r.step}/${r.total_steps} (${r.progress}%)`;
             }
             else if (r.status === "completed") {
                 progressLabel.textContent = `completed (${r.progress}%)`;
@@ -966,7 +988,8 @@ function readFormAsConfig() {
         duration_padding_sec: num("#duration-padding"),
         cfg_scale: num("#cfg-scale"),
         cfg_rescale: num("#cfg-rescale"),
-        apg_scale: num("#apg-scale"),
+      )sa3web") +
+    std::string(R"sa3web(  apg_scale: num("#apg-scale"),
         cfg_norm_threshold: num("#cfg-norm-threshold"),
         cfg_interval_min: num("#cfg-interval-min"),
         cfg_interval_max: num("#cfg-interval-max"),
@@ -983,8 +1006,7 @@ function readFormAsConfig() {
         latent_adapt_min: num("#latent-adapt-min"),
         latent_adapt_max: num("#latent-adapt-max"),
         peak_normalize_db: pnRaw.length > 0 ? num("#peak-normalize-db") : null,
-        limiter_ceiling_db: lcRaw.length > 0)sa3web") +
-    std::string(R"sa3web( ? num("#limiter-ceiling-db") : null,
+        limiter_ceiling_db: lcRaw.length > 0 ? num("#limiter-ceiling-db") : null,
         limiter_knee: num("#limiter-knee"),
         init_path: val("#init-path").trim(),
         init_noise_level: num("#init-noise-level"),
@@ -1039,7 +1061,7 @@ function applyConfig(cfg) {
     setVal("#inpaint-end", cfg.inpaint_end);
     setVal("#loop-bpm", cfg.loop_bpm);
     setVal("#loop-bars", cfg.loop_bars);
-    activeLoras = cfg.loras.map((l) => ({ ...l }));
+    activeLoras = cfg.loras.filter((l) => loraList.some((known) => known.name === l.name && known.target === "dit")).map((l) => ({ ...l }));
     renderActiveLoras();
 }
 function saveConfig() {
@@ -1050,7 +1072,8 @@ function saveConfig() {
     const finalName = name.endsWith(CONFIG_EXT) ? name : name + CONFIG_EXT;
     currentConfigFilename = finalName;
     const cfg = readFormAsConfig();
-    const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify(cfg, null, 2)], )sa3web") +
+    std::string(R"sa3web({ type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -1083,8 +1106,7 @@ function onConfigFileSelected(e) {
             const fnEl = $("#config-filename");
             if (fnEl)
                 fnEl.textContent = currentConfigFilename;
-            sho)sa3web") +
-    std::string(R"sa3web(wError("");
+            showError("");
         }
         catch {
             showError("Invalid config file");
@@ -1124,6 +1146,7 @@ document.addEventListener("DOMContentLoaded", () => {
     $("#gen-btn").addEventListener("click", generate);
     $("#loop-btn").addEventListener("click", generateLoop);
     $("#lora-add-btn").addEventListener("click", addLora);
+    $("#prompt-dice").addEventListener("click", randomPrompt);
     $("#dist-shift").addEventListener("change", onDistShiftChange);
     $("#save-config-btn").addEventListener("click", saveConfig);
     $("#load-config-btn").addEventListener("click", loadConfig);
@@ -1231,15 +1254,16 @@ function studioShowView(name) {
     if (!frame.src) frame.src = "/training/?embedded=1";
   }
   if (name === "models") studioRefreshModels();
+  if (name === "studio") loadLoras();
   location.hash = name === "studio" ? "" : name;
 }
 
 function studioDuration() { return studio.buffer?.duration || 0; }
 function studioRange() { const d = studioDuration(); return [studio.selection[0]*d, studio.selection[1]*d]; }
 function studioTime(sec) { const s = Math.max(0, sec); return `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}.${String(Math.floor(s%1*100)).padStart(2,"0")}`; }
-function studioUpdateTakeControls() {
-  const has = !!stud)sa3web") +
-    std::string(R"sa3web(io.buffer;
+function studioUpdat)sa3web") +
+    std::string(R"sa3web(eTakeControls() {
+  const has = !!studio.buffer;
   for (const op of ["continue", "transform"]) {
     const button=document.querySelector(`[data-studio-operation="${op}"]`);
     button.hidden=!has;
@@ -1307,8 +1331,8 @@ function studioDrawWaveform() {
     const left=studio.selection[0]*w,right=studio.selection[1]*w;
     ctx.fillStyle="rgba(0,0,0,.48)";ctx.fillRect(0,0,left,h);ctx.fillRect(right,0,w-right,h);
     ctx.strokeStyle="#f4eded";ctx.lineWidth=2*scale;
-    for(const x of [left,right]){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();ctx.fillStyle="#f4eded";ctx.fillRect(Math.max(0,x-4*scale),h/2-12*scale,8*)sa3web") +
-    std::string(R"sa3web(scale,24*scale);}
+    for(const x of [left,right]){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();ctx.fillStyle="#f4eded";ctx.fillRect)sa3web") +
+    std::string(R"sa3web((Math.max(0,x-4*scale),h/2-12*scale,8*scale,24*scale);}
   }
   if(Number.isFinite(played)){ctx.strokeStyle="#ffffff";ctx.lineWidth=1.5*scale;ctx.beginPath();ctx.moveTo(played,0);ctx.lineTo(played,h);ctx.stroke();}
 }
@@ -1370,9 +1394,9 @@ function studioOpenOperation(operation) {
   studioEl("studio-dialog-error").hidden=true;
   studioEl("studio-dialog-title").textContent=operation;
   studioEl("studio-dialog-submit").textContent=operation[0].toUpperCase()+operation.slice(1);
-  const descriptions={create:"Start a new take from a prompt.",continue:"Extend the selected audio with a new passage.",transform:"Reimagine the selected audio while keeping its length."};
-  studioEl("studio-dialog)sa3web") +
-    std::string(R"sa3web(-description").textContent=descriptions[operation];
+  const descriptions={create:"Start a new take from a prompt.",continue:"Extend the selected audio with a new passage.",transform:"Reimagine the selected audio while keeping it)sa3web") +
+    std::string(R"sa3web(s length."};
+  studioEl("studio-dialog-description").textContent=descriptions[operation];
   studioEl("studio-loop-wrap").hidden=operation!=="create";
   studioEl("studio-noise-wrap").hidden=operation!=="transform";
   studioEl("studio-tail-wrap").hidden=operation==="transform";
@@ -1441,9 +1465,9 @@ async function studioRefreshModels() {
     const data=await apiGet("/models/catalog");
     studio.activeModel=data.models.find(model=>model.active)?.variant || "";
     container.innerHTML="";
-    for(const model of data.models) {
-      const c)sa3web") +
-    std::string(R"sa3web(ard=document.createElement("div");card.className="studio-model-card";
+    for(const)sa3web") +
+    std::string(R"sa3web( model of data.models) {
+      const card=document.createElement("div");card.className="studio-model-card";
       const title=document.createElement("strong");title.textContent=model.name;
       const summary=document.createElement("p");summary.textContent=model.description;
       const status=document.createElement("div");status.className="status";status.textContent=model.installed.length?`Installed: ${model.installed.join(", ")}`:"No complete set installed";
@@ -1494,8 +1518,8 @@ async function studioStartDecoderDownload() {
   const status=studioEl("studio-decoder-status"),button=studioEl("studio-download-decoder");button.disabled=true;
   try{
     const job=await apiPost("/models/decoder/download",{});
-    status.textContent="Preparing decoder c)sa3web") +
-    std::string(R"sa3web(orrection…";
+    s)sa3web") +
+    std::string(R"sa3web(tatus.textContent="Preparing decoder correction…";
     const poll=async()=>{
       try{
         const s=await apiGet(`/models/download/${job.id}`);
@@ -1553,8 +1577,8 @@ function studioWire() {
     studioUpdateTakeControls();studioDrawWaveform();
   };
   studioEl("studio-download").onclick=()=>{if(!studio.audioUrl)return;const a=document.createElement("a");a.href=studio.audioUrl;a.download=`sa3-take-${Date.now()}.wav`;a.click();};
-  studioEl("studio-clear").onclick=()=>{deleteCurrentSong();studioClearT)sa3web") +
-    std::string(R"sa3web(ake();};
+  studioEl("studio-clear").onclick)sa3web") +
+    std::string(R"sa3web(=()=>{deleteCurrentSong();studioClearTake();};
   const importFile=async file=>{
     if(!file)return;
     if(!/\.wav$/i.test(file.name)){showError("Choose a WAV file.");return;}
@@ -1611,9 +1635,10 @@ function studioWire() {
     if(!studioEl("studio-modal").hidden)studioCloseOperation();
     else if(studio.cropMode){studio.cropMode=false;studio.selection=[0,1];studioUpdateTakeControls();studioDrawWaveform();}
   });
-  window.addEventListener("hashchange",()=>{const view=location.hash.slice(1)||"studio";if(["studio","train","models","settings"].includes(view)&&view!==studio.view)studioShowView(view);});
-  const init)sa3web") +
-    std::string(R"sa3web(ial=location.hash.slice(1);if(["train","models","settings"].includes(initial))studioShowView(initial);
+  window.addEventListener("hashchange",()=>{const view=location.hash.slice(1)||"studio";if(["studio","train","models","settings"].includes(view)&&view!==studio.view)sa3web") +
+    std::string(R"sa3web()studioShowView(view);});
+  window.addEventListener("message",event=>{if(event.origin===location.origin&&event.data?.type==="sa3-lora-registered")loadLoras();});
+  const initial=location.hash.slice(1);if(["train","models","settings"].includes(initial))studioShowView(initial);
 }
 
 function studioClearTake() { const audio=studioEl("result-audio");audio.pause();if(studio.frame)cancelAnimationFrame(studio.frame);studio.frame=0;studio.buffer=null;studio.peaks=null;studio.audioUrl="";studio.title="";studio.selection=[0,1];studio.cropMode=false;studioEl("result-section").style.display="none";audio.removeAttribute("src");audio.load();studioUpdateTakeControls();studioDrawWaveform(); }
@@ -1686,6 +1711,10 @@ body { max-width:none; padding:0; margin:0; }
 .song-entry audio { min-width:150px; flex:1; }
 .studio-shell > .studio-credit { margin:24px 0 0; }
 #studio-training-frame { width:100%; height:calc(100vh - 145px); min-height:580px; border:1px solid var(--border); border-radius:12px; background:var(--bg); }
+.prompt-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.prompt-heading label { margin:0; }
+#prompt-dice { width:34px; height:34px; display:grid; place-items:center; padding:6px; }
+#prompt-dice svg { width:19px; height:19px; }
 .studio-model-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; }
 .studio-model-card { background:#211818; border:1px solid var(--border); border-radius:10px; padding:16px; }
 .studio-model-card strong { display:block; margin-bottom:5px; }
@@ -1724,11 +1753,11 @@ body { max-width:none; padding:0; margin:0; }
 .studio-dialog .param-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
 .studio-dialog #studio-dialog-basic input[type=range] { display:none; }
 .studio-dialog #studio-dialog-basic .range-row input[type=number] { width:100%; }
-.studio-dialog #studio-dialog-basic .range-row { display:block; }
+.st)sa3web") +
+    std::string(R"sa3web(udio-dialog #studio-dialog-basic .range-row { display:block; }
 .studio-dialog .collapse-body.collapsed { max-height:0; }
 .studio-dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
-.studio-dialog .studio-loop-options { display:grid; )sa3web") +
-    std::string(R"sa3web(grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }
+.studio-dialog .studio-loop-options { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }
 .studio-dialog .studio-extra-controls { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:10px; }
 .studio-dialog .studio-extra-controls > div { min-width:0; }
 .studio-dialog .studio-field-label { display:block; color:var(--muted); font-size:.78rem; margin-bottom:5px; }

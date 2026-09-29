@@ -75,6 +75,7 @@ function studioShowView(name) {
     if (!frame.src) frame.src = "/training/?embedded=1";
   }
   if (name === "models") studioRefreshModels();
+  if (name === "studio") loadLoras();
   location.hash = name === "studio" ? "" : name;
 }
 
@@ -450,6 +451,7 @@ function studioWire() {
     else if(studio.cropMode){studio.cropMode=false;studio.selection=[0,1];studioUpdateTakeControls();studioDrawWaveform();}
   });
   window.addEventListener("hashchange",()=>{const view=location.hash.slice(1)||"studio";if(["studio","train","models","settings"].includes(view)&&view!==studio.view)studioShowView(view);});
+  window.addEventListener("message",event=>{if(event.origin===location.origin&&event.data?.type==="sa3-lora-registered")loadLoras();});
   const initial=location.hash.slice(1);if(["train","models","settings"].includes(initial))studioShowView(initial);
 }
 

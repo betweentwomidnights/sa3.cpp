@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +30,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -53,7 +55,7 @@ using namespace sa3_train_web;
 
 const int kDefaultPort = 8016;
 const char* kArtifactPatterns[] = {
-    "adapter-step-", "adapter-final", "trainer-state", "preview.wav", "metrics.jsonl", "command.txt"};
+    "adapter-step-", "adapter-final", "trainer-state", "preview.wav", "metrics.jsonl", "command.txt", "prompts.json"};
 
 // ---- global state (serialized by g_mtx) -----------------------------------
 std::mutex g_mtx;
@@ -61,6 +63,8 @@ RunRegistry g_registry;
 std::string g_index_path;     // registry persistence path
 std::string g_train_bin;      // resolved sa3-train binary
 std::string g_models_dir;     // optional SA3_MODELS_DIR passthrough
+std::string g_adapters_dir;   // shared with sa3-server /loras
+std::string g_prompts_dir;    // shared with sa3-server /prompts
 int64_t g_log_tail_max = 1 << 20;  // cap in-memory log at ~1MB
 
 // Read everything currently in metrics.jsonl and return it as a JSON array
@@ -97,10 +101,13 @@ std::string run_summary_json(const TrainRun& r) {
     std::stringstream ss;
     ss << "{";
     ss << "\"id\":\"" << json_escape(r.id) << "\""
+       << ",\"name\":\"" << json_escape(r.name) << "\""
        << ",\"output_dir\":\"" << json_escape(r.output_dir) << "\""
        << ",\"dataset\":\"" << json_escape(r.dataset) << "\""
        << ",\"model\":\"" << json_escape(r.model) << "\""
        << ",\"adapter_type\":\"" << json_escape(r.adapter_type) << "\""
+       << ",\"registered_path\":\"" << json_escape(r.registered_path) << "\""
+       << ",\"registration_error\":\"" << json_escape(r.registration_error) << "\""
        << ",\"max_steps\":" << r.max_steps
        << ",\"started_at\":" << r.started_at
        << ",\"finished_at\":" << r.finished_at
@@ -268,6 +275,124 @@ std::intptr_t spawn_train(const std::string& bin, const std::string& cfg_path, i
 }
 #endif
 
+bool valid_run_name(const std::string& name) {
+    return !name.empty() && name.size() <= 64 &&
+        std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+            return std::isalnum(ch) || ch == '-' || ch == '_';
+        });
+}
+
+std::string suggested_run_name(const std::string& dataset) {
+    std::string raw = std::filesystem::path(dataset).lexically_normal().filename().string();
+    std::string name;
+    for (unsigned char ch : raw) {
+        if (std::isalnum(ch)) name += (char)std::tolower(ch);
+        else if ((ch == ' ' || ch == '-' || ch == '_') && !name.empty() && name.back() != '-') name += '-';
+    }
+    while (!name.empty() && name.back() == '-') name.pop_back();
+    if (name.size() > 64) name.resize(64);
+    return name.empty() ? "sa3-lora" : name;
+}
+
+std::filesystem::path published_adapter_path(const std::string& name) {
+    return std::filesystem::path(g_adapters_dir) / ("lora-" + name + "-f32.gguf");
+}
+std::filesystem::path published_prompts_path(const std::string& name) {
+    return std::filesystem::path(g_prompts_dir) / (name + ".json");
+}
+
+bool write_registration_sidecar(const TrainRun& run, std::string& err) {
+    namespace fs = std::filesystem;
+    const fs::path path = published_adapter_path(run.name).string() + ".json";
+    std::error_code ec;
+    if (fs::is_regular_file(path, ec)) return true;
+    const fs::path part = path.string() + "." + run.id + ".part";
+    std::ofstream f(part, std::ios::binary);
+    if (!f) { err = "cannot write LoRA registry entry: " + part.string(); return false; }
+    f << "{\"name\":\"" << json_escape(run.name) << "\",\"model\":\""
+      << json_escape(run.model) << "\",\"source_run\":\"" << json_escape(run.id) << "\"}\n";
+    f.close();
+    if (!f) { err = "cannot write LoRA registry entry: " + part.string(); return false; }
+    fs::rename(part, path, ec);
+    if (ec) { fs::remove(part); err = "cannot publish LoRA registry entry: " + ec.message(); return false; }
+    return true;
+}
+
+bool build_prompt_pool(const std::string& name, const std::string& dataset,
+                       const std::string& model, std::string& json, std::string& err) {
+    sa3::TrainSplitManifest manifest;
+    std::vector<sa3::TrainAudioCaptionPair> pairs;
+    if (!sa3::load_train_split_manifest(dataset, "train", manifest, err) ||
+        !sa3::resolve_train_pairs(manifest, pairs, err) ||
+        !sa3::validate_train_split_pairs(manifest, pairs, err)) return false;
+    std::vector<std::string> prompts;
+    std::set<std::string> seen;
+    for (const auto& pair : pairs) {
+        std::ifstream f(pair.caption_path, std::ios::binary);
+        if (!f) { err = "cannot read caption " + pair.caption_path; return false; }
+        std::string prompt((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (prompt.compare(0, 3, "\xef\xbb\xbf") == 0) prompt.erase(0, 3);
+        prompt = sa3::train_trim(prompt);
+        if (prompt.empty()) continue;
+        std::string key = prompt;
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](unsigned char ch) { return (char)std::tolower(ch); });
+        if (seen.insert(key).second) prompts.push_back(prompt);
+    }
+    if (prompts.empty()) { err = "no non-empty training captions found"; return false; }
+    json = "{\"version\":1,\"source\":{\"lora\":\"" + json_escape(name) +
+           "\",\"files\":" + std::to_string(pairs.size()) +
+           ",\"unique_prompts\":" + std::to_string(prompts.size()) +
+           "},\"dice\":{\"" + std::string(model == "small-sfx" ? "drums" : "instrumental") + "\":[";
+    for (size_t i = 0; i < prompts.size(); ++i) {
+        if (i) json += ',';
+        json += "\"" + json_escape(prompts[i]) + "\"";
+    }
+    json += "]}}\n";
+    return true;
+}
+
+bool publish_run(TrainRun& run, std::string& err) {
+    namespace fs = std::filesystem;
+    if (!valid_run_name(run.name)) { err = "invalid LoRA name in completed run"; return false; }
+    const fs::path src = fs::path(run.output_dir) / "adapter-final.gguf";
+    std::error_code ec;
+    if (!fs::is_regular_file(src, ec)) { err = "final adapter is missing: " + src.string(); return false; }
+    const fs::path adapter = published_adapter_path(run.name);
+    const fs::path prompts = published_prompts_path(run.name);
+    if (!run.registered_path.empty() && fs::is_regular_file(adapter, ec) && fs::is_regular_file(prompts, ec))
+        return write_registration_sidecar(run, err);
+    if (fs::exists(adapter, ec) || fs::exists(prompts, ec)) {
+        err = "LoRA name '" + run.name + "' is already in use; choose another name before publishing";
+        return false;
+    }
+    const fs::path pool = fs::path(run.output_dir) / "prompts.json";
+    if (!fs::is_regular_file(pool, ec)) {
+        std::string json;
+        if (!build_prompt_pool(run.name, run.dataset, run.model, json, err)) return false;
+        std::ofstream f(pool, std::ios::binary);
+        if (!f || !(f << json)) { err = "cannot save training prompts: " + pool.string(); return false; }
+    }
+    fs::create_directories(adapter.parent_path(), ec);
+    if (ec) { err = "cannot create adapter folder: " + ec.message(); return false; }
+    fs::create_directories(prompts.parent_path(), ec);
+    if (ec) { err = "cannot create prompts folder: " + ec.message(); return false; }
+    const fs::path adapter_part = adapter.string() + "." + run.id + ".part";
+    const fs::path prompts_part = prompts.string() + "." + run.id + ".part";
+    fs::copy_file(src, adapter_part, fs::copy_options::overwrite_existing, ec);
+    if (ec) { fs::remove(adapter_part); err = "cannot copy adapter: " + ec.message(); return false; }
+    fs::copy_file(pool, prompts_part, fs::copy_options::overwrite_existing, ec);
+    if (ec) { fs::remove(adapter_part); err = "cannot copy prompts: " + ec.message(); return false; }
+    fs::rename(adapter_part, adapter, ec);
+    if (ec) { fs::remove(adapter_part); fs::remove(prompts_part); err = "cannot publish adapter: " + ec.message(); return false; }
+    fs::rename(prompts_part, prompts, ec);
+    if (ec) { fs::remove(adapter); fs::remove(prompts_part); err = "cannot publish prompts: " + ec.message(); return false; }
+    if (!write_registration_sidecar(run, err)) { fs::remove(adapter); fs::remove(prompts); return false; }
+    run.registered_path = fs::absolute(adapter).lexically_normal().string();
+    run.registration_error.clear();
+    return true;
+}
+
 // Reader thread: drain the child pipe into the run's log buffer and update
 // latest metrics from metrics.jsonl periodically.
 void reader_loop(TrainRun* run) {
@@ -350,6 +475,10 @@ void reader_loop(TrainRun* run) {
 #endif
     }
     run->finished_at = now_unix();
+    if (run->status == RunStatus::Completed) {
+        std::string publication_error;
+        if (!publish_run(*run, publication_error)) run->registration_error = publication_error;
+    }
     run->stdout_fd = -1;
     run->pid = -1;
 #ifdef _WIN32
@@ -426,12 +555,26 @@ std::string start_run(yyjson_val* root, TrainRun& out_run) {
         !sa3::validate_train_split_pairs(manifest, pairs, dataset_error))
         return dataset_error;
 
+    std::string name = get_s("name", "");
+    if (name.empty()) name = suggested_run_name(dataset);
+    if (!valid_run_name(name)) return "LoRA name must use 1-64 letters, numbers, hyphens, or underscores";
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char ch) { return (char)std::tolower(ch); });
+    auto name_taken = [&](const std::string& candidate) {
+        std::error_code check_ec;
+        if (std::filesystem::exists(published_adapter_path(candidate), check_ec) ||
+            std::filesystem::exists(published_prompts_path(candidate), check_ec)) return true;
+        for (const auto& old : g_registry.runs)
+            if (old.name == candidate && old.status != RunStatus::Failed && old.status != RunStatus::Stopped) return true;
+        return false;
+    };
+    if (name_taken(name)) return "LoRA name '" + name + "' is already in use; choose another name";
+    std::string prompt_json;
+    if (!build_prompt_pool(name, dataset, model, prompt_json, dataset_error)) return dataset_error;
+
     // Resolve output_dir.
     std::string out_dir = get_s("out", "");
     if (out_dir.empty()) {
-        std::filesystem::path ds = std::filesystem::path(dataset).lexically_normal();
-        std::string name = ds.filename().string();
-        if (name.empty() || name == "." || name == "..") name = "sa3-lora";
         std::filesystem::path base = std::filesystem::path("train-runs") / name;
         std::filesystem::path cand = base;
         std::error_code ec;
@@ -443,6 +586,11 @@ std::string start_run(yyjson_val* root, TrainRun& out_run) {
     std::filesystem::create_directories(out_dir, ec);
     if (ec) return "cannot create output_dir: " + out_dir;
     out_dir = std::filesystem::absolute(out_dir).lexically_normal().string();
+
+    {
+        std::ofstream f(std::filesystem::path(out_dir) / "prompts.json", std::ios::binary);
+        if (!f || !(f << prompt_json)) return "cannot save training prompts in " + out_dir;
+    }
 
     // Write the --config json. Pass through every key the trainer understands.
     std::string cfg_path = (std::filesystem::path(out_dir) / "run.json").string();
@@ -505,6 +653,7 @@ std::string start_run(yyjson_val* root, TrainRun& out_run) {
 
     TrainRun r;
     r.id = std::to_string(now_unix()) + "-" + std::to_string((long long)pid);
+    r.name = name;
     r.output_dir = out_dir;
     r.config_path = cfg_path;
     r.dataset = dataset;
@@ -550,6 +699,8 @@ int main(int argc, char** argv) {
     std::string host = "127.0.0.1";
     int port = kDefaultPort;
     std::string arg_models_dir;
+    std::string arg_adapters_dir;
+    std::string arg_prompts_dir;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -557,10 +708,12 @@ int main(int argc, char** argv) {
         if (a == "--host") host = next("127.0.0.1");
         else if (a == "--port") port = std::atoi(next("8016"));
         else if (a == "--models-dir") arg_models_dir = next("models");
+        else if (a == "--adapters-dir") arg_adapters_dir = next("models");
+        else if (a == "--prompts-dir") arg_prompts_dir = next("prompts");
         else if (a == "--index") g_index_path = next("train-runs/.sa3-train-web-index.json");
         else if (a == "-h" || a == "--help") {
             std::cout << "sa3-train-web [--host 127.0.0.1] [--port 8016] "
-                         "[--models-dir DIR] [--index PATH]\n";
+                         "[--models-dir DIR] [--adapters-dir DIR] [--prompts-dir DIR] [--index PATH]\n";
             return 0;
         }
     }
@@ -569,6 +722,12 @@ int main(int argc, char** argv) {
     if (!arg_models_dir.empty()) g_models_dir = arg_models_dir;
     if (g_models_dir.empty() && std::filesystem::is_directory("models"))
         g_models_dir = "models";
+    if (const char* e = std::getenv("SA3_ADAPTERS_DIR")) g_adapters_dir = e;
+    if (const char* e = std::getenv("SA3_PROMPTS_DIR")) g_prompts_dir = e;
+    if (!arg_adapters_dir.empty()) g_adapters_dir = arg_adapters_dir;
+    if (!arg_prompts_dir.empty()) g_prompts_dir = arg_prompts_dir;
+    if (g_adapters_dir.empty()) g_adapters_dir = g_models_dir.empty() ? "models" : g_models_dir;
+    if (g_prompts_dir.empty()) g_prompts_dir = "prompts";
 
     g_train_bin = resolve_train_bin(argc > 0 ? argv[0] : "sa3-train-web");
     if (g_train_bin.empty()) {
@@ -591,6 +750,13 @@ int main(int argc, char** argv) {
     // Load history (marks any prior 'running' runs as failed).
     g_registry.load(g_index_path);
     std::cerr << "[sa3-train-web] loaded " << g_registry.runs.size() << " historical run(s)\n";
+    for (auto& run : g_registry.runs) {
+        if (run.status != RunStatus::Completed) continue;
+        std::string publication_error;
+        if (!publish_run(run, publication_error)) run.registration_error = publication_error;
+        else std::cerr << "[sa3-train-web] registered " << run.name << " from " << run.output_dir << "\n";
+    }
+    g_registry.save(g_index_path);
 
     ggml_backend_load_all();
 

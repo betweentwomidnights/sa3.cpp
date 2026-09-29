@@ -19,6 +19,7 @@ const DIST_SHIFT_LABELS = {
 const server = { host: "127.0.0.1", port: 8006 };
 let loraList = [];
 let activeLoras = [];
+let currentModelVariant = "medium";
 let pastSongs = [];
 let lastGenParams = null;
 let lastGenSeed = 0;
@@ -131,6 +132,7 @@ async function checkHealth() {
     statusEl.style.display = "";
     try {
         const h = await apiGet("/health");
+        currentModelVariant = h.model;
         statusEl.textContent = "✓ Connected";
         statusEl.className = "ok";
         modelInfo.textContent = `${h.model} / ${h.encoding} ${h.loaded ? "(loaded)" : "(unloaded)"}`;
@@ -171,12 +173,31 @@ async function loadLoras() {
     try {
         const r = await apiGet("/loras");
         loraList = r.loras;
-        activeLoras = activeLoras.filter((l) => !loraList.some((known) => known.name === l.name && known.target === "decoder"));
+        activeLoras = activeLoras.filter((l) => loraList.some((known) => known.name === l.name && known.target === "dit"));
         renderLoraDropdown();
         window.studioLorasReady?.();
     }
     catch {
         // server not connected yet
+    }
+}
+async function randomPrompt() {
+    const button = $("#prompt-dice");
+    button.disabled = true;
+    try {
+        const query = new URLSearchParams();
+        for (const lora of activeLoras) query.append("lora", lora.name);
+        const result = await apiGet(`/prompts${query.size ? "?" + query : ""}`);
+        const dice = result.prompts?.dice || {};
+        const bucket = currentModelVariant === "small-sfx" ? "drums" : "instrumental";
+        const pool = dice[bucket]?.length ? dice[bucket] : Object.values(dice).flat();
+        if (!pool.length) throw new Error("No prompts are available for this model.");
+        setVal("#prompt", pool[Math.floor(Math.random() * pool.length)]);
+        showError("");
+    } catch (error) {
+        showError(`Could not load prompts: ${error.message}`);
+    } finally {
+        button.disabled = false;
     }
 }
 function renderLoraDropdown() {
@@ -414,7 +435,7 @@ function loadParamsFromSnapshot(params) {
     // restore LoRAs
     const loras = params.loras;
     if (loras) {
-        activeLoras = loras.filter((l) => !loraList.some((known) => known.name === l.name && known.target === "decoder")).map((l) => ({ ...l }));
+        activeLoras = loras.filter((l) => loraList.some((known) => known.name === l.name && known.target === "dit")).map((l) => ({ ...l }));
         renderActiveLoras();
     }
 }
@@ -672,7 +693,7 @@ function applyConfig(cfg) {
     setVal("#inpaint-end", cfg.inpaint_end);
     setVal("#loop-bpm", cfg.loop_bpm);
     setVal("#loop-bars", cfg.loop_bars);
-    activeLoras = cfg.loras.map((l) => ({ ...l }));
+    activeLoras = cfg.loras.filter((l) => loraList.some((known) => known.name === l.name && known.target === "dit")).map((l) => ({ ...l }));
     renderActiveLoras();
 }
 function saveConfig() {
@@ -756,6 +777,7 @@ document.addEventListener("DOMContentLoaded", () => {
     $("#gen-btn").addEventListener("click", generate);
     $("#loop-btn").addEventListener("click", generateLoop);
     $("#lora-add-btn").addEventListener("click", addLora);
+    $("#prompt-dice").addEventListener("click", randomPrompt);
     $("#dist-shift").addEventListener("change", onDistShiftChange);
     $("#save-config-btn").addEventListener("click", saveConfig);
     $("#load-config-btn").addEventListener("click", loadConfig);

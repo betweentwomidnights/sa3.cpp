@@ -82,13 +82,22 @@ If none is found, the process exits with a clear error before binding the port.
    adapter type, positive rank/alpha/lr/frames/steps). This gives the UI immediate,
    friendly errors instead of a child that dies on launch.
 2. Resolves `output_dir`. If the client omits `out`, it derives a non-colliding
-   `train-runs/<dataset-name>[-N]` directory, matching `train_finalize_defaults()` in
-   `src/train_config.h`.
+   `train-runs/<run-name>[-N]` directory. The CLI's own default still uses the dataset name.
 3. Writes `<output_dir>/run.json` — a curated JSON config whose keys map 1:1 to the
    trainer's `train_set_config_value()` accepted keys.
 4. Starts `sa3-train --config run.json` without a shell: `fork`/`exec` on Unix and
    `CreateProcessW` on Windows. The pipe captures stdout and stderr; paths with spaces are safe.
 5. Registers a `TrainRun` and detaches a **reader thread** for it.
+
+The form also asks for a unique run/LoRA name. It snapshots the paired `.txt` captions into
+`<output_dir>/prompts.json`. After a successful run, the companion copies `adapter-final.gguf`
+to `<adapters_dir>/lora-<name>-f32.gguf` and the prompt pool to `<prompts_dir>/<name>.json`.
+`<adapters_dir>/lora-<name>-f32.gguf.json` records the exact model variant, including for
+older completed checkpoints without GGUF model metadata. The pool keeps the captions as
+trained, including BPM and key text when present; Studio does not re-add those tags.
+Studio rescans compatible adapters on view changes, so the new LoRA and its dice prompts appear
+without a server restart. Completed runs from older Studio versions are published on startup
+using their output-directory basename as the name, unless that name is already in use.
 
 ### Reader thread (`reader_loop`)
 One detached `std::thread` per run:
@@ -163,6 +172,7 @@ the same defaults as the CLI's validated recipe.
 ```json
 {
   "dataset": "/path/to/dataset",
+  "name": "my-style",                  // run name and published LoRA/prompt-pool name
   "model": "medium",                    // medium | small-music | small-sfx
   "encoding": "f16",
   "device": "gpu:0",                   // optional; auto, gpu:N, or cpu

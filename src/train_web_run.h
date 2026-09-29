@@ -67,11 +67,14 @@ struct MetricSample {
 // A single training run.
 struct TrainRun {
     std::string id;             // unique id (timestamp-based)
+    std::string name;           // user-facing run and published LoRA name
     std::string output_dir;     // absolute path to sa3-train output dir
     std::string config_path;    // absolute path to the --config json we wrote
     std::string dataset;        // human-readable label from config
     std::string model;          // model variant
     std::string adapter_type;   // lora / dora-rows / ...
+    std::string registered_path;
+    std::string registration_error;
     int max_steps = 0;
     int64_t started_at = 0;     // unix seconds
     int64_t finished_at = 0;    // unix seconds (0 if still running)
@@ -203,11 +206,14 @@ struct RunRegistry {
             const auto& r = runs[i];
             if (i) f << ",";
             f << "{\"id\":\"" << json_escape(r.id) << "\""
+               << ",\"name\":\"" << json_escape(r.name) << "\""
                << ",\"output_dir\":\"" << json_escape(r.output_dir) << "\""
                << ",\"config_path\":\"" << json_escape(r.config_path) << "\""
                << ",\"dataset\":\"" << json_escape(r.dataset) << "\""
                << ",\"model\":\"" << json_escape(r.model) << "\""
                << ",\"adapter_type\":\"" << json_escape(r.adapter_type) << "\""
+               << ",\"registered_path\":\"" << json_escape(r.registered_path) << "\""
+               << ",\"registration_error\":\"" << json_escape(r.registration_error) << "\""
                << ",\"max_steps\":" << r.max_steps
                << ",\"started_at\":" << r.started_at
                << ",\"finished_at\":" << r.finished_at
@@ -247,11 +253,15 @@ struct RunRegistry {
                     };
                     TrainRun r;
                     r.id = get("id");
+                    r.name = get("name");
                     r.output_dir = get("output_dir");
                     r.config_path = get("config_path");
                     r.dataset = get("dataset");
                     r.model = get("model");
                     r.adapter_type = get("adapter_type");
+                    r.registered_path = get("registered_path");
+                    r.registration_error = get("registration_error");
+                    if (r.name.empty()) r.name = std::filesystem::path(r.output_dir).filename().string();
                     r.max_steps = (int)get_i("max_steps", 0);
                     r.started_at = get_i("started_at", 0);
                     r.finished_at = get_i("finished_at", 0);

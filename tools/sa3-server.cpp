@@ -349,6 +349,24 @@ LoraEntry inspect_lora(const std::string& name, const std::string& path) {
     const int base = gguf_find_key(metadata, "lora.base_model");
     if (base >= 0) entry.base_model = gguf_get_val_str(metadata, base);
     gguf_free(metadata);
+    // Studio-trained adapters also carry a tiny registry sidecar. It records the
+    // exact model variant for older checkpoints that lack lora.base_model.
+    const std::filesystem::path registry = path + ".json";
+    std::ifstream f(registry, std::ios::binary);
+    if (f) {
+        std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        yyjson_doc* doc = yyjson_read(data.c_str(), data.size(), 0);
+        if (doc) {
+            yyjson_val* root = yyjson_doc_get_root(doc);
+            if (root && yyjson_is_obj(root)) {
+                yyjson_val* rn = yyjson_obj_get(root, "name");
+                yyjson_val* rm = yyjson_obj_get(root, "model");
+                if (rn && yyjson_is_str(rn)) entry.name = yyjson_get_str(rn);
+                if (rm && yyjson_is_str(rm)) entry.base_model = yyjson_get_str(rm);
+            }
+            yyjson_doc_free(doc);
+        }
+    }
     return entry;
 }
 
@@ -359,12 +377,58 @@ struct SourceLoraEntry {
     std::string config_path;
 };
 
-std::vector<LoraEntry> scan_loras(const std::string& adapters_dir) {
+// Older GGUF adapters do not declare a model variant. Compare their factor shapes
+// with the selected DiT's weights before offering them in the creative LoRA menu.
+bool dit_lora_matches_model(const std::string& path, const std::string& variant,
+                            const gguf_context* base) {
+    if (!base) return false;
+    gguf_init_params params{};
+    params.no_alloc = true;
+    gguf_context* adapter = gguf_init_from_file(path.c_str(), params);
+    if (!adapter) return false;
+    const int model_key = gguf_find_key(adapter, "lora.base_model");
+    if (model_key >= 0) {
+        const std::string declared = lower_ascii(gguf_get_val_str(adapter, model_key));
+        if (declared != variant && declared != "stable-audio-3-" + variant) {
+            gguf_free(adapter); return false;
+        }
+    }
+    int matched = 0;
+    bool compatible = true;
+    for (int64_t i = 0; i < gguf_get_n_tensors(adapter); ++i) {
+        const std::string tensor = gguf_get_tensor_name(adapter, i);
+        std::string suffix;
+        for (const char* candidate : {".lora_A", ".lora_B", ".U", ".V"})
+            if (ends_with(tensor, candidate)) { suffix = candidate; break; }
+        if (suffix.empty()) continue;
+        const std::string weight = tensor.substr(0, tensor.size() - suffix.size()) + ".weight";
+        const int64_t bi = gguf_find_tensor(base, weight.c_str());
+        if (bi < 0) continue;
+        const int64_t* dims = gguf_get_tensor_ne(adapter, i);
+        const int64_t* expected = gguf_get_tensor_ne(base, bi);
+        ++matched;
+        if ((suffix == ".lora_A" && dims[0] != expected[0]) ||
+            (suffix == ".lora_B" && dims[1] != expected[1]) ||
+            (suffix == ".U" && dims[1] != expected[1]) ||
+            (suffix == ".V" && dims[1] != expected[0])) {
+            compatible = false;
+            break;
+        }
+    }
+    gguf_free(adapter);
+    return compatible && matched > 0;
+}
+
+std::vector<LoraEntry> scan_loras(const std::string& adapters_dir,
+                                  const std::string& variant, const std::string& base_dit_path) {
     namespace fs = std::filesystem;
     std::vector<LoraEntry> out;
     std::set<std::string> seen;
     std::error_code ec;
     if (!fs::is_directory(adapters_dir, ec)) return out;
+    gguf_init_params params{};
+    params.no_alloc = true;
+    gguf_context* base = base_dit_path.empty() ? nullptr : gguf_init_from_file(base_dit_path.c_str(), params);
 
     for (const auto& e : fs::directory_iterator(adapters_dir, ec)) {
         if (ec) break;
@@ -372,10 +436,16 @@ std::vector<LoraEntry> scan_loras(const std::string& adapters_dir) {
         if (lower_ascii(e.path().extension().string()) != ".gguf") continue;
         std::string name = infer_lora_name_from_filename(e.path());
         if (name.empty()) continue;
-        const std::string key = lower_ascii(name);
+        LoraEntry lora = inspect_lora(name, e.path().string());
+        const std::string key = lower_ascii(lora.name);
+        if (lora.target == "dit" &&
+            ((!lora.base_model.empty() && lower_ascii(lora.base_model) != variant &&
+              lower_ascii(lora.base_model) != "stable-audio-3-" + variant) ||
+             !dit_lora_matches_model(lora.path, variant, base))) continue;
         if (!seen.insert(key).second) continue;
-        out.push_back(inspect_lora(name, e.path().string()));
+        out.push_back(std::move(lora));
     }
+    if (base) gguf_free(base);
     std::sort(out.begin(), out.end(), [](const LoraEntry& a, const LoraEntry& b) {
         return lower_ascii(a.name) < lower_ascii(b.name);
     });
@@ -1430,12 +1500,21 @@ int main(int argc, char** argv) {
     });
 
     svr.Get("/loras", [&adir, &sldir](const httplib::Request&, httplib::Response& res) {
-        const std::vector<LoraEntry> loras = scan_loras(adir);
+        std::string variant, encoding, text_encoding, ae_encoding;
+        { std::lock_guard<std::mutex> lk(g_selection_mtx);
+          variant = g_variant; encoding = g_encoding;
+          text_encoding = g_t5_encoding; ae_encoding = g_ae_encoding; }
+        sa3::ModelPaths paths;
+        std::string model_error;
+        const bool model_ready = sa3::ModelPaths::resolve(g_models_dir, variant, encoding,
+                                                           text_encoding, ae_encoding, paths, model_error);
+        const std::vector<LoraEntry> loras = scan_loras(adir, variant, model_ready ? paths.dit : "");
         const std::vector<SourceLoraEntry> source_loras = scan_source_loras(sldir);
         std::string body = "{\"success\":true,\"loras\":" + loras_json(loras)
                          + ",\"source_loras\":" + source_loras_json(source_loras)
                          + ",\"adapters_dir\":\"" + json_escape(adir)
                          + "\",\"source_loras_dir\":\"" + json_escape(sldir)
+                         + "\",\"model\":\"" + json_escape(variant)
                          + "\",\"model_loaded\":" + (g_loaded.load() ? "true" : "false") + "}";
         res.set_content(body, "application/json");
     });
