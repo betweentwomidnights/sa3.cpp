@@ -17,10 +17,12 @@
 //   GET  /train.js           embedded train.js
 #include "train_web_run.h"
 #include "embedded_train_web.h"
+#include "train_dataset.h"
 #include "ggml-backend.h"
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -386,8 +388,10 @@ std::string start_run(yyjson_val* root, TrainRun& out_run) {
     int rank = get_i("rank", 16);
     double alpha = get_f("alpha", 16.0);
     double lr = get_f("learning_rate", 1e-4);
-    int max_steps = get_i("max_steps", 10000);
+    int max_steps = get_i("max_steps", 3000);
     int frames = get_i("frames", 512);
+    double duration = get_f("duration", 0.0);
+    const double target_latent_rms = get_f("target_latent_rms", 0.0);
 
     if (model != "medium" && model != "small-music" && model != "small-sfx")
         return "unsupported model variant: " + model;
@@ -401,12 +405,26 @@ std::string start_run(yyjson_val* root, TrainRun& out_run) {
     if (lr <= 0) return "learning_rate must be positive";
     if (frames <= 0) return "frames must be positive";
     if (max_steps <= 0) return "max_steps must be positive";
+    if (!std::isfinite(duration) || duration < 0.0 || (duration > 0.0 && duration < 1.0))
+        return "duration must be at least one second";
+    if (!std::isfinite(target_latent_rms) || (target_latent_rms != 0.0 &&
+        (target_latent_rms < 0.5 || target_latent_rms > 1.3)))
+        return "target latent RMS must be 0 (off) or between 0.5 and 1.3";
     const std::string encoding = get_s("encoding", "f16");
     if (encoding != "f16" && encoding != "f32" && encoding != "q8_0" &&
         encoding != "q5_k_m" && encoding != "q4_k_m") return "unsupported model tier";
     const std::string device = get_s("device", "");
     if (!device.empty() && device != "cpu" && device.rfind("gpu:", 0) != 0)
         return "unsupported device selection";
+
+    // Report dataset problems before creating a run or loading any model.
+    sa3::TrainSplitManifest manifest;
+    std::vector<sa3::TrainAudioCaptionPair> pairs;
+    std::string dataset_error;
+    if (!sa3::load_train_split_manifest(dataset, "train", manifest, dataset_error) ||
+        !sa3::resolve_train_pairs(manifest, pairs, dataset_error) ||
+        !sa3::validate_train_split_pairs(manifest, pairs, dataset_error))
+        return dataset_error;
 
     // Resolve output_dir.
     std::string out_dir = get_s("out", "");
@@ -455,6 +473,8 @@ std::string start_run(yyjson_val* root, TrainRun& out_run) {
         wf("adam_eps", get_f("adam_eps", 1e-8));
         wi("batch_size", get_i("batch_size", 1));
         wi("frames", frames);
+        if (duration > 0.0) wf("duration", duration);
+        wf("target_latent_rms", target_latent_rms);
         wi("max_steps", max_steps);
         wi("checkpoint_every", get_i("checkpoint_every", 500));
         wi("seed", get_i("seed", 42));

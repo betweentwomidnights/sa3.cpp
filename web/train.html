@@ -108,8 +108,8 @@
           <div><label>Rank</label><input id="f-rank" type="number" value="16" /></div>
           <div><label>Alpha</label><input id="f-alpha" type="number" step="0.1" value="16" /></div>
           <div><label>Learning rate</label><input id="f-lr" type="number" step="1e-5" value="0.0001" /></div>
-          <div><label>Max steps</label><input id="f-steps" type="number" value="10000" /></div>
-          <div><label>Frames</label><input id="f-frames" type="number" value="512" /></div>
+          <div><label for="f-steps">Max steps</label><input id="f-steps" type="number" min="1" value="3000" /></div>
+          <div id="crop-duration-field"><label for="f-duration">Random crop duration (seconds)</label><input id="f-duration" type="number" min="1" step="0.1" value="47.5" /></div>
           <div><label>Batch size</label><input id="f-batch" type="number" value="1" /></div>
           <div><label>Checkpoint every</label><input id="f-ckpt" type="number" value="500" /></div>
           <div><label>Seed</label><input id="f-seed" type="number" value="42" /></div>
@@ -119,7 +119,12 @@
         </div>
         <p id="device-note" style="color:var(--muted);font-size:12px;margin:8px 0 0;">Detecting devices… Select a tier that is already downloaded for this model.</p>
         <div class="row" style="margin-top:12px;">
-          <label style="display:flex;align-items:center;gap:6px;color:var(--fg);"><input id="f-inpaint" type="checkbox" checked style="width:auto;" /> Inpainting loss</label>
+          <label style="display:flex;align-items:center;gap:6px;color:var(--fg);"><input id="f-full-tracks" type="checkbox" style="width:auto;" /> Train on full tracks</label>
+          <span style="color:var(--muted);font-size:12px;">Sets a 285.35-second crop, matching the reference recipe. Shorter songs are padded. Needs more GPU memory.</span>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <label style="display:flex;align-items:center;gap:6px;color:var(--fg);"><input id="f-loudness" type="checkbox" checked style="width:auto;" /> Normalize track loudness during pre-encode</label>
+          <label id="loudness-target-field" style="display:flex;align-items:center;gap:6px;color:var(--muted);">Target latent RMS <input id="f-target-rms" type="number" min="0.5" max="1.3" step="0.01" value="0.9" style="width:76px;" /></label>
         </div>
         <div class="actions">
           <button class="primary" id="start-btn">Start training</button>

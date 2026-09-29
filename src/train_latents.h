@@ -25,10 +25,9 @@
 // produced (encoded/latents/<model>/), so a parity run can train on BIT-IDENTICAL data to the
 // PyTorch reference run.
 //
-// Known deviations (accepted): the reference encoded with a fp16 autoencoder (--half); we run
-// the normal sa3.cpp encode (f16 weights, f32 activations). Files shorter than the crop length
-// are an error here instead of silence/zero-padded (the reference pads via silence.npy, which
-// gary4local's pre-encode does not produce anyway).
+// Known deviation (accepted): the reference encoded with a fp16 autoencoder (--half); we run
+// the normal sa3.cpp encode (f16 weights, f32 activations). Short crops use the reference's
+// zero-latent fallback when no encoded silence latent is available.
 #pragma once
 
 #include "train_audio.h"
@@ -421,6 +420,19 @@ inline void train_crop_latents(const TrainLatentEntry& e, int start, int frames,
     out.frames = frames;
     out.z.assign(e.z.begin() + (size_t)start * e.latent,
                  e.z.begin() + (size_t)(start + frames) * e.latent);
+}
+
+// PreEncodedDataset pads a short file to the requested fixed crop length. Its padding mask
+// marks the added frames invalid, so the trainer can exclude them from the objective.
+inline int train_crop_latents_padded(const TrainLatentEntry& e, int start, int frames,
+                                    TrainLatents& out) {
+    const int valid = std::max(0, std::min(frames, e.n_valid - start));
+    out.latent = e.latent;
+    out.frames = frames;
+    out.z.assign((size_t)frames * (size_t)e.latent, 0.0f);
+    if (valid > 0)
+        std::copy_n(e.z.begin() + (size_t)start * e.latent, (size_t)valid * e.latent, out.z.begin());
+    return valid;
 }
 
 } // namespace sa3

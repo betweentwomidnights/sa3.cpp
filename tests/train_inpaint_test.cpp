@@ -109,6 +109,23 @@ int main() {
         fails += expect(uniform, "FULL loss weight == uniform 1/(io*frames)");
     }
 
+    // A short track padded to a fixed crop must contribute loss only on real frames.
+    {
+        const int io = 2, frames = 6, real = 3;
+        std::vector<float> z((size_t)io * frames, 0.5f);
+        std::vector<float> mask((size_t)frames, 0.0f);
+        auto ip = sa3::build_train_inpaint(z, mask, io, frames, io + 1, 1.0f, true, real);
+        fails += expect(ip.n_gen == real, "padded frames excluded from generated count");
+        double total = 0.0;
+        for (int t = 0; t < frames; ++t)
+            for (int c = 0; c < io; ++c) {
+                const float w = ip.loss_weight[(size_t)t * io + c];
+                if (t < real) total += w;
+                else fails += expect(w == 0.0f, "padded frame has zero loss weight");
+            }
+        fails += expect(std::fabs(total - 1.0) < 1e-5, "real-frame loss weights sum to one");
+    }
+
     if (fails) return 1;
     std::printf("train_inpaint_test: ok\n");
     return 0;

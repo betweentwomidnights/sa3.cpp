@@ -109,7 +109,17 @@ parameters and optimizer state remain F32, matching the reference trainer's memo
 
 ## Dataset
 
-The expected dataset layout is:
+For a quick run, select a folder containing audio files and same-stem `.txt` captions:
+
+```text
+datasets/my-training-set/
+  song-one.wav
+  song-one.txt
+  song-two.wav
+  song-two.txt
+```
+
+The curated split layout also remains supported:
 
 ```text
 datasets/my-training-set/
@@ -121,7 +131,10 @@ datasets/my-training-set/
   evaluation/...
 ```
 
-Training honors `train/filelist.txt`. Test and evaluation splits are loaded only for validation/evaluation and are rejected if any train item overlaps by basename, canonical path, or `audio_sha256`.
+Training honors `train/filelist.txt` when present. Otherwise it scans the dataset root for paired audio and captions. Test and evaluation splits are optional; when present they are rejected if any train item overlaps by basename, canonical path, or `audio_sha256`.
+
+Studio's **Train on full tracks** setting uses a fixed 285.35-second crop, matching the gary-localhost-installer recipe. Shorter tracks are zero padded in latent space and their padded frames are excluded from the training loss. This setting requires substantially more GPU memory than the default 47.5-second random crop.
+The native DiT does not yet hide padded tokens from self-attention, so short-track training is not exact PyTorch padding parity; compare adapter quality before relying on this setting for a release.
 
 **Compressed audio requires `ffmpeg` on `PATH`.** `sa3-train` shells out to it (`ffmpeg -f f32le …`)
 to read anything it cannot read itself; there is no built-in MP3 decoder. Check with

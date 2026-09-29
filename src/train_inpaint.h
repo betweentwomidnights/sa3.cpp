@@ -164,10 +164,13 @@ struct TrainInpaint {
 // step on a trivial copy-the-given-context task and produced prompt-ignoring collapsed adapters.
 inline TrainInpaint build_train_inpaint(const std::vector<float>& z, const std::vector<float>& mask,
                                         int io, int frames, int local_dim, float mask_loss_weight,
-                                        bool mask_padding_attention = true) {
+                                        bool mask_padding_attention = true, int real_len = -1) {
     TrainInpaint out;
+    if (real_len < 0) real_len = frames;
+    real_len = std::clamp(real_len, 0, frames);
     out.local.assign((size_t)local_dim * frames, 0.0f);
     for (int t = 0; t < frames; ++t) {
+        if (t >= real_len) continue;
         const float m = mask[(size_t)t];
         out.local[(size_t)t * local_dim + 0] = m;
         for (int c = 0; c < io; ++c) out.local[(size_t)t * local_dim + 1 + c] = z[(size_t)t * io + c] * m;
@@ -184,7 +187,7 @@ inline TrainInpaint build_train_inpaint(const std::vector<float>& z, const std::
         wc = mask_loss_weight / denom;
     }
     out.loss_weight.assign((size_t)io * frames, 0.0f);
-    for (int t = 0; t < frames; ++t) {
+    for (int t = 0; t < real_len; ++t) {
         const float w = mask[(size_t)t] > 0.5f ? wc : wg;
         for (int c = 0; c < io; ++c) out.loss_weight[(size_t)t * io + c] = w;
     }

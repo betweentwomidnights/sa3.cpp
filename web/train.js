@@ -268,17 +268,23 @@ async function startTraining() {
     rank: parseInt($("f-rank").value, 10) || 16,
     alpha: parseFloat($("f-alpha").value) || 16,
     learning_rate: parseFloat($("f-lr").value) || 1e-4,
-    max_steps: parseInt($("f-steps").value, 10) || 10000,
-    frames: parseInt($("f-frames").value, 10) || 512,
+    max_steps: parseInt($("f-steps").value, 10) || 3000,
+    duration: $("f-full-tracks").checked ? 285.35 : parseFloat($("f-duration").value),
+    target_latent_rms: $("f-loudness").checked ? parseFloat($("f-target-rms").value) : 0,
     batch_size: parseInt($("f-batch").value, 10) || 1,
     checkpoint_every: parseInt($("f-ckpt").value, 10) || 500,
     seed: parseInt($("f-seed").value, 10) || 42,
     cfg_dropout_prob: parseFloat($("f-cfgdo").value) || 0.1,
     grad_clip: parseFloat($("f-gradclip").value) || 1.0,
-    inpainting: $("f-inpaint").checked,
     out: $("f-out").value.trim(),
   };
   if (!cfg.dataset) { $("form-err").textContent = "Dataset dir is required."; return; }
+  if (!Number.isFinite(cfg.duration) || cfg.duration < 1) {
+    $("form-err").textContent = "Choose a crop duration of at least one second."; return;
+  }
+  if ($("f-loudness").checked && (!Number.isFinite(cfg.target_latent_rms) || cfg.target_latent_rms < 0.5 || cfg.target_latent_rms > 1.3)) {
+    $("form-err").textContent = "Target latent RMS must be between 0.5 and 1.3."; return;
+  }
   try {
     const res = await apiPost("/api/train/start", cfg);
     if (res && res.run_id) {
@@ -311,6 +317,12 @@ $("new-btn").onclick = openForm;
 $("cancel-btn").onclick = () => { closeForm(); $("empty-card").classList.remove("hidden"); };
 $("start-btn").onclick = startTraining;
 $("stop-btn").onclick = stopTraining;
+$("f-full-tracks").onchange = () => {
+  $("crop-duration-field").classList.toggle("hidden", $("f-full-tracks").checked);
+};
+$("f-loudness").onchange = () => {
+  $("loudness-target-field").classList.toggle("hidden", !$("f-loudness").checked);
+};
 $("browse-dataset").onclick = async () => {
   const button = $("browse-dataset");
   button.disabled = true;

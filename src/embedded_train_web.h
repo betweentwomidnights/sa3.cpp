@@ -120,8 +120,8 @@ inline const std::string index_html =
           <div><label>Rank</label><input id="f-rank" type="number" value="16" /></div>
           <div><label>Alpha</label><input id="f-alpha" type="number" step="0.1" value="16" /></div>
           <div><label>Learning rate</label><input id="f-lr" type="number" step="1e-5" value="0.0001" /></div>
-          <div><label>Max steps</label><input id="f-steps" type="number" value="10000" /></div>
-          <div><label>Frames</label><input id="f-frames" type="number" value="512" /></div>
+          <div><label for="f-steps">Max steps</label><input id="f-steps" type="number" min="1" value="3000" /></div>
+          <div id="crop-duration-field"><label for="f-duration">Random crop duration (seconds)</label><input id="f-duration" type="number" min="1" step="0.1" value="47.5" /></div>
           <div><label>Batch size</label><input id="f-batch" type="number" value="1" /></div>
           <div><label>Checkpoint every</label><input id="f-ckpt" type="number" value="500" /></div>
           <div><label>Seed</label><input id="f-seed" type="number" value="42" /></div>
@@ -131,7 +131,12 @@ inline const std::string index_html =
         </div>
         <p id="device-note" style="color:var(--muted);font-size:12px;margin:8px 0 0;">Detecting devices… Select a tier that is already downloaded for this model.</p>
         <div class="row" style="margin-top:12px;">
-          <label style="display:flex;align-items:center;gap:6px;color:var(--fg);"><input id="f-inpaint" type="checkbox" checked style="width:auto;" /> Inpainting loss</label>
+          <label style="display:flex;align-items:center;gap:6px;color:var(--fg);"><input id="f-full-tracks" type="checkbox" style="width:auto;" /> Train on full tracks</label>
+          <span style="color:var(--muted);font-size:12px;">Sets a 285.35-second crop, matching the reference recipe. Shorter songs are padded. Needs more GPU memory.</span>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <label style="display:flex;align-items:center;gap:6px;color:var(--fg);"><input id="f-loudness" type="checkbox" checked style="width:auto;" /> Normalize track loudness during pre-encode</label>
+          <label id="loudness-target-field" style="display:flex;align-items:center;gap:6px;color:var(--muted);">Target latent RMS <input id="f-target-rms" type="number" min="0.5" max="1.3" step="0.01" value="0.9" style="width:76px;" /></label>
         </div>
         <div class="actions">
           <button class="primary" id="start-btn">Start training</button>
@@ -158,7 +163,8 @@ inline const std::string index_html =
         <h3 style="margin-top:16px;">Log</h3>
         <div id="log"></div>
         <h3 style="margin-top:16px;">Artifacts</h3>
-        <div id="artifacts"></div>
+  )sa3trainweb") +
+    std::string(R"sa3trainweb(      <div id="artifacts"></div>
         <div class="actions">
           <button class="danger hidden" id="stop-btn">Stop training</button>
         </div>
@@ -174,8 +180,7 @@ inline const std::string index_html =
   <script>
     document.getElementById('inference-link').href = location.pathname.startsWith('/training/')
       ? location.origin + '/'
-      : location.protocol + '//' + location.hostname + ':8006/')sa3trainweb") +
-    std::string(R"sa3trainweb(;
+      : location.protocol + '//' + location.hostname + ':8006/';
     if (document.documentElement.classList.contains('embedded')) {
       const sidebar = document.querySelector('.sidebar');
       sidebar.insertBefore(document.getElementById('new-btn'), document.getElementById('run-list'));
@@ -460,17 +465,23 @@ async function startTraining() {
     rank: parseInt($("f-rank").value, 10) || 16,
     alpha: parseFloat($("f-alpha").value) || 16,
     learning_rate: parseFloat($("f-lr").value) || 1e-4,
-    max_steps: parseInt($("f-steps").value, 10) || 10000,
-    frames: parseInt($("f-frames").value, 10) || 512,
+    max_steps: parseInt($("f-steps").value, 10) || 3000,
+    duration: $("f-full-tracks").checked ? 285.35 : parseFloat($("f-duration").value),
+    target_latent_rms: $("f-loudness").checked ? parseFloat($("f-target-rms").value) : 0,
     batch_size: parseInt($("f-batch").value, 10) || 1,
     checkpoint_every: parseInt($("f-ckpt").value, 10) || 500,
     seed: parseInt($("f-seed").value, 10) || 42,
     cfg_dropout_prob: parseFloat($("f-cfgdo").value) || 0.1,
     grad_clip: parseFloat($("f-gradclip").value) || 1.0,
-    inpainting: $("f-inpaint").checked,
     out: $("f-out").value.trim(),
   };
   if (!cfg.dataset) { $("form-err").textContent = "Dataset dir is required."; return; }
+  if (!Number.isFinite(cfg.duration) || cfg.duration < 1) {
+    $("form-err").textContent = "Choose a crop duration of at least one second."; return;
+  }
+  if ($("f-loudness").checked && (!Number.isFinite(cfg.target_latent_rms) || cfg.target_latent_rms < 0.5 || cfg.target_latent_rms > 1.3)) {
+    $("form-err").textContent = "Target latent RMS must be between 0.5 and 1.3."; return;
+  }
   try {
     const res = await apiPost("/api/train/start", cfg);
     if (res && res.run_id) {
@@ -503,6 +514,13 @@ $("new-btn").onclick = openForm;
 $("cancel-btn").onclick = () => { closeForm(); $("empty-card").classList.remove("hidden"); };
 $("start-btn").onclick = startTraining;
 $("stop-btn").onclick = stopTraining;
+$("f-full-tracks").onchange = () => {
+  $("crop-duration-field").classList.toggle("hidden", $("f-full-tracks").checke)sa3trainweb") +
+    std::string(R"sa3trainweb(d);
+};
+$("f-loudness").onchange = () => {
+  $("loudness-target-field").classList.toggle("hidden", !$("f-loudness").checked);
+};
 $("browse-dataset").onclick = async () => {
   const button = $("browse-dataset");
   button.disabled = true;

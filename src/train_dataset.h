@@ -4,6 +4,8 @@
 #include "yyjson.h"
 
 #include <cerrno>
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -124,6 +126,50 @@ inline bool load_train_split_manifest(const std::string& dataset_dir, const std:
     out.root_dir = dataset_dir;
     out.split = split;
     const std::string split_dir = dataset_dir + "/" + split;
+    // A folder of audio files with same-stem .txt captions is a useful dataset
+    // on its own. Keep the manifest layout for curated split datasets, but do
+    // not require users of the CLI or Studio to generate filelist.txt first.
+    if (!std::filesystem::exists(split_dir + "/filelist.txt")) {
+        if (split != "train") return true; // optional held-out splits
+        std::error_code ec;
+        const std::filesystem::path root(dataset_dir);
+        if (!std::filesystem::is_directory(root, ec)) {
+            err = "dataset directory does not exist: " + dataset_dir;
+            return false;
+        }
+        std::vector<std::filesystem::path> audio_files;
+        for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+            if (!entry.is_regular_file()) continue;
+            std::string ext = entry.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            if (ext == ".wav" || ext == ".mp3" || ext == ".flac" || ext == ".m4a" || ext == ".ogg")
+                audio_files.push_back(entry.path());
+        }
+        if (ec) { err = "cannot read dataset directory: " + dataset_dir; return false; }
+        std::sort(audio_files.begin(), audio_files.end());
+        if (audio_files.empty()) {
+            err = "no audio files found in " + dataset_dir +
+                  "; select a folder of audio + matching .txt captions, or a manifest dataset";
+            return false;
+        }
+        for (const auto& audio : audio_files) {
+            auto caption = audio;
+            caption.replace_extension(".txt");
+            if (!std::filesystem::is_regular_file(caption, ec)) {
+                err = "missing caption .txt beside " + audio.string();
+                return false;
+            }
+            TrainDatasetRecord rec;
+            rec.id = audio.stem().string();
+            rec.split = "train";
+            rec.audio_path = (std::filesystem::path("..") / audio.filename()).generic_string();
+            rec.caption_path = (std::filesystem::path("..") / caption.filename()).generic_string();
+            out.filelist.push_back(rec.audio_path);
+            out.records.push_back(std::move(rec));
+        }
+        return true;
+    }
     if (!train_read_lines(split_dir + "/filelist.txt", out.filelist, err)) return false;
 
     std::ifstream f(split_dir + "/metadata.jsonl");

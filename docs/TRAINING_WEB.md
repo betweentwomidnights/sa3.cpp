@@ -173,8 +173,9 @@ the same defaults as the CLI's validated recipe.
   "weight_decay": 0.01,
   "adam_beta1": 0.9, "adam_beta2": 0.95, "adam_eps": 1e-8,
   "batch_size": 1,
-  "frames": 512,
-  "max_steps": 10000,
+  "duration": 47.5,                   // seconds; full-track preset sends 285.35
+  "target_latent_rms": 0.9,             // 0 disables loudness normalization
+  "max_steps": 3000,
   "checkpoint_every": 500,
   "seed": 42,
   "inpainting": true,

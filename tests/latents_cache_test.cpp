@@ -8,6 +8,7 @@
 // read what we write and we can read what they write.
 #include "train_latents.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -83,6 +84,14 @@ int main() {
 
     const int latent = 8, frames = 37;
     const sa3::TrainLatentEntry src = make_entry(latent, frames);
+    {
+        sa3::TrainLatents crop;
+        const int valid = sa3::train_crop_latents_padded(src, 0, frames + 5, crop);
+        expect(valid == frames && crop.frames == frames + 5, "short latent crop keeps fixed length");
+        expect(std::equal(src.z.begin(), src.z.end(), crop.z.begin()), "short crop preserves source frames");
+        expect(std::all_of(crop.z.begin() + src.z.size(), crop.z.end(),
+                           [](float v) { return v == 0.0f; }), "short crop zero pads remaining frames");
+    }
     const sa3::TrainLatentKey key = make_key();
     const std::string name = sa3::train_latent_cache_name("a track [with brackets]");
     std::string err;

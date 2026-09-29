@@ -612,10 +612,10 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 auto it = lat_cache.find(stem);
                 if (it == lat_cache.end())
                     throw std::runtime_error("no pre-encoded latents for " + stem);
-                if (it->second.n_valid < crop_frames)
-                    throw std::runtime_error(stem + " has only " + std::to_string(it->second.n_valid) +
-                                             " valid latent frames (< --frames " + std::to_string(crop_frames) +
-                                             "); shorten --frames or drop the file");
+                if (it->second.n_valid <= 0)
+                    throw std::runtime_error(stem + " has no valid latent frames");
+                if (it->second.n_valid < crop_frames && !cfg.inpainting)
+                    throw std::runtime_error(stem + " is shorter than the crop; padding requires inpainting loss");
             }
             ae.free();  // the autoencoder is no longer needed; frees ~1.7 GB of VRAM
             if (native_pre_encode) {   // bring back what the training loop needs
@@ -814,6 +814,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 auto p0 = tnow();
                 auto p1 = p0;   // decode/encode boundary (legacy mode); crop is instant in latents mode
                 sa3::TrainLatents latents;
+                int real_frames = 0;
                 double seconds_total = 0.0;   // full-file duration; fractional in latents mode
                 if (use_latents) {
                     // PreEncodedDataset crop semantics: start = randint(0, last_ix - crop)
@@ -826,7 +827,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                         std::uniform_int_distribution<int> sd(0, last_ix - crop_frames);
                         crop_start = sd(crop_rng);
                     }
-                    sa3::train_crop_latents(e, crop_start, crop_frames, latents);
+                    real_frames = sa3::train_crop_latents_padded(e, crop_start, crop_frames, latents);
                     // round(actual_samples/sr, 3) like the reference sidecars — it feeds the
                     // seconds conditioning and the dist-shift effective length un-ceiled.
                     seconds_total = e.seconds_total;
@@ -845,6 +846,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                     p1 = tnow();
                     if (!sa3::encode_train_audio_to_latents(ae, sc, windowed, latents, err))
                         throw std::runtime_error(err);
+                    real_frames = latents.frames;
                     // Legacy behavior: full-file duration, ceil'd to whole seconds.
                     seconds_total = std::ceil((double)decoded.n_samples / 44100.0);
                 }
@@ -922,15 +924,15 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 if (!sampler.sample_at(latents.z, t, sample, err)) throw std::runtime_error(err);
                 // Stage 12: inpainting objective. Generate a per-sample mask (type by inpaint_probs),
                 // build [mask | latent*mask] local-add cond + the inpaint-aware loss weight. All crop
-                // frames are real (no padding), so real_len == latents.frames.
+                // frames are real up to real_frames; padded frames have zero loss weight.
                 sa3::TrainInpaint inpaint;
                 bool have_inpaint = false;
                 if (cfg.inpainting) {
                     sa3::InpaintMaskType mtype;
-                    std::vector<float> mask = sa3::generate_inpaint_mask(latents.frames, latents.frames,
+                    std::vector<float> mask = sa3::generate_inpaint_mask(latents.frames, real_frames,
                                                                          inpaint_probs, inpaint_rng, mtype);
                     inpaint = sa3::build_train_inpaint(latents.z, mask, dc.io, latents.frames, dc.local_dim,
-                                                       cfg.mask_loss_weight, cfg.mask_padding_attention);
+                                                       cfg.mask_loss_weight, cfg.mask_padding_attention, real_frames);
                     inpaint.type = mtype;
                     have_inpaint = true;
                 }

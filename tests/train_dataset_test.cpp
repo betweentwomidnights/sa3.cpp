@@ -57,6 +57,25 @@ int main() {
     fails += expect(pairs[1].audio_path.find("audio/b.mp3") != std::string::npos, "pair audio joined path");
     fails += expect(sa3::validate_train_split_pairs(m, pairs, err), "split validation succeeds");
 
+    // A plain WAV/caption folder should be trainable without generated manifests.
+    const fs::path flat = root / "flat";
+    fs::create_directories(flat);
+    std::ofstream(flat / "song.wav") << "wav";
+    std::ofstream(flat / "song.txt") << "caption";
+    err.clear();
+    fails += expect(sa3::load_train_split_manifest(flat.string(), "train", m, err), "flat folder loads");
+    fails += expect(m.filelist.size() == 1, "flat folder file count");
+    fails += expect(sa3::resolve_train_pairs(m, pairs, err), "flat folder pairs resolve");
+    fails += expect(sa3::validate_train_split_pairs(m, pairs, err), "flat folder pairs validate");
+    fails += expect(pairs[0].audio_path.find("song.wav") != std::string::npos, "flat audio path");
+    fails += expect(sa3::load_train_split_manifest(flat.string(), "test", m, err) && m.filelist.empty(),
+                    "held-out split optional for flat folder");
+    std::ofstream(flat / "uncaptioned.wav") << "wav";
+    err.clear();
+    fails += expect(!sa3::load_train_split_manifest(flat.string(), "train", m, err),
+                    "flat folder missing caption rejected");
+    fails += expect(err.find("missing caption") != std::string::npos, "flat caption error explains fix");
+
     fs::create_directories(root / "bad");
     {
         std::ofstream f(root / "bad" / "filelist.txt");
