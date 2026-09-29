@@ -297,6 +297,9 @@ target_link_libraries(sa3-continuation-splice-test PRIVATE sa3)
 add_executable(sa3-sampling-schedule-test tests/sampling_schedule_test.cpp)
 target_link_libraries(sa3-sampling-schedule-test PRIVATE sa3)
 
+add_executable(sa3-backend-compute-status-test tests/backend_compute_status_test.cpp)
+target_link_libraries(sa3-backend-compute-status-test PRIVATE sa3)
+
 add_executable(sa3-set-wide-row-test tests/set_wide_row_test.cpp)
 target_link_libraries(sa3-set-wide-row-test PRIVATE sa3)
 
@@ -328,6 +331,7 @@ if(BUILD_TESTING)
     add_test(NAME sa3-latents-cache-test COMMAND sa3-latents-cache-test)
     add_test(NAME sa3-continuation-splice-test COMMAND sa3-continuation-splice-test)
     add_test(NAME sa3-sampling-schedule-test COMMAND sa3-sampling-schedule-test)
+    add_test(NAME sa3-backend-compute-status-test COMMAND sa3-backend-compute-status-test)
     add_test(NAME sa3-set-wide-row-test COMMAND sa3-set-wide-row-test)
     if(SA3_BUILD_SAT)
         add_test(NAME sa3-sat-sampling-test COMMAND sa3-sat-sampling-test)

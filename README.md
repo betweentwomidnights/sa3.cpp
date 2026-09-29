@@ -100,6 +100,12 @@ uses a moving ggml branch. if you have local changes inside `ggml/`, commit or s
 work and override it per-slot. `--encoding f32` and `--models-dir DIR` adjust what it resolves.
 Use `--duration SEC` for an exact output length, or `--frames N` for the lower-level latent length.)
 
+Transform uses the upstream init-noise schedule by default. Pass `--legacy-schedule` to
+`sa3-generate` to compare with the former C++ shift-then-scale schedule. The server accepts
+`"legacy_schedule": true` in a generation request, and libsa3 V1 exposes the optional
+`legacy_schedule` request field. This switch changes the schedule only; transform canvas
+padding and output length stay the same.
+
 **configuration.** the model/adapter dirs (and the backend knobs) read from env vars, so a downstream
 app sets them in the process it spawns and never touches the CLI. drop a `.env` in the working dir to
 set them locally — see [`.env.example`](.env.example). precedence is **flag > env var > `.env` > default**:

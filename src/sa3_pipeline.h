@@ -142,13 +142,39 @@ inline Text2MusicDuration text2music_duration(int target_n_samp, int aligned_fra
     return { aligned_frames, (float)aligned_frames * (float)samples_per_frame / 44100.0f };
 }
 
-// Build the descending rectified-flow schedule for text generation and audio-to-audio. Distribution
-// shift is defined over normalized diffusion time [1, 0]; sigma_max then selects how far into that
-// curve an audio-to-audio request starts. Warping an already-scaled t (the old behaviour) could map
-// the first interior LogSNR step above sigma_max, violating every sampler's next <= current contract.
+struct TransformDuration {
+    int canvas_samples = 0;
+    int schedule_frames = 0;
+    float seconds_total = 0.0f;
+};
+
+// The Python /transform route conditions on input_duration + 0.5 s. model.py then pads the
+// init audio to seconds_total + 6 s before encoding, and trims the output to the input length.
+inline TransformDuration transform_duration(int source_samples, int samples_per_frame,
+                                             int frame_alignment) {
+    if (source_samples <= 0 || samples_per_frame <= 0 || frame_alignment <= 0)
+        throw std::invalid_argument("invalid transform duration");
+    constexpr int sample_rate = 44100;
+    constexpr int margin_samples = sample_rate / 2;
+    constexpr int headroom_samples = 6 * sample_rate;
+    const int64_t conditioned_samples = (int64_t)source_samples + margin_samples;
+    const int64_t alignment_samples = (int64_t)samples_per_frame * frame_alignment;
+    const int64_t canvas_samples = ((conditioned_samples + headroom_samples + alignment_samples - 1)
+                                   / alignment_samples) * alignment_samples;
+    if (canvas_samples > std::numeric_limits<int>::max())
+        throw std::invalid_argument("transform canvas is too long");
+    return { (int)canvas_samples,
+             (int)((conditioned_samples + samples_per_frame - 1) / samples_per_frame),
+             (float)conditioned_samples / (float)sample_rate };
+}
+
+// Match stable_audio_3/inference/sampling.py: first make a linear schedule from sigma_max to zero,
+// then apply distribution shift, restoring the endpoints. A shifted interior point can exceed
+// sigma_max; the upstream ping-pong sampler accepts that first upward step.
 inline std::vector<float> make_sa3_schedule(int steps, float sigma_max, int seq_len,
                                             const std::string& type,
-                                            float p1, float p2, float p3, float p4) {
+                                            float p1, float p2, float p3, float p4,
+                                            bool legacy_schedule = false) {
     if (steps < 1) throw std::invalid_argument("sampling steps must be positive");
     if (!(sigma_max > 0.0f && sigma_max <= 1.0f))
         throw std::invalid_argument("sigma_max must be in (0, 1]");
@@ -156,10 +182,18 @@ inline std::vector<float> make_sa3_schedule(int steps, float sigma_max, int seq_
     std::vector<float> schedule((size_t)steps + 1);
     schedule.front() = sigma_max;
     for (int i = 1; i < steps; ++i) {
-        const float normalized_t = 1.0f - (float)i / (float)steps;
-        float warped = dist_shift_warp(type, normalized_t, seq_len, p1, p2, p3, p4);
-        if (!std::isfinite(warped)) warped = normalized_t;
-        schedule[(size_t)i] = std::clamp(sigma_max * warped, 0.0f, schedule[(size_t)i - 1]);
+        if (legacy_schedule) {
+            const float normalized_t = 1.0f - (float)i / (float)steps;
+            float warped = dist_shift_warp(type, normalized_t, seq_len, p1, p2, p3, p4);
+            if (!std::isfinite(warped)) warped = normalized_t;
+            schedule[(size_t)i] = std::clamp(sigma_max * warped, 0.0f, schedule[(size_t)i - 1]);
+            continue;
+        }
+        const float linear_t = sigma_max * (1.0f - (float)i / (float)steps);
+        const float warped = dist_shift_warp(type, linear_t, seq_len, p1, p2, p3, p4);
+        if (!std::isfinite(warped) || warped < 0.0f || warped > 1.0f)
+            throw std::runtime_error("distribution shift produced an invalid timestep");
+        schedule[(size_t)i] = warped;
     }
     schedule.back() = 0.0f;
     return schedule;
@@ -609,6 +643,7 @@ struct GenParams {
     // sa3::dist_shift_warp / dist_shift_defaults). The defaults below are the medium model's
     // LogSNR with rate=0, i.e. byte-identical to the previously-hardcoded schedule.
     std::string dist_shift = "LogSNR";   // "LogSNR" | "Flux" | "Full" | "None"
+    bool legacy_schedule = false;        // opt in to the former shift-then-scale C++ schedule
     float ds_p1 = 2000.0f;  // LogSNR:anchor_length  Flux:min_length  Full:base_shift
     float ds_p2 = -6.2f;    // LogSNR:anchor_logsnr  Flux:max_length  Full:max_shift
     float ds_p3 = 0.0f;     // LogSNR:rate           Flux:alpha_min   Full:min_length
@@ -857,6 +892,19 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         release_all_for_frugal_cancel();
         throw std::runtime_error("generation cancelled");
     };
+    // A backend that fails one graph latches the failure and turns every later compute into a
+    // no-op that leaves its outputs untouched (see graph_compute_checked). Unchecked, a Metal
+    // command buffer lost mid-decode on a 4 GB iPhone came back as a "successful" take of static:
+    // each remaining chunk decoded whatever the output buffer already held. So every compute here
+    // is checked; the first failure is recorded, its graph freed like a cancel would, and thrown.
+    std::string backend_error;
+    auto compute_checked = [&](ggml_backend_t backend, ggml_cgraph* graph, const char* what) {
+        return graph_compute_checked(backend, graph, what, backend_error);
+    };
+    auto throw_backend_failure = [&]() {
+        release_all_for_frugal_cancel();
+        throw std::runtime_error(backend_error);
+    };
     if (encode_chunk_size < 0 || encode_overlap < 0 ||
         (encode_chunk_size > 0 && encode_overlap >= encode_chunk_size))
         throw std::runtime_error("invalid encode_chunk_size/encode_overlap");
@@ -880,6 +928,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // ---------- init audio: pad + derive output T (overrides params.frames) ----------
     std::vector<float> init_audio; int init_L = 0;
     int init_src_n = 0;    // valid samples in init_audio; init_L is the padded stride, not this
+    TransformDuration transform_length;
     if (has_init) {
         int n_samp = params.init_n_samp; const int n_ch = params.init_n_ch;
         // resample the init source to the model rate (44.1 kHz) if the caller passed another rate.
@@ -895,9 +944,13 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         const std::vector<float>& raw = *rawp;
         if (n_ch != sc.out_channels / sc.patch_size)
             throw std::runtime_error("init audio must be " + std::to_string(sc.out_channels / sc.patch_size) + "-channel");
+        const int mult = sc.chunk ? 2 * ds : ds;
         int want = n_samp;
         if (inpaint && inpaint_end > 0.0f) want = std::max(want, (int)(inpaint_end * 44100.0f));
-        const int mult = sc.chunk ? 2 * ds : ds;
+        if (!inpaint) {
+            transform_length = transform_duration(n_samp, ds, sc.chunk ? 2 : 1);
+            want = transform_length.canvas_samples;
+        }
         init_L = ((want + mult - 1) / mult) * mult;
         init_audio.assign((size_t)init_L * n_ch, 0.0f);
         const int copy = std::min(n_samp, init_L);
@@ -940,16 +993,20 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // text2music: generate a (frames + duration_padding) canvas so the model isn't forced to "end"
     // the piece in the kept region, then truncate to `frames` at the very end. Exact duration
     // requests keep their requested seconds_total and effective schedule length; even-aligned
-    // eff_frames and padded T size the latent canvas. a2a/inpaint derive their length from init audio.
+    // eff_frames and padded T size the latent canvas. Transform uses the source plus hidden
+    // headroom; inpaint derives its length from init audio.
     const int max_len = (int)TE.u32("t5g.max_length");
     const int eff_frames = frames;
     const int samples_per_frame = sc.patch_size * sc.output_seg;
     const sa3::Text2MusicDuration text_length =
         sa3::text2music_duration(params.target_n_samp, eff_frames, samples_per_frame);
     const float conditioned_secs = has_init
-        ? (float)eff_frames * (float)samples_per_frame / 44100.0f
+        ? (inpaint ? (float)eff_frames * (float)samples_per_frame / 44100.0f
+                   : transform_length.seconds_total)
         : text_length.seconds_total;
-    const int schedule_frames = has_init ? eff_frames : text_length.schedule_frames;
+    const int schedule_frames = has_init
+        ? (inpaint ? eff_frames : transform_length.schedule_frames)
+        : text_length.schedule_frames;
     int pad_frames = 0;
     if (!has_init && duration_padding_sec > 0.0f) {
         const int mult = sc.chunk ? 2 : 1;                      // SAME-S needs an even latent length
@@ -1015,8 +1072,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         ggml_backend_tensor_set(mask_t, mb.data(), 0, mb.size()*sizeof(float));
         profile_log(prof, "t5_upload", wall_time_s() - tp);
         tp = wall_time_s();
-        ggml_backend_graph_compute(TE.backend, gf);
+        const bool t5_ok = compute_checked(TE.backend, gf, "T5 encode");
         profile_log(prof, "t5_compute", wall_time_s() - tp);
+        if (!t5_ok) { ggml_gallocr_free(alloc); ggml_free(ctx); throw_backend_failure(); }
         tp = wall_time_s();
         ggml_backend_tensor_get(h, hidden.data(), 0, hidden.size()*sizeof(float));
         profile_log(prof, "t5_download", wall_time_s() - tp);
@@ -1079,10 +1137,11 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     profile_log(prof, "conditioning", wall_time_s() - t0);
 
     // ---------- schedule (SA3 distribution shift; default = LogSNR rate=0) ----------
-    // Warp normalized diffusion time, then scale the curve by sigma_max for audio-to-audio.
-    // Endpoints stay anchored at sigma_max and zero and every step remains descending.
+    // Apply distribution shift to the sigma_max-to-zero schedule, as upstream does.
+    // The first shifted interior point can be higher than sigma_max for audio-to-audio.
     std::vector<float> sigmas = sa3::make_sa3_schedule(steps, sigma_max, schedule_frames,
-                                                       dist_shift, ds_p1, ds_p2, ds_p3, ds_p4);
+                                                       dist_shift, ds_p1, ds_p2, ds_p3, ds_p4,
+                                                       params.legacy_schedule);
 
     // ---------- audio2audio: encode init audio -> latent z_init [latent, T] ----------
     // ---------- route this request's adapters ----------
@@ -1154,9 +1213,10 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             set_positions(eg.pos, eg.Nenc);
             set_swa_bias(eg.mask, sc, eg.Nenc);
             if (sc.chunk) set_positions(eg.pos2, eg.N2);
-            ggml_backend_graph_compute(AE.backend, eg.graph);
+            if (!compute_checked(AE.backend, eg.graph, "SAME encode")) return false;
             out.resize((size_t)sc.latent * eg.T);
             ggml_backend_tensor_get(eg.z, out.data(), 0, out.size()*sizeof(float));
+            return true;
         };
 
         const bool can_chunk_encode = encode_chunk_size > 0 && !sc.chunk && T >= encode_chunk_size;
@@ -1167,8 +1227,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         if (!can_chunk_encode) {
             throw_if_cancelled(params.should_cancel);
             EncodeGraph eg = build_encode_graph(T);
-            run_encode_graph(eg, init_audio.data(), z_init);
+            const bool encoded = run_encode_graph(eg, init_audio.data(), z_init);
             free_encode_graph(eg);
+            if (!encoded) throw_backend_failure();
             throw_if_cancelled(params.should_cancel);
             if (params.on_progress) params.on_progress({"encoding", 1, 1, 0.1f});
         } else {
@@ -1190,7 +1251,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                     memcpy(&audio_chunk[(size_t)c*eg.n_samp],
                            &init_audio[(size_t)c*init_L + sample_st],
                            (size_t)eg.n_samp*sizeof(float));
-                run_encode_graph(eg, audio_chunk.data(), zchunk);
+                if (!run_encode_graph(eg, audio_chunk.data(), zchunk)) break;
 
                 const int target_start = tl.out + tl.left;
                 const int copy_count = tl.right - tl.left;
@@ -1204,6 +1265,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                 if (params.should_cancel && params.should_cancel()) { cancelled = true; break; }
             }
             free_encode_graph(eg);
+            if (!backend_error.empty())
+                throw_backend_failure();
             if (cancelled)
                 throw_cancelled_after_frugal_cleanup();
         }
@@ -1347,7 +1410,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         ggml_backend_tensor_set(tfeat, tf.data(), 0, tf.size()*sizeof(float));
         dit_upload += wall_time_s() - ts;
         ts = wall_time_s();
-        ggml_backend_graph_compute(DIT.backend, gf_dit);
+        if (!compute_checked(DIT.backend, gf_dit, "DiT sampling step")) break;
         dit_compute += wall_time_s() - ts;
         ts = wall_time_s();
         ggml_backend_tensor_get(vel, vbuf.data(), 0, N*sizeof(float));   // conditioned velocity
@@ -1366,7 +1429,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             ggml_backend_tensor_set(ones,  &one, 0, sizeof(float));
             if (local) ggml_backend_tensor_set(local, localb.data(), 0, localb.size()*sizeof(float));
             ggml_backend_tensor_set(cross, uncond_crossb.data(), 0, uncond_crossb.size()*sizeof(float));
-            ggml_backend_graph_compute(DIT.backend, gf_dit);
+            if (!compute_checked(DIT.backend, gf_dit, "DiT sampling step (unconditioned)")) break;
             dit_compute += wall_time_s() - ts;
             ts = wall_time_s();
             vbuf_unc.resize(N); vcfg.resize(N);
@@ -1393,6 +1456,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     ggml_gallocr_free(alloc_dit); ggml_free(dctx);
     if (!keep_models) { DIT.free(); dit_loras_.clear(); dit_merged_ = false;
                        dit_functional_.free(); dit_adapters_.clear(); }   // DiT gone -> next gen reloads a clean base
+    if (!backend_error.empty())
+        throw_backend_failure();
     if (dit_cancelled)
         throw_cancelled_after_frugal_cleanup();
 
@@ -1470,12 +1535,13 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         if (sc.chunk) set_positions(dg.pos2, dg.N2);
         dec_upload += wall_time_s() - ts;
         ts = wall_time_s();
-        ggml_backend_graph_compute(AE.backend, dg.graph);
+        if (!compute_checked(AE.backend, dg.graph, "SAME decode")) return false;
         dec_compute += wall_time_s() - ts;
         ts = wall_time_s();
         out.resize((size_t)dg.n_samp*dg.n_ch);
         ggml_backend_tensor_get(dg.audio, out.data(), 0, out.size()*sizeof(float));
         dec_download += wall_time_s() - ts;
+        return true;
     };
 
     const bool can_chunk_decode = decode_chunk_size > 0 && !sc.chunk && T >= decode_chunk_size;
@@ -1489,8 +1555,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (!can_chunk_decode) {
         throw_if_cancelled(params.should_cancel);
         DecodeGraph dg = build_decode_graph(T);
-        run_decode_graph(dg, host_x.data(), ab);
+        const bool decoded = run_decode_graph(dg, host_x.data(), ab);
         free_decode_graph(dg);
+        if (!decoded) throw_backend_failure();
         if (params.on_progress) params.on_progress({"decoding", 1, 1, 0.95f});  // match chunked path
         if (params.should_cancel && params.should_cancel())
             throw_cancelled_after_frugal_cleanup();
@@ -1508,7 +1575,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             const ChunkTile& tl = tiles[i];   // decode stitches in samples: scale the plan by ds
             for (int t = 0; t < decode_chunk_size; t++)
                 memcpy(&zchunk[(size_t)t*sc.latent], &host_x[(size_t)(tl.src + t)*sc.latent], sc.latent*sizeof(float));
-            run_decode_graph(dg, zchunk.data(), chunk_audio);
+            if (!run_decode_graph(dg, zchunk.data(), chunk_audio)) break;
             if (params.on_progress)
                 params.on_progress({"decoding", (int)(i+1), (int)tiles.size(),
                                     0.9f + 0.1f * (float)(i+1) / (float)tiles.size()});
@@ -1521,6 +1588,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             if (params.should_cancel && params.should_cancel()) { cancelled = true; break; }
         }
         free_decode_graph(dg);
+        if (!backend_error.empty())
+            throw_backend_failure();
         if (cancelled)
             throw_cancelled_after_frugal_cleanup();
     }
@@ -1540,7 +1609,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     }
 
     // truncate the padded canvas back to the requested length (planar -> compact each channel)
-    int out_n_samp = eff_frames * sc.patch_size * sc.output_seg;
+    int out_n_samp = has_init && !inpaint ? init_src_n : eff_frames * sc.patch_size * sc.output_seg;
     if (params.target_n_samp > 0) out_n_samp = params.target_n_samp;
     if (out_n_samp != n_samp) {
         std::vector<float> tr((size_t)out_n_samp * n_ch, 0.0f);
