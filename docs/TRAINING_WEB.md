@@ -93,8 +93,9 @@ The form also asks for a unique run/LoRA name. It snapshots the paired `.txt` ca
 `<output_dir>/prompts.json`. After a successful run, the companion copies `adapter-final.gguf`
 to `<adapters_dir>/lora-<name>-f32.gguf` and the prompt pool to `<prompts_dir>/<name>.json`.
 `<adapters_dir>/lora-<name>-f32.gguf.json` records the exact model variant, including for
-older completed checkpoints without GGUF model metadata. The pool keeps the captions as
-trained, including BPM and key text when present; Studio does not re-add those tags.
+older completed checkpoints without GGUF model metadata. The dice pool strips BPM from
+training captions because Studio has a separate BPM control; style and key text remain.
+The inference server also strips BPM when reading existing prompt pools.
 Studio rescans compatible adapters on view changes, so the new LoRA and its dice prompts appear
 without a server restart. Completed runs from older Studio versions are published on startup
 using their output-directory basename as the name, unless that name is already in use.

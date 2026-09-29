@@ -17,6 +17,7 @@
 #include "wav.h"
 #include "embedded_web.h"
 #include "lora_convert.h"
+#include "prompt_pool.h"
 
 #include "httplib.h"
 #include "yyjson.h"
@@ -533,10 +534,11 @@ bool read_text_file(const std::filesystem::path& path, std::string& out) {
 using DiceMap = std::map<std::string, std::vector<std::string>>;
 
 void add_unique_prompt(std::vector<std::string>& prompts, std::set<std::string>& seen, const std::string& prompt) {
-    if (prompt.empty()) return;
-    const std::string key = lower_ascii(prompt);
+    const std::string cleaned = sa3::strip_prompt_bpm(prompt);
+    if (cleaned.empty()) return;
+    const std::string key = lower_ascii(cleaned);
     if (!seen.insert(key).second) return;
-    prompts.push_back(prompt);
+    prompts.push_back(cleaned);
 }
 
 bool load_dice_file(const std::filesystem::path& path, DiceMap& dice, int* version = nullptr) {

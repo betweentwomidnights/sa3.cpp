@@ -18,6 +18,7 @@
 #include "train_web_run.h"
 #include "embedded_train_web.h"
 #include "train_dataset.h"
+#include "prompt_pool.h"
 #include "ggml-backend.h"
 
 #include <algorithm>
@@ -332,7 +333,7 @@ bool build_prompt_pool(const std::string& name, const std::string& dataset,
         if (!f) { err = "cannot read caption " + pair.caption_path; return false; }
         std::string prompt((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         if (prompt.compare(0, 3, "\xef\xbb\xbf") == 0) prompt.erase(0, 3);
-        prompt = sa3::train_trim(prompt);
+        prompt = sa3::strip_prompt_bpm(sa3::train_trim(prompt));
         if (prompt.empty()) continue;
         std::string key = prompt;
         std::transform(key.begin(), key.end(), key.begin(),
