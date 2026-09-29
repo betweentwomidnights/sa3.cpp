@@ -325,6 +325,39 @@ inline std::vector<ChunkTile> plan_chunks(int total, int size, int overlap) {
     return tiles;
 }
 
+// SAME-L's encoder reads ahead: a latent frame depends on the audio up to 12 frames past it
+// (measured: pad a source with silence and the last 12 frames before the end of the buffer change
+// with how much silence follows; beyond that they are bit-identical). SAME-S reads none. 16 keeps
+// headroom over the measurement.
+constexpr int kInitEncodeLookaheadFrames = 16;
+
+// How many latent frames of the init canvas the encode must cover. Inpaint only reads z_init where
+// the mask keeps the input, so when the regenerated window [keep_end, regen_end) runs to the end of
+// the canvas -- every continuation -- the latents after keep_end are multiplied by zero, and encoding
+// the silent tail is pure cost: a 4 s source continued by 30 s encoded 40 s of canvas. The result is
+// chosen so the kept frames come out bit-identical to a full-canvas encode:
+//   - chunked (chunk_size > 0): stop on a tile edge of the full canvas's own plan, so every kept
+//     frame is copied from the same tile, fed the same audio, as it would have been. The full plan's
+//     end-anchored last tile overwrites from total-chunk_size+half on, so a kept region reaching
+//     into that falls back to the whole canvas (the saving there would be a sliver anyway).
+//   - monolithic: the kept frames plus the encoder's lookahead, rounded up to the codec's frame
+//     multiple (SAME-S needs an even count).
+// Anything that keeps input after the window (a mid-clip inpaint) or saves nothing gets `total`.
+inline int init_encode_frames(int total, int keep_end, int regen_end, int chunk_size,
+                              int chunk_overlap, int frame_multiple) {
+    if (keep_end < 0 || regen_end < total || keep_end >= total) return total;
+    if (chunk_size > 0 && total >= chunk_size) {
+        const int hop = chunk_size - chunk_overlap, half = chunk_overlap / 2;
+        if (keep_end > total - chunk_size + half) return total;
+        for (int e = chunk_size; e < total; e += hop)
+            if (e - half >= keep_end) return e;
+        return total;
+    }
+    const int mult = std::max(1, frame_multiple);
+    const int want = keep_end + kInitEncodeLookaheadFrames;
+    return std::min(total, std::max(mult, (want + mult - 1) / mult * mult));
+}
+
 // Find the one file in `dir` whose name starts with `prefix` and ends with `suffix`. "" if none;
 // returns "" + sets ambiguous=true if >1 match. Resolves --model / --lora by the naming convention.
 inline std::string resolve_one(const std::string& dir, const std::string& prefix,
@@ -1157,6 +1190,17 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         ae_loras_ = std::move(ae_want);
     }
 
+    // The regenerated window [inpaint_f0, inpaint_f1) in latent frames, decided once: the init
+    // encode can stop short of it, and the local conditioning below masks it.
+    int inpaint_f0 = 0, inpaint_f1 = 0;
+    if (inpaint) {
+        auto ceil_div = [](int a, int b){ return (a + b - 1) / b; };
+        const int sa = (int)(mask_start * 44100.0f);
+        const int ea = inpaint_end < 0 ? T*ds : (int)(inpaint_end * 44100.0f);
+        inpaint_f0 = std::max(0, std::min(T, ceil_div(sa, ds)));
+        inpaint_f1 = std::max(inpaint_f0, std::min(T, ceil_div(ea, ds)));
+    }
+
     std::vector<float> z_init;
     if (has_init) {
         if (!AE.ctx) AE = load_gguf(paths_.same.c_str(), backend_);
@@ -1219,23 +1263,45 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             return true;
         };
 
-        const bool can_chunk_encode = encode_chunk_size > 0 && !sc.chunk && T >= encode_chunk_size;
+        // Inpaint reads z_init only where the mask keeps the input, so a window running to the end
+        // of the canvas lets the encode stop early; rows past enc_T stay zero and are masked out.
+        const bool chunk_path = encode_chunk_size > 0 && !sc.chunk;
+        const int enc_T = inpaint
+            ? init_encode_frames(T, inpaint_f0, inpaint_f1, chunk_path ? encode_chunk_size : 0,
+                                 encode_overlap, sc.chunk ? 2 : 1)
+            : T;
+        if (enc_T < T)
+            printf("init encode: %d of %d frames (%.2fs of %.2fs); the rest is regenerated\n",
+                   enc_T, T, enc_T * (float)ds / 44100.0f, T * (float)ds / 44100.0f);
+        const bool can_chunk_encode = chunk_path && enc_T >= encode_chunk_size;
         if (encode_chunk_size > 0 && sc.chunk)
             fprintf(stderr, "warning: outer chunked encode is only enabled for SAME-L; using monolithic SAME-S encode\n");
 
         if (params.on_progress) params.on_progress({"encoding", 0, 1, 0.02f});
         if (!can_chunk_encode) {
             throw_if_cancelled(params.should_cancel);
-            EncodeGraph eg = build_encode_graph(T);
-            const bool encoded = run_encode_graph(eg, init_audio.data(), z_init);
+            EncodeGraph eg = build_encode_graph(enc_T);
+            // The canvas is planar with a stride of T frames; a shorter encode needs its own.
+            std::vector<float> compact;
+            const float* enc_src = init_audio.data();
+            if (enc_T < T) {
+                compact.resize((size_t)eg.n_samp * eg.n_ch);
+                for (int c = 0; c < eg.n_ch; c++)
+                    memcpy(&compact[(size_t)c*eg.n_samp], &init_audio[(size_t)c*init_L],
+                           (size_t)eg.n_samp*sizeof(float));
+                enc_src = compact.data();
+            }
+            std::vector<float> zenc;
+            const bool encoded = run_encode_graph(eg, enc_src, zenc);
             free_encode_graph(eg);
             if (!encoded) throw_backend_failure();
+            std::copy(zenc.begin(), zenc.end(), z_init.begin());
             throw_if_cancelled(params.should_cancel);
             if (params.on_progress) params.on_progress({"encoding", 1, 1, 0.1f});
         } else {
             // Mirrors stable_audio_3.models.autoencoders encode_audio/decode_audio chunk stitching:
             // final chunk is anchored to the end; inner chunk edges drop half the overlap.
-            const std::vector<ChunkTile> tiles = plan_chunks(T, encode_chunk_size, encode_overlap);
+            const std::vector<ChunkTile> tiles = plan_chunks(enc_T, encode_chunk_size, encode_overlap);
             fprintf(stderr, "[sa3] chunked SAME-L encode: %zu chunks, size=%d overlap=%d\n",
                     tiles.size(), encode_chunk_size, encode_overlap);
 
@@ -1282,11 +1348,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // ---------- inpaint: build local_add_cond = [mask(1) | z_init*mask(256)] ----------
     std::vector<float> localb;
     if (inpaint) {
-        auto ceil_div = [](int a, int b){ return (a + b - 1) / b; };
-        const int sa = (int)(mask_start * 44100.0f);
-        const int ea = inpaint_end < 0 ? T*ds : (int)(inpaint_end * 44100.0f);
-        const int f0 = std::max(0, std::min(T, ceil_div(sa, ds)));
-        const int f1 = std::max(f0, std::min(T, ceil_div(ea, ds)));
+        const int f0 = inpaint_f0, f1 = inpaint_f1;
         localb.assign((size_t)dc.local_dim * T, 0.0f);
         for (int t = 0; t < T; t++) {
             float m = (t >= f0 && t < f1) ? 0.0f : 1.0f;
