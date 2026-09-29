@@ -78,6 +78,56 @@ int main() {
                          + transform[1] * noise;
     expect(std::fabs(x - expected) < 1e-6f, "ping-pong must accept an upward first timestep");
 
+    // Init encode for inpaint: a continuation of a 4 s source by 30 s (+6 s ending) is a 431-frame
+    // canvas whose window runs to the end. The encode must cover the kept frames and stop well
+    // short of the canvas, and anything keeping input after its window must encode it all.
+    {
+        const int T = 431, keep = 40;   // 4 s source, mask pulled back into it
+        const int chunked = sa3::init_encode_frames(T, keep, T, 128, 32, 1);
+        expect(chunked == 128, "a short kept region must stop at the first tile edge");
+        const int mono_l = sa3::init_encode_frames(T, keep, T, 0, 0, 1);
+        expect(mono_l == keep + sa3::kInitEncodeLookaheadFrames,
+               "a monolithic encode must cover the kept frames plus the lookahead");
+        const int mono_s = sa3::init_encode_frames(T, 41, T, 0, 0, 2);
+        expect(mono_s % 2 == 0 && mono_s >= 41 + sa3::kInitEncodeLookaheadFrames,
+               "SAME-S needs an even frame count");
+        expect(sa3::init_encode_frames(T, keep, 300, 128, 32, 1) == T,
+               "input kept after the window needs the whole canvas");
+        expect(sa3::init_encode_frames(T, T, T, 128, 32, 1) == T, "nothing regenerated, nothing saved");
+        expect(sa3::init_encode_frames(60, 50, 60, 0, 0, 1) == 60, "never more than the canvas");
+    }
+
+    // The chunked saving is only safe if every kept frame is written by the same tile, fed the same
+    // audio, as in the full canvas's plan: the stitch keeps the last write, so compare owners.
+    {
+        auto owners = [](int total, int size, int overlap) {
+            std::vector<int> owner((size_t)total, -1);
+            for (const sa3::ChunkTile& tl : sa3::plan_chunks(total, size, overlap))
+                for (int t = tl.left; t < tl.right; t++) owner[(size_t)(tl.out + t)] = tl.src;
+            return owner;
+        };
+        int checked = 0;
+        for (int T = 128; T <= 700; T++) {
+            const std::vector<int> full = owners(T, 128, 32);
+            for (int keep = 0; keep <= T; keep += 3) {
+                const int e = sa3::init_encode_frames(T, keep, T, 128, 32, 1);
+                if (e == T) continue;
+                expect(e >= 128 && e < T, "a chunked early stop must be a whole plan inside the canvas");
+                const std::vector<int> part = owners(e, 128, 32);
+                for (int t = 0; t < keep; t++)
+                    if (part[(size_t)t] != full[(size_t)t]) {
+                        expect(false, "kept frame " + std::to_string(t) + " of T=" + std::to_string(T) +
+                                      " (keep " + std::to_string(keep) + ", encode " + std::to_string(e) +
+                                      ") comes from a different tile");
+                        break;
+                    }
+                ++checked;
+            }
+        }
+        expect(checked > 1000, "the early stop must actually apply across ordinary continuations");
+        std::printf("init encode: %d early stops checked tile-for-tile\n", checked);
+    }
+
     if (fails) { std::fprintf(stderr, "%d failure(s)\n", fails); return 1; }
     std::printf("OK\n");
     return 0;
