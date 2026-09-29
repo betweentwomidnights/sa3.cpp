@@ -142,10 +142,35 @@ inline Text2MusicDuration text2music_duration(int target_n_samp, int aligned_fra
     return { aligned_frames, (float)aligned_frames * (float)samples_per_frame / 44100.0f };
 }
 
-// Build the descending rectified-flow schedule for text generation and audio-to-audio. Distribution
-// shift is defined over normalized diffusion time [1, 0]; sigma_max then selects how far into that
-// curve an audio-to-audio request starts. Warping an already-scaled t (the old behaviour) could map
-// the first interior LogSNR step above sigma_max, violating every sampler's next <= current contract.
+struct TransformDuration {
+    int canvas_samples = 0;
+    int schedule_frames = 0;
+    float seconds_total = 0.0f;
+};
+
+// The Python /transform route conditions on input_duration + 0.5 s. model.py then pads the
+// init audio to seconds_total + 6 s before encoding, and trims the output to the input length.
+inline TransformDuration transform_duration(int source_samples, int samples_per_frame,
+                                             int frame_alignment) {
+    if (source_samples <= 0 || samples_per_frame <= 0 || frame_alignment <= 0)
+        throw std::invalid_argument("invalid transform duration");
+    constexpr int sample_rate = 44100;
+    constexpr int margin_samples = sample_rate / 2;
+    constexpr int headroom_samples = 6 * sample_rate;
+    const int64_t conditioned_samples = (int64_t)source_samples + margin_samples;
+    const int64_t alignment_samples = (int64_t)samples_per_frame * frame_alignment;
+    const int64_t canvas_samples = ((conditioned_samples + headroom_samples + alignment_samples - 1)
+                                   / alignment_samples) * alignment_samples;
+    if (canvas_samples > std::numeric_limits<int>::max())
+        throw std::invalid_argument("transform canvas is too long");
+    return { (int)canvas_samples,
+             (int)((conditioned_samples + samples_per_frame - 1) / samples_per_frame),
+             (float)conditioned_samples / (float)sample_rate };
+}
+
+// Match stable_audio_3/inference/sampling.py: first make a linear schedule from sigma_max to zero,
+// then apply distribution shift, restoring the endpoints. A shifted interior point can exceed
+// sigma_max; the upstream ping-pong sampler accepts that first upward step.
 inline std::vector<float> make_sa3_schedule(int steps, float sigma_max, int seq_len,
                                             const std::string& type,
                                             float p1, float p2, float p3, float p4) {
@@ -156,10 +181,11 @@ inline std::vector<float> make_sa3_schedule(int steps, float sigma_max, int seq_
     std::vector<float> schedule((size_t)steps + 1);
     schedule.front() = sigma_max;
     for (int i = 1; i < steps; ++i) {
-        const float normalized_t = 1.0f - (float)i / (float)steps;
-        float warped = dist_shift_warp(type, normalized_t, seq_len, p1, p2, p3, p4);
-        if (!std::isfinite(warped)) warped = normalized_t;
-        schedule[(size_t)i] = std::clamp(sigma_max * warped, 0.0f, schedule[(size_t)i - 1]);
+        const float linear_t = sigma_max * (1.0f - (float)i / (float)steps);
+        const float warped = dist_shift_warp(type, linear_t, seq_len, p1, p2, p3, p4);
+        if (!std::isfinite(warped) || warped < 0.0f || warped > 1.0f)
+            throw std::runtime_error("distribution shift produced an invalid timestep");
+        schedule[(size_t)i] = warped;
     }
     schedule.back() = 0.0f;
     return schedule;
@@ -880,6 +906,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // ---------- init audio: pad + derive output T (overrides params.frames) ----------
     std::vector<float> init_audio; int init_L = 0;
     int init_src_n = 0;    // valid samples in init_audio; init_L is the padded stride, not this
+    TransformDuration transform_length;
     if (has_init) {
         int n_samp = params.init_n_samp; const int n_ch = params.init_n_ch;
         // resample the init source to the model rate (44.1 kHz) if the caller passed another rate.
@@ -895,9 +922,13 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         const std::vector<float>& raw = *rawp;
         if (n_ch != sc.out_channels / sc.patch_size)
             throw std::runtime_error("init audio must be " + std::to_string(sc.out_channels / sc.patch_size) + "-channel");
+        const int mult = sc.chunk ? 2 * ds : ds;
         int want = n_samp;
         if (inpaint && inpaint_end > 0.0f) want = std::max(want, (int)(inpaint_end * 44100.0f));
-        const int mult = sc.chunk ? 2 * ds : ds;
+        if (!inpaint) {
+            transform_length = transform_duration(n_samp, ds, sc.chunk ? 2 : 1);
+            want = transform_length.canvas_samples;
+        }
         init_L = ((want + mult - 1) / mult) * mult;
         init_audio.assign((size_t)init_L * n_ch, 0.0f);
         const int copy = std::min(n_samp, init_L);
@@ -940,16 +971,20 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // text2music: generate a (frames + duration_padding) canvas so the model isn't forced to "end"
     // the piece in the kept region, then truncate to `frames` at the very end. Exact duration
     // requests keep their requested seconds_total and effective schedule length; even-aligned
-    // eff_frames and padded T size the latent canvas. a2a/inpaint derive their length from init audio.
+    // eff_frames and padded T size the latent canvas. Transform uses the source plus hidden
+    // headroom; inpaint derives its length from init audio.
     const int max_len = (int)TE.u32("t5g.max_length");
     const int eff_frames = frames;
     const int samples_per_frame = sc.patch_size * sc.output_seg;
     const sa3::Text2MusicDuration text_length =
         sa3::text2music_duration(params.target_n_samp, eff_frames, samples_per_frame);
     const float conditioned_secs = has_init
-        ? (float)eff_frames * (float)samples_per_frame / 44100.0f
+        ? (inpaint ? (float)eff_frames * (float)samples_per_frame / 44100.0f
+                   : transform_length.seconds_total)
         : text_length.seconds_total;
-    const int schedule_frames = has_init ? eff_frames : text_length.schedule_frames;
+    const int schedule_frames = has_init
+        ? (inpaint ? eff_frames : transform_length.schedule_frames)
+        : text_length.schedule_frames;
     int pad_frames = 0;
     if (!has_init && duration_padding_sec > 0.0f) {
         const int mult = sc.chunk ? 2 : 1;                      // SAME-S needs an even latent length
@@ -1079,8 +1114,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     profile_log(prof, "conditioning", wall_time_s() - t0);
 
     // ---------- schedule (SA3 distribution shift; default = LogSNR rate=0) ----------
-    // Warp normalized diffusion time, then scale the curve by sigma_max for audio-to-audio.
-    // Endpoints stay anchored at sigma_max and zero and every step remains descending.
+    // Apply distribution shift to the sigma_max-to-zero schedule, as upstream does.
+    // The first shifted interior point can be higher than sigma_max for audio-to-audio.
     std::vector<float> sigmas = sa3::make_sa3_schedule(steps, sigma_max, schedule_frames,
                                                        dist_shift, ds_p1, ds_p2, ds_p3, ds_p4);
 
@@ -1540,7 +1575,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     }
 
     // truncate the padded canvas back to the requested length (planar -> compact each channel)
-    int out_n_samp = eff_frames * sc.patch_size * sc.output_seg;
+    int out_n_samp = has_init && !inpaint ? init_src_n : eff_frames * sc.patch_size * sc.output_seg;
     if (params.target_n_samp > 0) out_n_samp = params.target_n_samp;
     if (out_n_samp != n_samp) {
         std::vector<float> tr((size_t)out_n_samp * n_ch, 0.0f);

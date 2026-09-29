@@ -50,8 +50,10 @@ inline void rf_pingpong_step(float* x,
                              float t_current,
                              float t_next) {
     if (!x || !velocity || !noise) throw std::invalid_argument("null ping-pong buffer");
-    if (t_current < 0.0f || t_current > 1.0f || t_next < 0.0f || t_next > t_current)
-        throw std::invalid_argument("ping-pong timesteps must satisfy 0 <= next <= current <= 1");
+    // SA3 shifts the already-scaled init-noise schedule. Its first step may rise above t_current.
+    if (!std::isfinite(t_current) || !std::isfinite(t_next) ||
+        t_current < 0.0f || t_current > 1.0f || t_next < 0.0f || t_next > 1.0f)
+        throw std::invalid_argument("ping-pong timesteps must be finite and in [0, 1]");
     for (size_t i = 0; i < n; ++i) {
         const float denoised = x[i] - t_current * velocity[i];
         x[i] = (1.0f - t_next) * denoised + t_next * noise[i];

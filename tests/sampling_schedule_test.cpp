@@ -23,6 +23,16 @@ int main() {
     expect(std::fabs(frames_only.seconds_total - 12.0f * 4096.0f / 44100.0f) < 1e-7f,
            "--frames conditioner must infer duration from frames");
 
+    const auto transform_length = sa3::transform_duration(330750, 4096, 1);
+    expect(transform_length.schedule_frames == 87, "transform schedule must include the 0.5 s margin");
+    expect(std::fabs(transform_length.seconds_total - 8.0f) < 1e-7f,
+           "transform conditioner must include the 0.5 s margin");
+    expect(transform_length.canvas_samples == 151 * 4096,
+           "transform canvas must include 6 s of hidden headroom");
+    const auto small_transform_length = sa3::transform_duration(330750, 4096, 2);
+    expect(small_transform_length.canvas_samples == 152 * 4096,
+           "SAME-S transform canvas must align to an even latent frame count");
+
     const std::vector<std::string> shifts = {"LogSNR", "Flux", "Full", "None"};
     const std::vector<float> starts = {0.01f, 0.5f, 0.85f, 1.0f};
 
@@ -40,18 +50,27 @@ int main() {
                 expect(schedule.back() == 0.0f, tag + ": wrong end");
                 for (size_t i = 1; i < schedule.size(); ++i) {
                     expect(std::isfinite(schedule[i]), tag + ": non-finite timestep");
-                    expect(schedule[i] >= 0.0f && schedule[i] <= schedule[i - 1],
-                           tag + ": schedule is not descending");
+                    expect(schedule[i] >= 0.0f && schedule[i] <= 1.0f,
+                           tag + ": timestep is out of range");
                 }
             }
         }
     }
 
-    // Regression: the old code warped 0.5 * 7/8 directly and produced ~0.83, above its 0.5 start.
+    // PyTorch builds linspace(sigma_max, 0) before LogSNR shift. Its first interior
+    // point can rise above sigma_max, and ping-pong must accept that schedule.
     float p1 = 0.f, p2 = 0.f, p3 = 0.f, p4 = 0.f;
     sa3::dist_shift_defaults("LogSNR", p1, p2, p3, p4);
     const auto transform = sa3::make_sa3_schedule(8, 0.5f, 128, "LogSNR", p1, p2, p3, p4);
-    expect(transform[1] < transform[0], "transform LogSNR first step must remain below sigma_max");
+    expect(transform[1] > transform[0], "transform LogSNR must shift the scaled timestep");
+    const float logsnr = p4 - (0.5f * 7.0f / 8.0f) * (p4 - p2);
+    expect(std::fabs(transform[1] - 1.0f / (1.0f + std::exp(logsnr))) < 1e-6f,
+           "transform LogSNR must match the upstream first interior timestep");
+    float x = 0.25f, velocity = 0.1f, noise = -0.4f;
+    sa3::sampling::rf_pingpong_step(&x, &velocity, &noise, 1, transform[0], transform[1]);
+    const float expected = (1.0f - transform[1]) * (0.25f - transform[0] * velocity)
+                         + transform[1] * noise;
+    expect(std::fabs(x - expected) < 1e-6f, "ping-pong must accept an upward first timestep");
 
     if (fails) { std::fprintf(stderr, "%d failure(s)\n", fails); return 1; }
     std::printf("OK\n");
