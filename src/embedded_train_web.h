@@ -27,7 +27,7 @@ inline const std::string index_html =
     #new-btn { background:#b6222b; color:#fff; border:1px solid var(--accent); padding:7px 14px; border-radius:6px; cursor:pointer; font-weight:600; }
     #new-btn:disabled { opacity:.45; cursor:not-allowed; }
     .layout { display:flex; height:calc(100vh - 49px); }
-    .sidebar { width:280px; border-right:1px solid var(--border); overflow-y:auto; background:var(--panel); }
+    .sidebar { width:280px; flex:none; border-right:1px solid var(--border); overflow-y:auto; background:var(--panel); }
     .sidebar h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); padding:12px 14px 6px; margin:0; }
     .run { padding:10px 14px; border-bottom:1px solid var(--border); cursor:pointer; }
     .run:hover { background:var(--panel2); }
@@ -43,7 +43,7 @@ inline const std::string index_html =
     .run .meta { color:var(--muted); font-size:12px; margin-top:3px; }
     .run .bar { height:4px; background:var(--border); border-radius:3px; margin-top:6px; overflow:hidden; }
     .run .bar > i { display:block; height:100%; background:var(--accent); }
-    .main { flex:1; overflow-y:auto; padding:18px; }
+    .main { flex:1; min-width:0; overflow-y:auto; padding:18px; }
     .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:16px; }
     .card h3 { margin:0 0 12px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
@@ -58,8 +58,8 @@ inline const std::string index_html =
     .row { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
     .actions { display:flex; gap:10px; margin-top:14px; }
     button.sec { background:var(--panel2); color:var(--fg); border:1px solid var(--border); padding:8px 14px; border-radius:6px; cursor:pointer; }
-    button.danger { background:rg)sa3trainweb") +
-    std::string(R"sa3trainweb(ba(248,113,113,.15); color:var(--bad); border:1px solid rgba(248,113,113,.35); padding:8px 14px; border-radius:6px; cursor:pointer; }
+    butto)sa3trainweb") +
+    std::string(R"sa3trainweb(n.danger { background:rgba(248,113,113,.15); color:var(--bad); border:1px solid rgba(248,113,113,.35); padding:8px 14px; border-radius:6px; cursor:pointer; }
     button.primary { background:#b6222b; color:#fff; border:1px solid var(--accent); padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:600; }
     .stat { background:var(--panel2); border-radius:8px; padding:12px; }
     .stat .k { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
@@ -85,6 +85,9 @@ inline const std::string index_html =
     .embedded .sidebar #new-btn { display:block; width:100%; margin:12px 0 16px; }
     .embedded .sidebar #health { display:inline-block; margin-bottom:10px; }
     @media (max-width:700px) {
+      header { padding:10px 12px; gap:8px; }
+      header .spacer { display:none; }
+      header #new-btn { margin-left:auto; }
       .layout { display:block; height:auto; min-height:calc(100vh - 49px); }
       .sidebar { width:100%; max-height:180px; border-right:0; border-bottom:1px solid var(--border); }
       .main { width:100%; min-width:0; overflow:visible; padding:14px; }
@@ -113,22 +116,22 @@ inline const std::string index_html =
         <div class="grid">
           <div><label for="f-name">Run / LoRA name</label><input id="f-name" maxlength="64" placeholder="my-style" autocomplete="off" /></div>
           <div><label for="f-dataset">Dataset dir</label><div class="dataset-field"><input id="f-dataset" placeholder="/path/to/dataset" /><button id="browse-dataset" type="button" aria-label="Choose dataset folder" title="Choose dataset folder"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button></div></div>
-          <div><label>Model</label><select id="f-model"><option>medium</option><option>small-music</option><option>small-sfx</option></select></div>
-          <div><label>Device</label><select id="f-device"><option value="">Auto (best available GPU)</option><option value="cpu">CPU</option></select>)sa3trainweb") +
-    std::string(R"sa3trainweb(</div>
-          <div><label>Base model tier</label><select id="f-encoding"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · compact</option><option value="f32">F32</option></select></div>
-          <div><label>Adapter type</label><select id="f-adapter"><option>dora-rows</option><option>lora</option><option>dora-cols</option><option>bora</option><option>lora-xs</option><option>dora-rows-xs</option><option>dora-cols-xs</option><option>bora-xs</option></select></div>
-          <div><label>Rank</label><input id="f-rank" type="number" value="16" /></div>
-          <div><label>Alpha</label><input id="f-alpha" type="number" step="0.1" value="16" /></div>
-          <div><label>Learning rate</label><input id="f-lr" type="number" step="1e-5" value="0.0001" /></div>
+          <div><label for="f-model">Model</label><select id="f-model"><option>medium</option><option>small-music</option><option>small-sfx</option>)sa3trainweb") +
+    std::string(R"sa3trainweb(</select></div>
+          <div><label for="f-device">Device</label><select id="f-device"><option value="">Auto (best available GPU)</option><option value="cpu">CPU</option></select></div>
+          <div><label for="f-encoding">Base model tier</label><select id="f-encoding"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · compact</option><option value="f32">F32</option></select></div>
+          <div><label for="f-adapter">Adapter type</label><select id="f-adapter"><option>dora-rows</option><option>lora</option><option>dora-cols</option><option>bora</option><option>lora-xs</option><option>dora-rows-xs</option><option>dora-cols-xs</option><option>bora-xs</option></select></div>
+          <div><label for="f-rank">Rank</label><input id="f-rank" type="number" value="16" /></div>
+          <div><label for="f-alpha">Alpha</label><input id="f-alpha" type="number" step="0.1" value="16" /></div>
+          <div><label for="f-lr">Learning rate</label><input id="f-lr" type="number" step="1e-5" value="0.0001" /></div>
           <div><label for="f-steps">Max steps</label><input id="f-steps" type="number" min="1" value="3000" /></div>
           <div id="crop-duration-field"><label for="f-duration">Random crop duration (seconds)</label><input id="f-duration" type="number" min="1" step="0.1" value="47.5" /></div>
-          <div><label>Batch size</label><input id="f-batch" type="number" value="1" /></div>
-          <div><label>Checkpoint every</label><input id="f-ckpt" type="number" value="500" /></div>
-          <div><label>Seed</label><input id="f-seed" type="number" value="42" /></div>
-          <div><label>CFG dropout</label><input id="f-cfgdo" type="number" step="0.05" value="0.1" /></div>
-          <div><label>Grad clip</label><input id="f-gradclip" type="number" step="0.1" value="1.0" /></div>
-          <div><label>Output dir (optional)</label><input id="f-out" placeholder="train-runs/… (auto)" /></div>
+          <div><label for="f-batch">Batch size</label><input id="f-batch" type="number" value="1" /></div>
+          <div><label for="f-ckpt">Checkpoint every</label><input id="f-ckpt" type="number" value="500" /></div>
+          <div><label for="f-seed">Seed</label><input id="f-seed" type="number" value="42" /></div>
+          <div><label for="f-cfgdo">CFG dropout</label><input id="f-cfgdo" type="number" step="0.05" value="0.1" /></div>
+          <div><label for="f-gradclip">Grad clip</label><input id="f-gradclip" type="number" step="0.1" value="1.0" /></div>
+          <div><label for="f-out">Output dir (optional)</label><input id="f-out" placeholder="train-runs/… (auto)" /></div>
         </div>
         <p id="device-note" style="color:var(--muted);font-size:12px;margin:8px 0 0;">Detecting devices… Select a tier that is already downloaded for this model.</p>
         <div class="row" style="margin-top:12px;">
@@ -154,13 +157,13 @@ inline const std::string index_html =
           <div class="stat"><div class="k">Step</div><div class="v" id="d-step">0</div></div>
           <div class="stat"><div class="k">Loss</div><div class="v" id="d-loss">—</div></div>
           <div class="stat"><div class="k">LR</div><div class="v" id="d-lr">—</div></div>
-          <div class="stat"><div class="k">Grad norm</div><div class="v" id="d-gn">—</div></div>
+          <div class="stat"><div class="k">Grad norm</div><div class)sa3trainweb") +
+    std::string(R"sa3trainweb(="v" id="d-gn">—</div></div>
         </div>
         <div class="bar" style="height:6px;background:var(--border);border-radius:4px;overflow:hidden;margin-bottom:14px;">
           <i id="d-progress" style="display:block;height:100%;width:0;background:var(--accent);"></i>
         </div>
-        <p id="registration-note" class="small-not)sa3trainweb") +
-    std::string(R"sa3trainweb(e" role="status"></p>
+        <p id="registration-note" class="small-note" role="status"></p>
         <h3>Loss / LR</h3>
         <canvas id="spark"></canvas>
         <h3 style="margin-top:16px;">Log</h3>
