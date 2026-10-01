@@ -66,6 +66,10 @@ int main() {
     fails += expect(sa3::load_train_split_manifest(flat.string(), "train", m, err), "flat folder loads");
     fails += expect(m.filelist.size() == 1, "flat folder file count");
     fails += expect(sa3::resolve_train_pairs(m, pairs, err), "flat folder pairs resolve");
+    fails += expect(pairs.size() == 1 && fs::path(pairs[0].audio_path) == flat / "song.wav",
+                    "flat audio resolves directly in selected folder");
+    fails += expect(pairs.size() == 1 && fs::path(pairs[0].caption_path) == flat / "song.txt",
+                    "flat caption resolves directly in selected folder");
     fails += expect(sa3::validate_train_split_pairs(m, pairs, err), "flat folder pairs validate");
     fails += expect(pairs[0].audio_path.find("song.wav") != std::string::npos, "flat audio path");
     fails += expect(sa3::load_train_split_manifest(flat.string(), "test", m, err) && m.filelist.empty(),

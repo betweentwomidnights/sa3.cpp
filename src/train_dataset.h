@@ -33,6 +33,7 @@ struct TrainDatasetRecord {
 struct TrainSplitManifest {
     std::string root_dir;
     std::string split;
+    bool flat_directory = false;
     std::vector<std::string> filelist;
     std::vector<TrainDatasetRecord> records;
 };
@@ -153,6 +154,7 @@ inline bool load_train_split_manifest(const std::string& dataset_dir, const std:
                   "; select a folder of audio + matching .txt captions, or a manifest dataset";
             return false;
         }
+        out.flat_directory = true;
         for (const auto& audio : audio_files) {
             auto caption = audio;
             caption.replace_extension(".txt");
@@ -163,8 +165,8 @@ inline bool load_train_split_manifest(const std::string& dataset_dir, const std:
             TrainDatasetRecord rec;
             rec.id = audio.stem().string();
             rec.split = "train";
-            rec.audio_path = (std::filesystem::path("..") / audio.filename()).generic_string();
-            rec.caption_path = (std::filesystem::path("..") / caption.filename()).generic_string();
+            rec.audio_path = audio.filename().generic_string();
+            rec.caption_path = caption.filename().generic_string();
             out.filelist.push_back(rec.audio_path);
             out.records.push_back(std::move(rec));
         }
@@ -205,7 +207,7 @@ inline bool resolve_train_pairs(const TrainSplitManifest& m, std::vector<TrainAu
     out.clear();
     std::map<std::string, TrainDatasetRecord> by_audio;
     for (const TrainDatasetRecord& r : m.records) by_audio[r.audio_path] = r;
-    const std::string split_dir = train_join_path(m.root_dir, m.split);
+    const std::string split_dir = m.flat_directory ? m.root_dir : train_join_path(m.root_dir, m.split);
     for (const std::string& audio_rel : m.filelist) {
         auto it = by_audio.find(audio_rel);
         TrainDatasetRecord r;
