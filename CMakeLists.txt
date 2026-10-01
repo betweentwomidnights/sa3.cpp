@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sa3_cpp LANGUAGES C CXX)
+project(sa3_cpp VERSION 0.1.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -182,6 +182,7 @@ add_executable(sa3-server tools/sa3-server.cpp
     vendor/cpp-httplib/httplib.cpp
     vendor/yyjson/yyjson.c)
 target_link_libraries(sa3-server PRIVATE sa3 Threads::Threads)
+target_compile_definitions(sa3-server PRIVATE SA3_VERSION_STRING="${PROJECT_VERSION}")
 target_include_directories(sa3-server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cpp-httplib
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
@@ -190,6 +191,7 @@ if(SA3_BUILD_SAT)
         vendor/cpp-httplib/httplib.cpp
         vendor/yyjson/yyjson.c)
     target_link_libraries(sat-server PRIVATE sa3_sat Threads::Threads)
+    target_compile_definitions(sat-server PRIVATE SA3_VERSION_STRING="${PROJECT_VERSION}")
     target_include_directories(sat-server PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/vendor
         ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cpp-httplib
@@ -370,6 +372,9 @@ if(BUILD_TESTING)
                              sa3-sat-cli-vpred-steps-test PROPERTIES WILL_FAIL TRUE)
     endif()
     if(Python3_Interpreter_FOUND)
+        add_test(NAME sa3-server-runtime-contract-test
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_contract_test.py"
+                         "$<TARGET_FILE:sa3-server>" "${PROJECT_VERSION}" "sa3")
         add_test(NAME sa3-model-artifacts-test
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_artifacts_test.py")
         add_test(NAME sa3-web-assets-current
@@ -377,6 +382,9 @@ if(BUILD_TESTING)
         add_test(NAME sa3-train-web-assets-current
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_embedded_train_web.py" --check)
         if(SA3_BUILD_SAT)
+            add_test(NAME sa3-sat-server-runtime-contract-test
+                     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_contract_test.py"
+                             "$<TARGET_FILE:sat-server>" "${PROJECT_VERSION}" "sat")
             add_test(NAME sa3-sat-server-api-test
                      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_server_smoke.py"
                              "$<TARGET_FILE:sat-server>")
@@ -388,9 +396,11 @@ if(BUILD_TESTING)
                      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_t5_converter_test.py")
         endif()
         set_tests_properties(sa3-model-artifacts-test PROPERTIES LABELS "non-gpu;tooling")
+        set_tests_properties(sa3-server-runtime-contract-test PROPERTIES LABELS "non-gpu;server;packaging")
         set_tests_properties(sa3-web-assets-current sa3-train-web-assets-current
                              PROPERTIES LABELS "non-gpu;web;tooling")
         if(SA3_BUILD_SAT)
+            set_tests_properties(sa3-sat-server-runtime-contract-test PROPERTIES LABELS "non-gpu;sat;server;packaging")
             set_tests_properties(sa3-sat-server-api-test PROPERTIES LABELS "non-gpu;sat;server")
             set_tests_properties(sa3-sat-oobleck-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
             set_tests_properties(sa3-sat-dit-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")

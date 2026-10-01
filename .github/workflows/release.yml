@@ -1,21 +1,23 @@
-# ABOUTME: Builds the portable Windows packages for a published release and
-# ABOUTME: attaches them with SHA256SUMS, for supervisors that install sa3.cpp.
+# ABOUTME: Builds the split and standalone Windows packages for a release.
+# ABOUTME: A no-tag dispatch keeps a dry-run artifact without publishing.
 name: release
 
 on:
   release:
     types: [published]
-  # Rebuild and re-attach for a release that already exists, e.g. after a
-  # runner failure. Assets are replaced, not duplicated.
+  # With a tag, rebuild and re-attach an existing release. Without one,
+  # package the chosen branch as a dry run and retain its workflow artifact.
   workflow_dispatch:
     inputs:
       tag:
-        description: existing release tag to build and attach to (e.g. v0.1.0)
-        required: true
+        description: existing release tag to build and attach to (e.g. v0.1.0); empty for a dry run
+        required: false
         type: string
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   windows:
@@ -30,13 +32,27 @@ jobs:
     timeout-minutes: 240
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      VULKAN_VERSION: 1.4.350.0
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.TAG || github.ref }}
           submodules: recursive
+
+      - name: Choose the version
+        shell: pwsh
+        run: |
+          if ($env:TAG) {
+            $version = $env:TAG
+          } else {
+            $match = Select-String -Path CMakeLists.txt -Pattern 'project\(sa3_cpp VERSION (\d+\.\d+\.\d+)'
+            if (-not $match) { throw "no project(VERSION) in CMakeLists.txt" }
+            $version = "v" + $match.Matches[0].Groups[1].Value
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "packaging $version$(if (-not $env:TAG) { ' (dry run)' })"
 
       # The full toolkit rather than network sub-packages: the runtime pack
       # redistributes cudart and cuBLAS and ships NVIDIA's EULA with them, and
@@ -62,17 +78,52 @@ jobs:
           "CUDA_PATH=$cuda" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "$cuda\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      - name: Install Vulkan SDK
-        uses: humbletim/install-vulkan-sdk@v1.2
+      - name: Cache Vulkan SDK
+        id: cache-vulkan
+        uses: actions/cache@v4
         with:
-          version: 1.4.309.0
-          cache: true
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}-windows-2022
+
+      - name: Install Vulkan SDK
+        if: steps.cache-vulkan.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "vulkansdk.exe"
+          curl.exe -fsSL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          if ($LASTEXITCODE -ne 0) { throw "could not download the Vulkan SDK $env:VULKAN_VERSION" }
+          $run = Start-Process -FilePath $installer -WindowStyle Hidden -Wait -PassThru `
+            -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install"
+          if ($run.ExitCode -ne 0) { throw "the Vulkan SDK installer exited with $($run.ExitCode)" }
+
+      - name: Point at the Vulkan SDK
+        shell: pwsh
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          $spirv = Join-Path $sdk "Lib\cmake\SPIRV-Headers\SPIRV-HeadersConfig.cmake"
+          if (-not (Test-Path $spirv)) { throw "the Vulkan SDK at $sdk has no SPIRV-Headers CMake config" }
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: Build, test, and package
         shell: pwsh
-        run: ./ci/package-windows.ps1 -Version $env:TAG
+        run: ./ci/package-windows.ps1 -Version $env:VERSION
+
+      - name: Keep the packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: sa3-${{ env.VERSION }}-windows-x64
+          path: dist/
+          retention-days: 14
+
+      - name: Attest provenance
+        if: env.TAG != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.zip'
 
       - name: Attach to release
+        if: env.TAG != ''
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

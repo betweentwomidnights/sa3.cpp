@@ -5,6 +5,7 @@
 #include "sat/pipeline.h"
 #include "sat/profiles.h"
 #include "sat/time_stretch.h"
+#include "runtime_props.h"
 #include "wav.h"
 
 #include "httplib.h"
@@ -452,6 +453,7 @@ void launch(const Config& config, const std::string& sid, Prepared prepared) {
 Config parse_args(int argc, char** argv) {
     Config config;
     if (const char* value = std::getenv("SA3_MODELS_DIR")) config.models_dir = value;
+    if (const char* value = std::getenv("SA3_PORT")) config.port = std::stoi(value);
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         auto next = [&]() -> std::string {
@@ -490,9 +492,22 @@ Config parse_args(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     try {
+        for (int i = 1; i < argc; ++i) {
+            if (std::string(argv[i]) == "--version") {
+                std::puts(sa3::runtime_version());
+                return 0;
+            }
+            if (std::string(argv[i]) == "--props") {
+                std::puts(sa3::runtime_props_json("sat").c_str());
+                return 0;
+            }
+        }
         const Config config = parse_args(argc, argv);
         httplib::Server server;
         server.set_payload_max_length(64 * 1024);
+        server.Get("/props", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(sa3::runtime_props_json("sat"), "application/json");
+        });
         server.Get("/health", [config](const httplib::Request&, httplib::Response& res) {
             sa3::sat::PipelinePaths paths;
             std::string error;

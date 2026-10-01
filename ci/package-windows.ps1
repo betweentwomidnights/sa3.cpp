@@ -1,5 +1,5 @@
-# ABOUTME: Builds the portable Windows packages a supervisor such as gary4local
-# ABOUTME: installs: a core zip, one zip per GPU backend, the CUDA runtime, SHA256SUMS.
+# ABOUTME: Builds split Windows packages for gary4local and one standalone zip
+# ABOUTME: with both GPU backends and the CUDA runtime, plus SHA256SUMS.
 #
 # The backends are built as dynamic libraries (GGML_BACKEND_DL) and the CPU
 # backend in every instruction-set variant (GGML_CPU_ALL_VARIANTS), so one core
@@ -10,15 +10,15 @@
 # GGML_NATIVE is off so nothing is tuned to the machine that built it, and no
 # CUDA architecture list is passed: with native off, ggml's own default covers
 # Maxwell through Blackwell as PTX plus real code for the common cards. The
-# CUDA runtime is its own zip because it is most of the download and does not
-# change between sa3.cpp releases; a supervisor installs it once and puts it on
-# PATH, where ggml-cuda.dll's imports resolve from.
+# Gary4local installs the shared CUDA runtime once from its own release. The
+# standalone zip includes it so direct users need only one archive. -CudaRuntime
+# also emits a separate runtime zip for local supervisor install testing.
 #
 # The same script runs in .github/workflows/release.yml and on a developer
 # machine, so a package built by hand is the package CI would have built.
 #
 # Usage:
-#   ci\package-windows.ps1 -Version v0.1.0 [-BuildDir build-dist] [-OutDir dist] [-SkipTests]
+#   ci\package-windows.ps1 -Version v0.1.0 [-BuildDir build-dist] [-OutDir dist] [-SkipTests] [-CudaRuntime]
 #   ci\package-windows.ps1 -Version v0.1.0 -CpuOnly   # local packaging smoke check
 #   ci\package-windows.ps1 -Version v0.1.0 -CudaArch native  # local GPU smoke check
 param(
@@ -27,6 +27,7 @@ param(
     [string]$OutDir = "dist",
     [switch]$SkipTests,
     [switch]$CpuOnly,
+    [switch]$CudaRuntime,
     [string]$CudaArch = "",
     [int]$Jobs = 4
 )
@@ -50,6 +51,7 @@ if (-not $buildPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIg
 if (-not $outPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "OutDir must be inside $root"
 }
+if ($Version -notmatch '^v\d+\.\d+\.\d+$') { throw "Version must look like v0.1.0" }
 
 function Fail([string]$message) {
     Write-Error "package-windows: $message"
@@ -83,6 +85,7 @@ if (-not $cmake) { Fail "CMake was not found on PATH or in Visual Studio 2022" }
 if (-not $CpuOnly -and -not $env:CUDA_PATH) { Fail "CUDA_PATH is not set; install the CUDA Toolkit" }
 if (-not $CpuOnly -and -not $env:VULKAN_SDK) { Fail "VULKAN_SDK is not set; install the Vulkan SDK" }
 if ($CpuOnly -and $CudaArch) { Fail "-CudaArch cannot be used with -CpuOnly" }
+if ($CpuOnly -and $CudaRuntime) { Fail "-CudaRuntime requires a GPU build" }
 if ($CudaArch -and $BuildDir -eq "build-dist") { Fail "-CudaArch needs a separate -BuildDir to keep the portable release cache clean" }
 if ($Jobs -lt 1) { Fail "-Jobs must be positive" }
 
@@ -135,9 +138,16 @@ if (-not $SkipTests) {
     Invoke-Checked $ctest @("--test-dir", $buildPath, "-C", "Release", "--output-on-failure")
 }
 
+$bin = Join-Path $buildPath "bin\Release"
+foreach ($server in "sa3-server.exe", "sat-server.exe") {
+    $reported = (& (Join-Path $bin $server) --version).Trim()
+    if ("v$reported" -ne $Version) {
+        Fail "$server reports $reported but the package is $Version; update project(VERSION) in CMakeLists.txt"
+    }
+}
+
 # --- stage ------------------------------------------------------------------
 
-$bin = Join-Path $buildPath "bin\Release"
 $stage = Join-Path $buildPath "package"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $outPath | Out-Null
@@ -179,6 +189,24 @@ Copy-Item (Join-Path $root "vendor\yyjson\LICENSE") (Join-Path $coreDir "LICENSE
 Copy-Item (Join-Path $root "vendor\signalsmith-stretch\LICENSE.txt") (Join-Path $coreDir "LICENSE-signalsmith-stretch.txt")
 Copy-Item (Join-Path $root "vendor\signalsmith-linear\LICENSE.txt") (Join-Path $coreDir "LICENSE-signalsmith-linear.txt")
 
+$buildInfo = [ordered]@{
+    service     = "sa3"
+    version     = $Version
+    commit      = (git rev-parse HEAD).Trim()
+    dirty       = [bool](git status --porcelain --untracked-files=no)
+    ggml_commit = (git -C ggml rev-parse HEAD).Trim()
+    platform    = "windows-x64"
+    backends    = @()
+    cuda        = $(if ($CpuOnly) { $null } else { $cudaVersion })
+    vulkan_sdk  = $(if ($CpuOnly) { $null } else { Split-Path -Leaf $env:VULKAN_SDK })
+    built_utc   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+}
+if (-not $CpuOnly) { $buildInfo.backends = @("cuda", "vulkan") }
+[System.IO.File]::WriteAllText(
+    (Join-Path $coreDir "BUILD-INFO.json"),
+    ($buildInfo | ConvertTo-Json) + "`n",
+    (New-Object System.Text.UTF8Encoding($false)))
+
 # A GPU backend that landed in the core zip would load on every machine, and
 # one missing from its own zip would never load anywhere. Check both ways.
 foreach ($backend in "cuda", "vulkan") {
@@ -194,6 +222,15 @@ if (-not $CpuOnly) {
         "cublasLt64_$cudaMajor.dll"
     ) (Join-Path $env:CUDA_PATH "bin")
     Copy-Item (Join-Path $env:CUDA_PATH "EULA.txt") (Join-Path $cudartDir "NVIDIA-CUDA-EULA.txt")
+
+    $standaloneDir = Join-Path $stage "standalone"
+    New-Item -ItemType Directory -Force $standaloneDir | Out-Null
+    foreach ($part in $coreDir, $cudaDir, $vulkanDir, $cudartDir) {
+        Get-ChildItem -Path $part -File | Copy-Item -Destination $standaloneDir
+    }
+    Copy-Item (Join-Path $root "models.cmd") $standaloneDir
+    Copy-Item (Join-Path $root "ci\standalone-README.txt") (Join-Path $standaloneDir "README.txt")
+    Copy-Item (Join-Path $root "prompts") (Join-Path $standaloneDir "prompts") -Recurse
 }
 
 # --- zip and checksum -------------------------------------------------------
@@ -206,8 +243,15 @@ $archives = [ordered]@{
 if (-not $CpuOnly) {
     $archives["sa3-$Version-windows-x64-cuda.zip"] = $cudaDir
     $archives["sa3-$Version-windows-x64-vulkan.zip"] = $vulkanDir
-    $archives["cudart-$cudaMajorMinor-windows-x64.zip"] = $cudartDir
+    $archives["sa3-$Version-windows-x64-standalone.zip"] = $standaloneDir
+    if ($CudaRuntime) { $archives["cudart-$cudaMajorMinor-windows-x64.zip"] = $cudartDir }
 }
+
+$existing = @(Get-ChildItem -LiteralPath $outPath -File)
+if (@($existing | Where-Object { $_.Name -notmatch '^(sa3-v\d+\.\d+\.\d+-windows-x64-(core|cuda|vulkan|standalone)\.zip|cudart-\d+\.\d+-windows-x64\.zip|SHA256SUMS)$' }).Count) {
+    Fail "OutDir contains files that are not sa3.cpp package outputs: $outPath"
+}
+if ($existing.Count) { $existing | Remove-Item -Force }
 
 $sums = New-Object System.Text.StringBuilder
 foreach ($entry in $archives.GetEnumerator()) {

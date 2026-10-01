@@ -18,6 +18,7 @@
 #include "embedded_web.h"
 #include "lora_convert.h"
 #include "prompt_pool.h"
+#include "runtime_props.h"
 
 #include "httplib.h"
 #include "yyjson.h"
@@ -1104,9 +1105,19 @@ std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved) {
 } // namespace
 
 int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--version") == 0) {
+            puts(sa3::runtime_version());
+            return 0;
+        }
+        if (strcmp(argv[i], "--props") == 0) {
+            puts(sa3::runtime_props_json("sa3").c_str());
+            return 0;
+        }
+    }
     sa3::load_dotenv();
     std::string host = "127.0.0.1";
-    int port = 8006;
+    int port = getenv("SA3_PORT") ? atoi(getenv("SA3_PORT")) : 8006;
     int train_port = 0;
     if (const char* e = getenv("SA3_MODELS_DIR"))   g_models_dir   = e;
     if (const char* e = getenv("SA3_ADAPTERS_DIR")) g_adapters_dir = e;
@@ -1136,6 +1147,10 @@ int main(int argc, char** argv) {
         else if (a == "--web-dir")      g_web_dir = next("");
         else if (a == "--audio-in-dir") g_audio_in_dir = next("audio-in");
         else if (a == "--threads")      { g_cpu_threads = atoi(next("0")); threads_set = true; }
+    }
+    if (port < 1 || port > 65535) {
+        fprintf(stderr, "--port must be between 1 and 65535\n");
+        return 1;
     }
     if (threads_set && g_cpu_threads <= 0) {
         fprintf(stderr, "--threads must be positive\n");
@@ -1276,6 +1291,10 @@ int main(int argc, char** argv) {
                            "\",\"loaded\":" + (loaded ? "true" : "false") +
                            ",\"loudness_defaults\":" + loudness_params_json(sa3::loudness_defaults_from_env()) + "}";
         res.set_content(body, "application/json");
+    });
+
+    svr.Get("/props", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(sa3::runtime_props_json("sa3"), "application/json");
     });
 
     svr.Get("/models/catalog", [](const httplib::Request&, httplib::Response& res) {
