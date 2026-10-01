@@ -54,23 +54,14 @@ jobs:
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "packaging $version$(if (-not $env:TAG) { ' (dry run)' })"
 
-      # The full toolkit rather than network sub-packages: the runtime pack
-      # redistributes cudart and cuBLAS and ships NVIDIA's EULA with them, and
-      # only a full install is sure to lay all three down.
-      - name: Cache CUDA toolkit
-        id: cache-cuda
-        uses: actions/cache@v4
-        with:
-          path: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA
-          key: cuda-12.8.1-windows-2022
-
+      # Install the full toolkit on every runner. Caching only the CUDA folder
+      # omits the Visual Studio integration installed outside that folder;
+      # CMake then fails with "No CUDA toolset found" on a cache hit.
       - name: Install CUDA toolkit
-        if: steps.cache-cuda.outputs.cache-hit != 'true'
         uses: Jimver/cuda-toolkit@v0.2.30
         with:
           cuda: '12.8.1'
 
-      # A cache hit skips the installer, which is what normally sets these.
       - name: Point at the CUDA toolkit
         shell: pwsh
         run: |
