@@ -80,7 +80,9 @@ inline bool train_same_encoder_build(TrainSameEncoder& e, GgufModel& ae, const S
     const int64_t N2 = c.chunk ? N + 2 * c.shift : 0;
     const int ch = c.out_channels / c.patch_size;
 
-    ggml_init_params ip = { (size_t)512 * 1024 * 1024, nullptr, true };
+    // This metadata arena stays alive across windows. The small/medium 128-frame graphs use
+    // under 2 MiB; leave ample room for other frame counts without retaining 512 MiB per run.
+    ggml_init_params ip = { (size_t)64 * 1024 * 1024, nullptr, true };
     e.ctx = ggml_init(ip);
     if (!e.ctx) { err = "ggml_init failed for SAME encode graph"; return false; }
 
