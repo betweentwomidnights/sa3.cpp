@@ -14,7 +14,10 @@ separately.
 
 `--device` selects a ggml device; without it, the pipeline uses `SA3_DEVICE`
 or the best available GPU. `--t5-encoding` and `--ae-encoding` override the
-DiT tier. The default bind address is `127.0.0.1`. Each service resolves its
+DiT tier. `SA3_PORT` and `SA3_MODELS_DIR` can configure supervised launches;
+explicit CLI options take precedence. `--version` prints the compiled version,
+and `--props` lists available devices without loading a model or binding a port.
+The default bind address is `127.0.0.1`. Each service resolves its
 three GGUF files from `--models-dir` and reports a missing set through
 `GET /health` (`503`, `status: model_missing`). It loads on the first generation
 and retains weights for subsequent requests. `POST /unload` releases them when

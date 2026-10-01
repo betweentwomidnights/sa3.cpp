@@ -18,9 +18,9 @@ its browser tools for downstream applications. The project release version is
   Audio Open 1.0, and Foundation-1.
 - A model-scoped `sat-server` for Foundation-1 loops and SAOS generations and
   loops, including published SAOS finetunes.
-- Split Windows x64 runtime archives for the portable CPU core, CUDA backend,
-  Vulkan backend, and CUDA runtime, with SHA-256 checksums. Model weights are
-  downloaded separately.
+- Split Windows x64 runtime archives for gary4local (CPU core, CUDA, Vulkan)
+  and a standalone archive containing both GPU backends and the CUDA runtime,
+  with SHA-256 checksums. Model weights are downloaded separately.
 
 ## Scope and limitations
 

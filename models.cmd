@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 rem Download the sa3.cpp GGUF model set from HuggingFace (public repos) with curl.exe - no Python.
 rem Usage: models.cmd [--variant medium^|small-music^|small-sfx] [--encoding TYPE] ...
-rem        models.cmd --sat [--sat-model saos] [--saos-variant arc^|kickbass^|jerry-grunge] [--encoding TYPE] ...
+rem        models.cmd --sat [--sat-model saos^|foundation-1^|sao1] [--saos-variant arc^|kickbass^|jerry-grunge] [--encoding TYPE] ...
 rem   defaults: SA3 medium/f16 DiT + f32 autoencoder; SAOS ARC/all-F16; into .\models
 
 set "VARIANT=medium"
@@ -112,8 +112,8 @@ if not "%TRAINING_BASE%"=="0" (
     echo --training-base applies to SA3, not --sat 1>&2
     exit /b 2
 )
-if /I not "%SAT_MODEL%"=="saos" (
-    echo unknown --sat-model "%SAT_MODEL%" ^(currently: saos^) 1>&2
+if /I not "%SAT_MODEL%"=="saos" if /I not "%SAT_MODEL%"=="foundation-1" if /I not "%SAT_MODEL%"=="sao1" (
+    echo unknown --sat-model "%SAT_MODEL%" ^(saos, foundation-1, sao1^) 1>&2
     exit /b 2
 )
 if "%ENCODING_SET%"=="0" set "ENCODING=f16"
@@ -137,6 +137,7 @@ if /I "%AE_ENCODING%"=="q8_0" set "AE_ENC=Q8_0"
 if /I "%AE_ENCODING%"=="q5_k_m" set "AE_ENC=Q5_K_M"
 if /I "%AE_ENCODING%"=="q4_k_m" set "AE_ENC=Q4_K_M"
 if not defined AE_ENC ( echo unsupported SAOS Oobleck encoding "%AE_ENCODING%" 1>&2 & exit /b 2 )
+if /I not "%SAT_MODEL%"=="saos" goto sat_large
 if /I "%SAOS_VARIANT%"=="arc" set "SAOS_DIT=stable-audio-open-small-dit-0.3B-v1.0-%ENC%.gguf"
 if /I "%SAOS_VARIANT%"=="kickbass" set "SAOS_DIT=finetunes/kickbass/kickbass-v1-e257-dit-0.3B-v1.0-%ENC%.gguf"
 if /I "%SAOS_VARIANT%"=="jerry-grunge" set "SAOS_DIT=finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-%ENC%.gguf"
@@ -152,8 +153,26 @@ if errorlevel 1 exit /b 1
 echo [done] SAOS %SAOS_VARIANT% ^(%ENC%^) -^> %OUT%\
 exit /b 0
 
+:sat_large
+if /I "%SAT_MODEL%"=="foundation-1" (
+    set "LARGE_REPO=%NAMESPACE%/foundation-1-GGUF"
+    set "LARGE_NAME=foundation-1"
+) else (
+    set "LARGE_REPO=%NAMESPACE%/stable-audio-open-1.0-GGUF"
+    set "LARGE_NAME=stable-audio-open-1.0"
+)
+if not exist "%OUT%" mkdir "%OUT%"
+call :dl "%LARGE_REPO%" "%LARGE_NAME%-dit-1.1B-v1.0-%ENC%.gguf"
+if errorlevel 1 exit /b 1
+call :dl "%LARGE_REPO%" "t5-base-encoder-128tok-0.1B-v1.0-%T5_ENC%.gguf"
+if errorlevel 1 exit /b 1
+call :dl "%LARGE_REPO%" "stable-audio-open-oobleck-v1.0-%AE_ENC%.gguf"
+if errorlevel 1 exit /b 1
+echo [done] %LARGE_NAME% ^(%ENC%^) -^> %OUT%\
+exit /b 0
+
 :help
-echo Usage: models.cmd [SA3 options] or --sat [--sat-model saos] [--saos-variant arc^|kickbass^|jerry-grunge] [--encoding f16^|q8_0^|q5_k_m^|q4_k_m] [--out DIR] [--dry-run]
+echo Usage: models.cmd [SA3 options] or --sat [--sat-model saos^|foundation-1^|sao1] [--saos-variant arc^|kickbass^|jerry-grunge] [--encoding f16^|q8_0^|q5_k_m^|q4_k_m] [--out DIR] [--dry-run]
 exit /b 0
 
 :dl
