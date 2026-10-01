@@ -16,6 +16,8 @@ its browser tools for downstream applications. The project release version is
   (`sa3-train-web`), with pillopaus-project's authorship and UI credit retained.
 - The optional Stable Audio Tools runtime for Stable Audio Open Small, Stable
   Audio Open 1.0, and Foundation-1.
+- A model-scoped `sat-server` for Foundation-1 loops and SAOS generations and
+  loops, including published SAOS finetunes.
 - Split Windows x64 runtime archives for the portable CPU core, CUDA backend,
   Vulkan backend, and CUDA runtime, with SHA-256 checksums. Model weights are
   downloaded separately.
@@ -29,6 +31,9 @@ its browser tools for downstream applications. The project release version is
   authentication. Keep them local unless you provide network access controls.
 - Model weights have their own licenses and download terms and are not included
   in the runtime archives.
+- Foundation-1's HTTP service maps host tempo to a trained model BPM and uses
+  native pitch-preserving time stretch on output. Extreme ratios need listening
+  checks in downstream hosts.
 
 This draft should be finalized against the exact tagged commit and the artifacts
 produced by the release workflow before publishing.

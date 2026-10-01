@@ -96,10 +96,11 @@ The profile matches RoyalCities' three separate lengths:
 The decoded result is then cropped to the exact musical sample count. Unsupported
 BPMs are rejected rather than silently mapped to a different tempo.
 
-Pitch-preserving time stretching for arbitrary host tempos remains an open application
-feature. It works well in gary4local, but bringing it into this repository would require
-a deliberately selected DSP implementation and dependency/licensing policy; it does not
-belong in the DiT/T5/Oobleck primitives.
+The model profile and CLI reject unsupported model BPMs. The separate `sat-server`
+accepts `host_bpm`, selects the nearest trained BPM, and pitch-preserves the
+generated audio at the host tempo using the MIT-licensed Signalsmith Stretch
+implementation. This remains service policy rather than DiT/T5/Oobleck graph logic;
+see [SAT_SERVER.md](SAT_SERVER.md).
 
 The optional `sat-generate` frontend exposes Foundation-specific prompt randomization
 without putting application policy into the pipeline. `--randomize` uses a deterministic

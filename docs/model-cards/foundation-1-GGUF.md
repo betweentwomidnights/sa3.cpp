@@ -37,10 +37,10 @@ Foundation-1 was trained for 4- or 8-bar clips at 100, 110, 120, 128, 130, 140, 
 profile calculates the exact sample crop, the whole-second `seconds_total` conditioning
 value, and the padded Oobleck latent canvas independently to match RoyalCities' inference.
 
-Unsupported BPMs are intentionally rejected by this model profile. We are considering an
-optional pitch-preserving time-stretch layer for arbitrary host tempos; it is not part of
-the current GGML inference primitives. Applications such as gary4local may map to a trained
-BPM and stretch the result downstream.
+Unsupported model BPMs are intentionally rejected by this profile. The native
+`sat-server` accepts `host_bpm`, maps it to the nearest trained BPM, and
+pitch-preserves the output at the host tempo. That service-level stretch does
+not change the GGML model primitives; see [SAT_SERVER.md](../SAT_SERVER.md).
 
 RoyalCities' UI profile uses DPM++ 3M SDE, sigma 0.01–100, 100 steps, and CFG 7. The
 gary4local fallback profile uses DPM++ 2M SDE, sigma 0.5–50, 100 steps, and CFG 7.

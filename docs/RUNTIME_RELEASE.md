@@ -3,12 +3,12 @@
 The Windows runtime follows the same split package layout as yuey.cpp. A supervisor
 such as gary4local installs the core archive and one backend archive into one
 directory, checks each archive against its pinned SHA-256, and launches
-`sa3-server.exe`. The release contains binaries and licenses; users download
+`sa3-server.exe` or a model-scoped `sat-server.exe`. The release contains binaries and licenses; users download
 GGUF model weights separately.
 
 | Archive | Contents |
 |---|---|
-| `sa3-<tag>-windows-x64-core.zip` | `sa3-server`, `sa3-train-web`, `sa3-train`, `sa3-generate`, `sat-generate`, `sa3-lora-convert`, `sa3-smoke`, `sa3.dll`, ggml core and CPU variants, project and third-party licenses, and this guide |
+| `sa3-<tag>-windows-x64-core.zip` | `sa3-server`, `sa3-train-web`, `sa3-train`, `sa3-generate`, `sat-generate`, `sat-server`, `sa3-lora-convert`, `sa3-smoke`, `sa3.dll`, ggml core and CPU variants, project and third-party licenses, and this guide |
 | `sa3-<tag>-windows-x64-cuda.zip` | `ggml-cuda.dll` for NVIDIA GPUs |
 | `sa3-<tag>-windows-x64-vulkan.zip` | `ggml-vulkan.dll` for AMD, Intel, or Vulkan-capable NVIDIA GPUs |
 | `cudart-<CUDA version>-windows-x64.zip` | CUDA runtime DLLs and NVIDIA EULA; needed with the CUDA backend |
@@ -18,20 +18,26 @@ runtime may live in a shared directory on `PATH`. `SHA256SUMS` accompanies the
 archives. The core includes the project `LICENSE`, individual ggml, cpp-httplib,
 and yyjson license files, and `THIRD_PARTY_NOTICES.md`. The CUDA runtime archive
 includes NVIDIA's EULA. The core includes the optional Stable Audio Tools component in
-`sa3.dll` and `sat-generate.exe`, so Stable Audio Open and Foundation-1 families
+`sa3.dll`, `sat-generate.exe`, and `sat-server.exe`, so Stable Audio Open and Foundation-1 families
 do not require a separate build.
 
-To run both browser views from the unpacked directory:
+The same core and backend files can serve SA3, Foundation-1, and SAOS on
+separate ports. Each SAT model gets its own `sat-server` process, keeping its
+weight cache and model-specific API separate without installing a second CUDA
+runtime. See [SAT_SERVER.md](SAT_SERVER.md) for endpoints and host-tempo
+stretch behavior.
+
+To run both browser views from the unpacked directory with one command:
 
 ```powershell
 $env:SA3_MODELS_DIR = 'C:\path\to\models'
-.\sa3-server.exe --port 8006
-# In another terminal:
-.\sa3-train-web.exe --port 8016
+.\studio.ps1 -Port 8006 -TrainPort 8016
 ```
 
 Open `http://127.0.0.1:8006/` for inference or `http://127.0.0.1:8016/`
-for LoRA training. The pages link to one another. Training requires the matching
+for LoRA training. The pages link to one another. You can also launch
+`sa3-server.exe` or `sa3-train-web.exe` alone when only one service is needed.
+Training requires the matching
 base DiT GGUF and a dataset. The training page lists devices detected by ggml
 and lets the user select a downloaded base model tier. The server defaults to
 loopback; callers that expose it to a network must supply their own access

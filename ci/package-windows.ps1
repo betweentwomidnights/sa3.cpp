@@ -159,6 +159,7 @@ $coreDir = Stage "core" @(
     "sa3-train.exe",
     "sa3-generate.exe",
     "sat-generate.exe",
+    "sat-server.exe",
     "sa3-lora-convert.exe",
     "sa3-smoke.exe",
     "sa3.dll",
@@ -170,10 +171,13 @@ Copy-Item (Join-Path $root "LICENSE") $coreDir
 Copy-Item (Join-Path $root "studio.cmd") $coreDir
 Copy-Item (Join-Path $root "studio.ps1") $coreDir
 Copy-Item (Join-Path $root "docs\RUNTIME_RELEASE.md") (Join-Path $coreDir "RUNTIME_README.md")
+Copy-Item (Join-Path $root "docs\SAT_SERVER.md") (Join-Path $coreDir "SAT_SERVER.md")
 Copy-Item (Join-Path $root "docs\THIRD_PARTY_NOTICES.md") (Join-Path $coreDir "THIRD_PARTY_NOTICES.md")
 Copy-Item (Join-Path $root "ggml\LICENSE") (Join-Path $coreDir "LICENSE-ggml.txt")
 Copy-Item (Join-Path $root "vendor\cpp-httplib\LICENSE") (Join-Path $coreDir "LICENSE-cpp-httplib.txt")
 Copy-Item (Join-Path $root "vendor\yyjson\LICENSE") (Join-Path $coreDir "LICENSE-yyjson.txt")
+Copy-Item (Join-Path $root "vendor\signalsmith-stretch\LICENSE.txt") (Join-Path $coreDir "LICENSE-signalsmith-stretch.txt")
+Copy-Item (Join-Path $root "vendor\signalsmith-linear\LICENSE.txt") (Join-Path $coreDir "LICENSE-signalsmith-linear.txt")
 
 # A GPU backend that landed in the core zip would load on every machine, and
 # one missing from its own zip would never load anywhere. Check both ways.

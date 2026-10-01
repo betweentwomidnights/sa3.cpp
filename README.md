@@ -84,6 +84,11 @@ for Stable Audio Open 1.0. See
 [docs/STABLE_AUDIO_OPEN_1.md](docs/STABLE_AUDIO_OPEN_1.md) for timing controls,
 Foundation prompt randomization, named profiles, and quantization results.
 
+The optional build also includes `sat-server`, a native HTTP service for
+Foundation-1, SAOS, and SAOS finetunes. Run one process per model; the processes
+share the same packaged runtime and GPU backend. See
+[docs/SAT_SERVER.md](docs/SAT_SERVER.md) for startup commands and endpoints.
+
 updating an existing checkout across the one-time ggml URL migration:
 
 ```bash

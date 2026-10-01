@@ -185,6 +185,16 @@ target_link_libraries(sa3-server PRIVATE sa3 Threads::Threads)
 target_include_directories(sa3-server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cpp-httplib
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+if(SA3_BUILD_SAT)
+    add_executable(sat-server tools/sat-server.cpp
+        vendor/cpp-httplib/httplib.cpp
+        vendor/yyjson/yyjson.c)
+    target_link_libraries(sat-server PRIVATE sa3_sat Threads::Threads)
+    target_include_directories(sat-server PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendor
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cpp-httplib
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+endif()
 if(MSVC)
     set_source_files_properties(vendor/yyjson/yyjson.c vendor/cpp-httplib/httplib.cpp PROPERTIES COMPILE_FLAGS /w)
 else()
@@ -337,7 +347,12 @@ if(BUILD_TESTING)
     add_test(NAME sa3-backend-compute-status-test COMMAND sa3-backend-compute-status-test)
     add_test(NAME sa3-set-wide-row-test COMMAND sa3-set-wide-row-test)
     if(SA3_BUILD_SAT)
+        add_executable(sa3-sat-time-stretch-test tests/sat_time_stretch_test.cpp)
+        target_link_libraries(sa3-sat-time-stretch-test PRIVATE sa3)
+        target_include_directories(sa3-sat-time-stretch-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
+        add_test(NAME sa3-sat-time-stretch-test COMMAND sa3-sat-time-stretch-test)
         add_test(NAME sa3-sat-sampling-test COMMAND sa3-sat-sampling-test)
+        add_test(NAME sa3-sat-server-help-test COMMAND sat-server --help)
         add_test(NAME sa3-sat-cli-help-test COMMAND sat-generate --help)
         add_test(NAME sa3-sat-cli-model-option-test COMMAND sat-generate --model arc --randomize)
         add_test(NAME sa3-sat-cli-foundation-duration-test
@@ -362,6 +377,9 @@ if(BUILD_TESTING)
         add_test(NAME sa3-train-web-assets-current
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_embedded_train_web.py" --check)
         if(SA3_BUILD_SAT)
+            add_test(NAME sa3-sat-server-api-test
+                     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_server_smoke.py"
+                             "$<TARGET_FILE:sat-server>")
             add_test(NAME sa3-sat-oobleck-converter-test
                      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sat_oobleck_converter_test.py")
             add_test(NAME sa3-sat-dit-converter-test
@@ -373,6 +391,7 @@ if(BUILD_TESTING)
         set_tests_properties(sa3-web-assets-current sa3-train-web-assets-current
                              PROPERTIES LABELS "non-gpu;web;tooling")
         if(SA3_BUILD_SAT)
+            set_tests_properties(sa3-sat-server-api-test PROPERTIES LABELS "non-gpu;sat;server")
             set_tests_properties(sa3-sat-oobleck-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
             set_tests_properties(sa3-sat-dit-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
             set_tests_properties(sa3-sat-t5-converter-test PROPERTIES LABELS "non-gpu;sat;tooling")
@@ -388,7 +407,8 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "non-gpu;training;lora")
     set_tests_properties(sa3-sampling-schedule-test PROPERTIES LABELS "non-gpu;sampling")
     if(SA3_BUILD_SAT)
-        set_tests_properties(sa3-sat-sampling-test sa3-sat-cli-help-test
+        set_tests_properties(sa3-sat-sampling-test sa3-sat-time-stretch-test
+                             sa3-sat-server-help-test sa3-sat-cli-help-test
                              sa3-sat-cli-model-option-test
                              sa3-sat-cli-foundation-duration-test
                              sa3-sat-cli-saos-duration-test

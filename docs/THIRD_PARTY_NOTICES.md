@@ -6,6 +6,12 @@ project's `LICENSE`:
 - `LICENSE-ggml.txt` — ggml backend and core, MIT License, copyright (c) 2023–2026 The ggml authors.
 - `LICENSE-cpp-httplib.txt` — cpp-httplib, MIT License, copyright (c) 2017 yhirose.
 - `LICENSE-yyjson.txt` — yyjson, MIT License, copyright (c) 2020 YaoYuan.
+- `LICENSE-signalsmith-stretch.txt` — Signalsmith Stretch 1.3.2,
+  [source](https://github.com/Signalsmith-Audio/signalsmith-stretch/tree/a670068d9aeb64913331d5cc29337b19a457a7df),
+  MIT License, copyright (c) 2022 Geraint Luff / Signalsmith Audio Ltd.
+- `LICENSE-signalsmith-linear.txt` — Signalsmith Linear 0.6.4,
+  [source](https://github.com/Signalsmith-Audio/linear/tree/de55e6a50ffcf6f8f43f649692d94691c7025151),
+  MIT License, copyright (c) 2025 Signalsmith Audio.
 
 The separate CUDA runtime archive includes NVIDIA's EULA. Model weights are not
 included in these runtime packages; each model's license and download terms
