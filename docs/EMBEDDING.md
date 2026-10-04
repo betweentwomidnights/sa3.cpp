@@ -229,6 +229,16 @@ const sa3_api_v1* api = get_api ? get_api(SA3_ABI_VERSION_1) : NULL;         // 
 `cudart64_*.dll` / `cublas*` ) beside your binary: `MyPlugin.vst3\Contents\x86_64-win\` for the VST3, next to the
 `.exe` for the standalone.
 
+**build sa3.cpp for a plugin with `-DSA3_PRIVATE_GGML=ON`.** `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` decides where a
+dependency is *searched for*, but Windows binds an import of `ggml.dll` to any module of that name already loaded
+in the process, from whatever folder, without searching at all. In a DAW that means an older release of one of
+our plugins, or another vendor's ggml-based plugin, can hand your `sa3.dll` its ggml. With FoundationKeys 0.1.2
+loaded first, a plain-named sa3 build never loaded a ggml of its own. `SA3_PRIVATE_GGML` names the libraries
+after the backend and the ggml commit (`sa3-vulkan-ca7bcb6f-ggml.dll`, `sa3-vulkan-ca7bcb6f-ggml-base.dll`, ...),
+so a plugin only ever shares ggml with a build of the same code. Copy `*ggml*.dll` rather than `ggml*.dll`. It
+needs shared ggml libraries (not `SA3_STATIC`) and git, to read the ggml commit; the release packages for
+gary4local leave it off and keep `ggml.dll`.
+
 **models:** the DAW's working directory is unknown, so don't rely on the `"models"` default — pass an absolute
 `sa3_context_config_v1.models_dir` (bundle the ggufs, resolve the path at runtime,
 or read an env var like `SA3_MODELS_DIR`).

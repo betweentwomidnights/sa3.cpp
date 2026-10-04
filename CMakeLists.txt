@@ -128,6 +128,60 @@ if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git" AND
             "then `git submodule update --init --recursive`. Local ggml work was not modified.")
     endif()
 endif()
+
+# Plugins load sa3.dll into a DAW process, where Windows binds an import of ggml.dll to any
+# ggml.dll already loaded, from whatever folder: an older release of one of our plugins, or
+# another vendor's ggml-based plugin, would hand this build its ggml. SA3_PRIVATE_GGML names
+# the ggml libraries after the backend and the exact ggml commit (sa3-vulkan-ca7bcb6f-ggml.dll,
+# sa3-vulkan-ca7bcb6f-ggml-base.dll, ...), so a plugin only ever shares ggml with a build of the
+# same code. Off by default: the release packages keep ggml.dll, as gary4local expects.
+option(SA3_PRIVATE_GGML "Name ggml's shared libraries sa3-<backend>-<ggml commit>-ggml* (for plugins)" OFF)
+if(SA3_PRIVATE_GGML)
+    if(SA3_STATIC OR (DEFINED BUILD_SHARED_LIBS AND NOT BUILD_SHARED_LIBS))
+        message(FATAL_ERROR "SA3_PRIVATE_GGML names shared libraries; it cannot be used with a static ggml")
+    endif()
+    set(_sa3_backends "")
+    foreach(_backend CUDA VULKAN METAL HIP)
+        if(GGML_${_backend})
+            string(TOLOWER "${_backend}" _backend_lower)
+            list(APPEND _sa3_backends "${_backend_lower}")
+        endif()
+    endforeach()
+    if(NOT _sa3_backends)
+        set(_sa3_backends "cpu")
+    endif()
+    string(REPLACE ";" "-" _sa3_backend_tag "${_sa3_backends}")
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C ggml rev-parse --short=8 HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE _sa3_ggml_short_result
+        OUTPUT_VARIABLE _sa3_ggml_short
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(NOT GIT_FOUND OR NOT _sa3_ggml_short_result EQUAL 0 OR NOT _sa3_ggml_short)
+        message(FATAL_ERROR "SA3_PRIVATE_GGML needs git to read the ggml commit; set GGML_LIBRARY_PREFIX yourself instead")
+    endif()
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C ggml status --porcelain --untracked-files=no
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _sa3_ggml_dirty
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    set(_sa3_ggml_prefix "sa3-${_sa3_backend_tag}-${_sa3_ggml_short}-")
+    if(_sa3_ggml_dirty)
+        # Local ggml edits are not the commit the name claims; keep them from matching a clean build.
+        set(_sa3_ggml_prefix "sa3-${_sa3_backend_tag}-${_sa3_ggml_short}-dirty-")
+        message(WARNING "ggml has local changes; its libraries are named ${_sa3_ggml_prefix}ggml*")
+    endif()
+    # A cache entry, not a plain variable: ggml's own cmake_minimum_required would hide the latter.
+    set(GGML_LIBRARY_PREFIX "${_sa3_ggml_prefix}" CACHE STRING "prefix for ggml's shared library file names" FORCE)
+    set(SA3_COMPUTED_GGML_PREFIX "${_sa3_ggml_prefix}" CACHE INTERNAL "")
+    message(STATUS "SA3_PRIVATE_GGML: ggml libraries are named ${_sa3_ggml_prefix}ggml*")
+elseif(DEFINED SA3_COMPUTED_GGML_PREFIX AND GGML_LIBRARY_PREFIX STREQUAL SA3_COMPUTED_GGML_PREFIX)
+    # Switched back off: drop the name this option chose, but keep one a user set by hand.
+    set(GGML_LIBRARY_PREFIX "" CACHE STRING "prefix for ggml's shared library file names" FORCE)
+    unset(SA3_COMPUTED_GGML_PREFIX CACHE)
+endif()
 add_subdirectory(ggml)
 
 # src/ is header-driven (acestep style); add library/tool targets here as phases land.
