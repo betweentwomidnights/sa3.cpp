@@ -181,7 +181,7 @@ if [ "$SIGN" = 1 ]; then
     codesign --force --options runtime --timestamp --sign "$SA3_SIGN_IDENTITY" "$STAGE/$f"
     codesign --verify --strict --verbose=2 "$STAGE/$f"
   done
-  codesign -dvv "$STAGE/libsa3.dylib" 2>&1 | grep -E '^(Authority|TeamIdentifier|Timestamp)=' | head -3
+  codesign -dvv "$STAGE/libsa3.dylib" 2>&1 | grep -E '^(Authority|TeamIdentifier|Timestamp)=' | sed -n '1,3p'
 fi
 
 # Check startup and the linked ABI contract from outside the package directory.
