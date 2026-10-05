@@ -114,7 +114,7 @@ done
 # Merge each dylib's soname once. Metal is arm64-only; Intel has the CPU backend.
 while IFS= read -r arm; do
   name="$(basename "$arm")"
-  case "$name" in libsa3.dylib|libggml*.0.dylib) ;; *) continue ;; esac
+  if [ "$name" != libsa3.dylib ] && ! [[ "$name" =~ ^libggml[-a-z]*\.0\.dylib$ ]]; then continue; fi
   x86="$(find -L "$BUILD_PATH/x86_64" -type f -name "$name" -print -quit)"
   if [ -n "$x86" ]; then
     lipo -create "$arm" "$x86" -output "$STAGE/$name"
