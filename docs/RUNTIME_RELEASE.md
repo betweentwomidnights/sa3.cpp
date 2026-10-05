@@ -87,3 +87,48 @@ local tracked files differed from the commit.
 
 The current gary4local SA3, Stable Audio, and Foundation services still run
 their Python backends; this package prepares the native install path.
+
+## macOS universal package
+
+`sa3-<tag>-macos-universal.zip` contains the servers, generation/training tools,
+`libsa3.dylib`, ggml dylibs, licenses, model downloader and prompt pools. It is
+flat at the root. Keep the libraries beside the tools. Apple Silicon uses Metal
+or CPU; Intel uses CPU (AVX2 baseline, macOS 13.3 or newer). Model weights are
+separate. `SHA256SUMS-macos` covers this archive without conflicting with the
+Windows checksum asset.
+
+Build on Apple Silicon with Xcode command line tools, CMake and Rosetta:
+
+```sh
+./ci/package-macos.sh --version v0.1.1 --jobs 3
+```
+
+The script builds each architecture separately, runs CTest (Intel under Rosetta
+on macOS 15+), merges matching binaries with lipo, rewrites bundled library
+imports to `@loader_path`, and checks server startup and the ABI contract from
+outside the package directory. The Metal dylib is arm64 only. Hosted CI checks
+compilation and packaging; real Metal inference must also be tested on a Mac.
+
+Release builds require Developer ID signing and notarization. Set these
+repository Actions secrets, matching the stems.cpp workflow:
+
+- `MACOS_CERT_P12`: base64 of the exported Developer ID Application certificate
+  **and its private key** (.p12).
+- `MACOS_CERT_PASSWORD`: export password.
+- `APPLE_TEAM_ID`: certificate's developer team ID.
+- `APPLE_NOTARY_KEY_P8`: base64 of the App Store Connect API private key (.p8).
+- `APPLE_NOTARY_KEY_ID` and `APPLE_NOTARY_ISSUER_ID`: notarization key metadata.
+
+The original certificate/key can be reused across sibling repositories. Store
+copies in each repository; GitHub cannot return existing secret values. No new
+Apple key or certificate is needed solely because the repository is different.
+The workflow uses a temporary keychain, signs every bundled executable and
+library with hardened runtime and a timestamp, and requires an Accepted notary
+submission before uploading. Bare binaries in a zip cannot be stapled.
+
+Dispatch `release.yml` with `platforms=macos` for a macOS-only dry run, or
+`platforms=all` for both platforms. Dry runs work without credentials and keep
+ad-hoc signatures; tagged release runs fail if signing credentials are missing.
+Local signing uses `SA3_SIGN_IDENTITY`, `SA3_NOTARY_KEY` (path to .p8),
+`SA3_NOTARY_KEY_ID`, and `SA3_NOTARY_ISSUER`; pass `--require-signing` for release
+packages. Publish v0.1.1 only after the dry runs and Mac inference checks pass.

@@ -1,4 +1,4 @@
-# ABOUTME: Builds the split and standalone Windows packages for a release.
+# ABOUTME: Builds the Windows packages and the signed, notarized macOS package for a release.
 # ABOUTME: A no-tag dispatch keeps a dry-run artifact without publishing.
 name: release
 
@@ -10,9 +10,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: existing release tag to build and attach to (e.g. v0.1.0); empty for a dry run
+        description: existing release tag to build and attach to (e.g. v0.1.1); empty for a dry run
         required: false
         type: string
+      platforms:
+        description: which packages to build (a release event always builds both)
+        required: false
+        type: choice
+        options: [all, windows, macos]
+        default: all
 
 permissions:
   contents: write
@@ -27,6 +33,7 @@ jobs:
     # generator by name. A runner image moving to a newer Visual Studio should
     # be a change made here on purpose, not one that turns up as a red release.
     runs-on: windows-2022
+    if: github.event_name == 'release' || inputs.platforms != 'macos'
     # Every CUDA architecture ggml's portable default covers is compiled, which
     # is most of this job's time.
     timeout-minutes: 240
@@ -119,3 +126,104 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload $env:TAG (Get-ChildItem dist -File).FullName --clobber
+
+  macos:
+    name: macos-universal (metal + cpu)
+    # macOS 15: its Rosetta runs the x86_64 slice's AVX2 code, so CI tests both slices.
+    runs-on: macos-15
+    if: github.event_name == 'release' || inputs.platforms != 'windows'
+    timeout-minutes: 90
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # Whether the Developer ID and notary secrets exist, without exposing them to every step.
+      HAVE_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' && secrets.APPLE_NOTARY_KEY_P8 != '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+          submodules: recursive
+
+      - name: Choose the version
+        run: |
+          if [ -n "$TAG" ]; then
+            version="$TAG"
+          else
+            version="v$(sed -nE 's/^project\(sa3_cpp VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)"
+            [ "$version" != v ] || { echo "no project(VERSION) in CMakeLists.txt"; exit 1; }
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "packaging $version$([ -z "$TAG" ] && echo ' (dry run)')"
+
+      # A published release must be signed and notarized; a dry run signs when it can.
+      - name: Require signing for a release
+        if: env.TAG != '' && env.HAVE_SIGNING != 'true'
+        run: |
+          echo "release builds need the MACOS_CERT_* and APPLE_* secrets"
+          exit 1
+
+      # The Developer ID identity goes into a throwaway keychain that only codesign may
+      # use, and the keychain and key files are deleted when the job ends.
+      - name: Import the Developer ID certificate
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          keychain="$RUNNER_TEMP/sa3-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          identity="$(security find-identity -v -p codesigning "$keychain" | grep "Developer ID Application" | grep "($APPLE_TEAM_ID)" | head -1 | awk '{print $2}')"
+          [ -n "$identity" ] || { echo "no Developer ID Application identity for team $APPLE_TEAM_ID in the certificate"; exit 1; }
+          printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          {
+            echo "SA3_SIGN_IDENTITY=$identity"
+            echo "SA3_NOTARY_KEY=$RUNNER_TEMP/notary.p8"
+            echo "SA3_NOTARY_KEY_ID=$APPLE_NOTARY_KEY_ID"
+            echo "SA3_NOTARY_ISSUER=$APPLE_NOTARY_ISSUER_ID"
+            echo "SIGNING_KEYCHAIN=$keychain"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, test, sign, notarize, and package
+        run: |
+          args=(--version "$VERSION" --jobs 3)
+          [ -n "$TAG" ] && args+=(--require-signing)
+          ./ci/package-macos.sh "${args[@]}"
+
+      - name: Remove the signing keychain
+        if: always() && env.SIGNING_KEYCHAIN != ''
+        run: |
+          security delete-keychain "$SIGNING_KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/notary.p8"
+
+      - name: Keep the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: sa3-${{ env.VERSION }}-macos-universal
+          path: dist/
+          retention-days: 14
+
+      - name: Attest provenance
+        if: env.TAG != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.zip'
+
+      - name: Attach to release
+        if: env.TAG != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" dist/sa3-*-macos-universal.zip dist/SHA256SUMS-macos --clobber
