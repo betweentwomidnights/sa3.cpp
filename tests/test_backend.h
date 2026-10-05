@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 inline ggml_backend_t sa3_test_cpu_backend() {
@@ -49,6 +50,14 @@ inline const std::vector<Sa3TestBackend>& sa3_test_backends() {
         for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
             ggml_backend_dev_t dev = ggml_backend_dev_get(i);
             if (!sa3_test_is_model_hostable(dev)) continue;
+            // Hosted macOS exposes a virtual GPU without simdgroup matmul. It
+            // advertises Metal but aborts on MUL_MAT; real Apple GPUs still run.
+            const char* description = ggml_backend_dev_description(dev);
+            if (description && std::strstr(description, "Paravirtual")) {
+                std::fprintf(stderr, "SKIP: %s (%s) lacks required Metal matmul support\n",
+                             ggml_backend_dev_name(dev), description);
+                continue;
+            }
             if (ggml_backend_t b = ggml_backend_dev_init(dev, nullptr))
                 out.push_back({ ggml_backend_dev_name(dev), b });
         }
