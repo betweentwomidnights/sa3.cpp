@@ -50,9 +50,9 @@ controls.
 On Windows with Visual Studio 2022, CUDA Toolkit 12.8, and Vulkan SDK:
 
 ```powershell
-.\ci\package-windows.ps1 -Version v0.1.0
+.\ci\package-windows.ps1 -Version v0.1.1
 # Add a separate cudart zip for testing gary4local's shared-runtime install:
-.\ci\package-windows.ps1 -Version v0.1.0 -CudaRuntime
+.\ci\package-windows.ps1 -Version v0.1.1 -CudaRuntime
 ```
 
 For a quick local check of the core package without GPU toolchains, use
@@ -76,7 +76,7 @@ local tracked files differed from the commit.
    gary4local's `GARY4LOCAL_NATIVE_PACKAGE_DIR` override: that folder then
    contains the split service packages and a shared-runtime test zip. Exercise
    both CUDA and Vulkan and inspect `--props` from the unpacked core.
-3. **Publish:** tag and publish the verified commit as `v0.1.0`. The release
+3. **Publish:** tag and publish the verified commit as `v0.1.1`. The release
    event runs the same package script on that tag, attests each zip, and
    attaches the four zips and `SHA256SUMS`. A dispatch with an existing tag
    can replace missing assets after a runner failure, before a consumer pins it.
