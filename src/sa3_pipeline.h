@@ -685,6 +685,10 @@ struct GenParams {
     // adapter's strength above, so with strength 1.0 it reads as the strength itself. Empty = the
     // ordinary constant-strength run. Needs the functional adapter path ('lora'/'dora-rows').
     std::vector<std::pair<float, float>> lora_envelope;
+    // How the envelope is applied. "velocity": separate base and adapted forward passes, their
+    // velocities mixed per frame (two passes per step; no leak within a pass). "layer": one pass,
+    // every adapted layer mixed per token (self-attention carries the adapter across the timeline).
+    std::string lora_envelope_mode = "velocity";
 
     // Sampling-schedule distribution shift — warps the linear t schedule. Mirrors the official
     // SA3 gradio selector {LogSNR, Flux, Full, None}; the 4 params' meaning is per-type (see
@@ -1559,14 +1563,25 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     }
     auto set_env = [&]() {
         if (!denv.eS) return;
-        ggml_backend_tensor_set(denv.eS, envS.data(), 0, envS.size()*sizeof(float));
+        if (denv.eS->buffer) ggml_backend_tensor_set(denv.eS, envS.data(), 0, envS.size()*sizeof(float));
         ggml_backend_tensor_set(denv.eT, envT.data(), 0, envT.size()*sizeof(float));
     };
-    ggml_tensor* vel = ggml_cont(dctx, sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local,
-                                                    dit_functional_.active ? &dit_functional_.map : nullptr,
-                                                    false, denv.eS ? &denv : nullptr));
+    const bool env_velocity = denv.eS && params.lora_envelope_mode == "velocity";
+    if (denv.eS && !env_velocity && params.lora_envelope_mode != "layer")
+        throw std::runtime_error("lora envelope: mode must be 'velocity' or 'layer'");
+    ggml_tensor* vel = nullptr;
+    if (env_velocity) {
+        ggml_tensor* v0 = sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local, nullptr);
+        ggml_tensor* v1 = sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local,
+                                           &dit_functional_.map);
+        vel = ggml_cont(dctx, ggml_add(dctx, v0, ggml_mul(dctx, ggml_sub(dctx, v1, v0), denv.eT)));
+    } else {
+        vel = ggml_cont(dctx, sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local,
+                                               dit_functional_.active ? &dit_functional_.map : nullptr,
+                                               false, denv.eS ? &denv : nullptr));
+    }
     ggml_set_output(vel);
-    ggml_cgraph* gf_dit = ggml_new_graph_custom(dctx, 32768, false);
+    ggml_cgraph* gf_dit = ggml_new_graph_custom(dctx, env_velocity ? 65536 : 32768, false);
     ggml_build_forward_expand(gf_dit, vel);
     profile_log(prof, "dit_build", wall_time_s() - tp_dit);
     tp_dit = wall_time_s();
