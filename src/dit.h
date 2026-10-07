@@ -170,15 +170,17 @@ inline ggml_tensor* dit_lin(ggml_context* ctx, const GgufModel& W, const std::st
 
 // dual-softmax differential attention; q,k,v,qd,kd already in [head_dim, S, n_head].
 inline ggml_tensor* dit_diff_attn(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_tensor* v,
-                                  ggml_tensor* qd, ggml_tensor* kd, int dim, float scale) {
-    ggml_tensor* o = ggml_sub(ctx, nn::sdpa(ctx, q, k, v, nullptr, scale),
-                                   nn::sdpa(ctx, qd, kd, v, nullptr, scale)); // [hd, Sq, nh]
+                                  ggml_tensor* qd, ggml_tensor* kd, int dim, float scale,
+                                  ggml_tensor* mask = nullptr) {
+    ggml_tensor* o = ggml_sub(ctx, nn::sdpa(ctx, q, k, v, mask, scale),
+                                   nn::sdpa(ctx, qd, kd, v, mask, scale)); // [hd, Sq, nh]
     o = ggml_cont(ctx, ggml_permute(ctx, o, 0, 2, 1, 3));                     // [hd, nh, Sq]
     return ggml_reshape_2d(ctx, o, dim, o->ne[2]);
 }
 
 // One DiT block. x:[dim,S]; context:[dim,Ctx]; gcond:[6*dim] adaLN signal; ones:[1]=1.0.
 // local_cond:[local_dim,T] (inpaint) or nullptr — projected per-block and added to the T real tokens.
+// self_mask: optional additive self-attention bias [S, S] (F16), e.g. the lane isolation bias.
 // autodiff_safe expands broadcasts and view operands for ggml backward; keep it false for inference
 // so generation retains the original, validated graph and its backend fusion/numerical behavior.
 inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::string& p,
@@ -186,7 +188,8 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
                               ggml_tensor* pos, ggml_tensor* ones, const DitConfig& c,
                               ggml_tensor* local_cond = nullptr, const DitLora* dl = nullptr,
                               bool autodiff_safe = false, const DitEnv* env = nullptr,
-                              ggml_tensor* gcond0 = nullptr, ggml_tensor* context0 = nullptr) {
+                              ggml_tensor* gcond0 = nullptr, ggml_tensor* context0 = nullptr,
+                              ggml_tensor* self_mask = nullptr) {
     const int dim = c.dim, hd = c.head_dim, nh = c.heads;
     const int64_t S = x->ne[1];
     const float scale = 1.0f / sqrtf((float)hd);
@@ -230,8 +233,8 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
     auto toAttn = [&](ggml_tensor* a){ return ggml_cont(ctx, ggml_permute(ctx, a, 0, 2, 1, 3)); };
 
     auto sl = [&](ggml_tensor* t, int i){ return ggml_view_2d(ctx, t, dim, t->ne[1], t->nb[1], (size_t)i*dim*sizeof(float)); };
-    auto single_attn = [&](ggml_tensor* qa, ggml_tensor* ka, ggml_tensor* va){  // q,k,v [hd,seq,nh]
-        ggml_tensor* o = nn::sdpa(ctx, qa, ka, va, nullptr, scale);
+    auto single_attn = [&](ggml_tensor* qa, ggml_tensor* ka, ggml_tensor* va, ggml_tensor* mask){  // q,k,v [hd,seq,nh]
+        ggml_tensor* o = nn::sdpa(ctx, qa, ka, va, mask, scale);
         o = ggml_cont(ctx, ggml_permute(ctx, o, 0, 2, 1, 3));
         return ggml_reshape_2d(ctx, o, dim, o->ne[2]);
     };
@@ -249,9 +252,9 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
         ggml_tensor* qd = qknorm(heads(sl(qkv,3),S), p+"self.q_norm.gamma");
         ggml_tensor* kd = qknorm(heads(sl(qkv,4),S), p+"self.k_norm.gamma");
         qd = nn::rope_neox(ctx,qd,pos,c.rot,c.rope_base); kd = nn::rope_neox(ctx,kd,pos,c.rot,c.rope_base);
-        o = dit_diff_attn(ctx, toAttn(q),toAttn(k),toAttn(v),toAttn(qd),toAttn(kd), dim, scale);
+        o = dit_diff_attn(ctx, toAttn(q),toAttn(k),toAttn(v),toAttn(qd),toAttn(kd), dim, scale, self_mask);
     } else {
-        o = single_attn(toAttn(q), toAttn(k), toAttn(v));
+        o = single_attn(toAttn(q), toAttn(k), toAttn(v), self_mask);
     }
     o = dit_lin(ctx, W, p+"self.out.weight", o, nullptr, dl, eS);
     x = ggml_add(ctx, autodiff_safe ? ggml_cont(ctx, res) : res, gate(o, g_a));
@@ -272,7 +275,7 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
         oc = dit_diff_attn(ctx, toAttn(cq),toAttn(ck),toAttn(cv),toAttn(cqd),toAttn(ckd), dim, scale);
     } else {
         ggml_tensor* cv = heads(sl(kv,1),Ctx);
-        oc = single_attn(toAttn(cq), toAttn(ck), toAttn(cv));
+        oc = single_attn(toAttn(cq), toAttn(ck), toAttn(cv), nullptr);
     }
     return dit_lin(ctx, W, p+"cross.out.weight", oc, nullptr, cdl);
     };
@@ -378,13 +381,14 @@ inline ggml_tensor* dit_forward(ggml_context* ctx, const GgufModel& W, ggml_tens
                                 ggml_tensor* t_feat, ggml_tensor* cross, ggml_tensor* glob,
                                 ggml_tensor* pos, ggml_tensor* ones, const DitConfig& c,
                                 ggml_tensor* local_cond = nullptr, const DitLora* dl = nullptr,
-                                bool autodiff_safe = false, const DitEnv* env = nullptr) {
+                                bool autodiff_safe = false, const DitEnv* env = nullptr,
+                                ggml_tensor* self_mask = nullptr) {
     if (!dl) env = nullptr;   // nothing to automate
     DitHeadOut h = dit_head(ctx, W, x_in, t_feat, cross, glob, c, dl, autodiff_safe, env);
     ggml_tensor* x = h.x0;
     for (int l = 0; l < c.depth; l++)
         x = dit_block(ctx, W, "dit." + std::to_string(l) + ".", x, h.context, h.gcond, pos, ones, c,
-                      local_cond, dl, autodiff_safe, env, h.gcond0, h.context0);
+                      local_cond, dl, autodiff_safe, env, h.gcond0, h.context0, self_mask);
     return dit_tail(ctx, W, x, c, dl, autodiff_safe, env);
 }
 

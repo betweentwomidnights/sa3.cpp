@@ -119,6 +119,10 @@
       <div class="seedbox"><input id="seed" type="number" min="0" step="1">
         <button class="icon" id="seed-dice" title="new random seed">🎲</button>
         <label class="muted" style="display:flex;gap:3px;align-items:center;margin:0"><input id="seed-lock" type="checkbox"> lock</label></div></div>
+    <div class="col"><label for="iso" title="Early-step self-attention bias between frames with different lane mixes. 0 = off.">Isolation λ</label>
+      <input id="iso" type="number" min="0" step="0.5" value="4"></div>
+    <div class="col"><label for="iso-until" title="Isolation applies while the step's sigma is above this (0.9 = the first 4 of 8 steps)">…until σ</label>
+      <input id="iso-until" type="number" min="0" max="1" step="0.05" value="0.9"></div>
     <div class="col"><label for="mode">Mixing</label>
       <select id="mode"><option value="velocity">velocity (per-pass)</option><option value="layer">layer (one pass, 1 lane)</option></select></div>
     <div class="col" style="margin-left:auto"><button class="primary" id="gen">Generate</button></div>
@@ -163,7 +167,12 @@
     <b style="color:var(--text)">What the lanes do</b><br>
     Each lane is its own DiT pass per step (its LoRA at the curve's peak, on its own prompt if set).
     The base pass runs on the base prompt; at each frame the step is
-    base + Σ amount × (lane − base). Amount is a strength multiplier: 1 = the LoRA at its strength.
+    base + Σ amount × (lane − base). Amount is a strength multiplier: 1 = the LoRA at its strength.<br><br>
+    <b style="color:var(--text)">Isolation</b><br>
+    The whole clip is denoised together, so sections pull towards one sound. While σ is above
+    "until", isolation biases each frame's self-attention towards frames with a similar lane mix,
+    so each phase forms its own identity; the remaining steps attend fully and smooth the joins.
+    λ ≈ 3 already saturates; 0 turns it off.
   </div>
 </div>
 

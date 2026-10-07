@@ -2,7 +2,8 @@
 // gary4local's async job model, so a gary4juce-style client can drive it as a drop-in (SA3 on :8006).
 //   POST /generate {prompt, duration, steps, seed, negative_prompt, cfg_*, dist_shift,
 //                   duration_padding_sec, loras[], lora_envelope[[sec,amount]], lora_envelope_mode,
-//                   lora_lanes[{loras[], envelope[[sec,amount]], prompt}], init_path, keep_models}
+//                   lora_lanes[{loras[], envelope[[sec,amount]], prompt}], lane_isolation(_until),
+//                   init_path, keep_models}
 //                 -> {success, session_id, seed}   (generation runs in the background)
 //   POST /generate/loop {prompt, duration, bpm?, bars?, ...}
 //                 -> {success, session_id, seed, bpm, bars, loop_duration, gen_duration}
@@ -1161,6 +1162,10 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
 
     // "lora_lanes": [{loras: [...], envelope: [[sec, amount], ...], prompt?}, ...] -- one DiT pass
     // per lane, mixed per frame (GenParams::lora_lanes); "loras" above are shared by every pass
+    if (yyjson_val* v = yyjson_obj_get(root, "lane_isolation"); v && yyjson_is_num(v))
+        params.lane_isolation = (float)yyjson_get_num(v);
+    if (yyjson_val* v = yyjson_obj_get(root, "lane_isolation_until"); v && yyjson_is_num(v))
+        params.lane_isolation_until = (float)yyjson_get_num(v);
     yyjson_val* lanes = yyjson_obj_get(root, "lora_lanes");
     if (perr.empty() && lanes && yyjson_is_arr(lanes)) {
         if (yyjson_arr_size(lanes) > 8) perr = "lora_lanes: at most 8 lanes";

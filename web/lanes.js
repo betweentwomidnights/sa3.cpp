@@ -11,7 +11,7 @@ const STORE_KEY = "sa3-lanes-editor-v1";
 const state = {
   prompt: "keygen music, crunchy square leads, tight chip drums",
   negative: "",
-  duration: 20, steps: 8, cfg: 1, seed: 1234, seedLock: false, mode: "velocity",
+  duration: 20, steps: 8, cfg: 1, seed: 1234, seedLock: false, mode: "velocity", iso: 4, isoUntil: 0.9,
   lanes: [],
 };
 let loras = [];          // DiT adapters from /loras
@@ -98,6 +98,8 @@ function readForm() {
   state.seed = Math.max(0, Math.round(+$("#seed").value || 0));
   state.seedLock = $("#seed-lock").checked;
   state.mode = $("#mode").value;
+  state.iso = Math.max(0, +$("#iso").value || 0);
+  state.isoUntil = Math.min(1, Math.max(0, +$("#iso-until").value || 0));
 }
 function writeForm() {
   $("#prompt").value = state.prompt;
@@ -108,6 +110,8 @@ function writeForm() {
   $("#seed").value = state.seed;
   $("#seed-lock").checked = state.seedLock;
   $("#mode").value = state.mode;
+  $("#iso").value = state.iso ?? 4;
+  $("#iso-until").value = state.isoUntil ?? 0.9;
 }
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
 
@@ -451,6 +455,8 @@ function buildRequest() {
     cfg_scale: state.cfg,
     keep_models: false,   // frugal: on 8 GB, DiT + lane adapters + decoder together oversubscribe VRAM
     lora_envelope_mode: state.mode,
+    lane_isolation: state.mode === "velocity" ? state.iso : 0,
+    lane_isolation_until: state.isoUntil,
     lora_lanes: lanes.map((l) => ({
       loras: [{ name: l.lora, strength: l.strength }],
       envelope: l.points.map((p) => [+p[0].toFixed(3), +p[1].toFixed(3)]),
@@ -545,7 +551,7 @@ function renderTakes() {
     const dots = lanes.map((l) => `<span class="swatch" style="background:${l.color};display:inline-block"></span>`).join(" ");
     div.innerHTML = `<b>#${t.id}</b> ${dots}
       <span class="lbl" title="${esc(t.request.prompt)}">${esc(lanes.map((l) => l.lora + (l.prompt ? "*" : "")).join(" + ") || "base")} — ${esc(t.request.prompt)}</span>
-      <span class="meta">${t.request.lora_envelope_mode} · seed ${t.seed} · ${t.request.steps}st · ${t.secs.toFixed(1)}s</span>
+      <span class="meta">${t.request.lora_envelope_mode}${t.request.lane_isolation ? ` · iso ${t.request.lane_isolation}@${t.request.lane_isolation_until}` : ""} · seed ${t.seed} · ${t.request.steps}st · ${t.secs.toFixed(1)}s</span>
       <button class="tiny" title="restore this take's settings into the editor">↺</button>`;
     div.onclick = () => setCurrent(t, true);
     div.querySelector("button").onclick = (e) => {
@@ -578,7 +584,7 @@ function init() {
   load();
   if (!state.seed) state.seed = randomSeed();
   writeForm();
-  for (const id of ["#prompt", "#negative", "#duration", "#steps", "#cfg", "#seed", "#seed-lock", "#mode"]) {
+  for (const id of ["#prompt", "#negative", "#duration", "#steps", "#cfg", "#seed", "#seed-lock", "#mode", "#iso", "#iso-until"]) {
     $(id).addEventListener("input", () => { readForm(); drawAll(); save(); });
   }
   $("#gen").onclick = generate;

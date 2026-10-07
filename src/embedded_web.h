@@ -1917,6 +1917,10 @@ inline const std::string lanes_html =
       <div class="seedbox"><input id="seed" type="number" min="0" step="1">
         <button class="icon" id="seed-dice" title="new random seed">🎲</button>
         <label class="muted" style="display:flex;gap:3px;align-items:center;margin:0"><input id="seed-lock" type="checkbox"> lock</label></div></div>
+    <div class="col"><label for="iso" title="Early-step self-attention bias between frames with different lane mixes. 0 = off.">Isolation λ</label>
+      <input id="iso" type="number" min="0" step="0.5" value="4"></div>
+    <div class="col"><label for="iso-until" title="Isolation applies while the step's sigma is above this (0.9 = the first 4 of 8 steps)">…until σ</label>
+      <input id="iso-until" type="number" min="0" max="1" step="0.05" value="0.9"></div>
     <div class="col"><label for="mode">Mixing</label>
       <select id="mode"><option value="velocity">velocity (per-pass)</option><option value="layer">layer (one pass, 1 lane)</option></select></div>
     <div class="col" style="margin-left:auto"><button class="primary" id="gen">Generate</button></div>
@@ -1926,7 +1930,8 @@ inline const std::string lanes_html =
 
 <div class="transport">
   <button id="play" class="icon" title="play / pause (space)">▶</button>
-  <button id="stop" class="icon" title="stop">■</button>
+  )sa3web") +
+    std::string(R"sa3web(<button id="stop" class="icon" title="stop">■</button>
   <span id="time">0.00 / 0.00</span>
   <div class="progress"><div id="progress"></div></div>
   <span id="progress-label"></span>
@@ -1937,8 +1942,7 @@ inline const std::string lanes_html =
     <div class="tl-head"><b>Take</b><span class="muted" id="take-info">no take yet</span>
       <button class="tiny" id="add-lane">+ lane</button>
       <button class="tiny" id="view">show waveform</button>
-      <sp)sa3web") +
-    std::string(R"sa3web(an class="muted" style="font-size:0.7rem">curves here: what this take was made with</span></div>
+      <span class="muted" style="font-size:0.7rem">curves here: what this take was made with</span></div>
     <div class="tl-body"><canvas id="wave" data-h="150"></canvas></div>
   </div>
   <div id="lanes"></div>
@@ -1962,7 +1966,12 @@ inline const std::string lanes_html =
     <b style="color:var(--text)">What the lanes do</b><br>
     Each lane is its own DiT pass per step (its LoRA at the curve's peak, on its own prompt if set).
     The base pass runs on the base prompt; at each frame the step is
-    base + Σ amount × (lane − base). Amount is a strength multiplier: 1 = the LoRA at its strength.
+    base + Σ amount × (lane − base). Amount is a strength multiplier: 1 = the LoRA at its strength.<br><br>
+    <b style="color:var(--text)">Isolation</b><br>
+    The whole clip is denoised together, so sections pull towards one sound. While σ is above
+    "until", isolation biases each frame's self-attention towards frames with a similar lane mix,
+    so each phase forms its own identity; the remaining steps attend fully and smooth the joins.
+    λ ≈ 3 already saturates; 0 turns it off.
   </div>
 </div>
 
@@ -1985,7 +1994,7 @@ const STORE_KEY = "sa3-lanes-editor-v1";
 const state = {
   prompt: "keygen music, crunchy square leads, tight chip drums",
   negative: "",
-  duration: 20, steps: 8, cfg: 1, seed: 1234, seedLock: false, mode: "velocity",
+  duration: 20, steps: 8, cfg: 1, seed: 1234, seedLock: false, mode: "velocity", iso: 4, isoUntil: 0.9,
   lanes: [],
 };
 let loras = [];          // DiT adapters from /loras
@@ -2072,17 +2081,21 @@ function readForm() {
   state.seed = Math.max(0, Math.round(+$("#seed").value || 0));
   state.seedLock = $("#seed-lock").checked;
   state.mode = $("#mode").value;
+  state.iso = Math.max(0, +$("#iso").value || 0);
+  state.isoUntil = Math.mi)sa3web") +
+    std::string(R"sa3web(n(1, Math.max(0, +$("#iso-until").value || 0));
 }
 function writeForm() {
   $("#prompt").value = state.prompt;
-  $("#negative").value = state.negati)sa3web") +
-    std::string(R"sa3web(ve;
+  $("#negative").value = state.negative;
   $("#duration").value = state.duration;
   $("#steps").value = state.steps;
   $("#cfg").value = state.cfg;
   $("#seed").value = state.seed;
   $("#seed-lock").checked = state.seedLock;
   $("#mode").value = state.mode;
+  $("#iso").value = state.iso ?? 4;
+  $("#iso-until").value = state.isoUntil ?? 0.9;
 }
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
 
@@ -2151,13 +2164,13 @@ function renderLanes() {
     row.querySelectorAll("[data-preset]").forEach((b) => {
       b.onclick = () => { lane.points = PRESETS[b.dataset.preset](state.duration).map((p) => [round(p[0], 0.01), p[1]]); drawAll(); save(); };
     });
-    attachLaneEditor(row.querySelector("canvas"), row.querySelector(".tip"), lane);
+    attachLaneEditor(row.query)sa3web") +
+    std::string(R"sa3web(Selector("canvas"), row.querySelector(".tip"), lane);
   });
   $("#add-lane").disabled = state.lanes.length >= MAX_LANES;
   resize();
 }
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": ")sa3web") +
-    std::string(R"sa3web(&gt;", '"': "&quot;" }[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 // ─── geometry shared by every canvas ───────────────────────────────────────
 
@@ -2247,15 +2260,15 @@ function fftMag(re, im) {          // in-place radix-2, returns nothing; re/im l
       for (let k = 0; k < len / 2; k++) {
         const a = i + k, b = a + len / 2;
         const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
-        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a])sa3web") +
+    std::string(R"sa3web( += tr; im[a] += ti;
         const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
       }
     }
   }
 }
 function spectrogram(mono, sr) {
-  const win = new Float32Array(NFFT).map((_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i)sa3web") +
-    std::string(R"sa3web( / (NFFT - 1)));
+  const win = new Float32Array(NFFT).map((_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (NFFT - 1)));
   const fmin = 30, fmax = Math.min(20000, sr / 2);
   // each row averages the FFT bins between two log-spaced edges (at least one bin)
   const edges = Array.from({ length: SPEC_ROWS + 1 }, (_, r) => fmin * Math.pow(fmax / fmin, r / SPEC_ROWS) * NFFT / sr);
@@ -2332,7 +2345,8 @@ function drawLane(cv, lane, hover) {
   envPath(g, cv, lane, lane.max);
   g.strokeStyle = lane.color; g.lineWidth = 2; g.stroke();
   lane.points.forEach((p, i) => {
-    g.beginPath(); g.arc(xOf(cv, p[0]), yOf(cv, p[1], lane.max), i === hover ? 6 : 4, 0, Math.PI * 2);
+    g.beginPath(); g.arc(xOf(cv, p[0]), yOf(cv, p[1], lane.max))sa3web") +
+    std::string(R"sa3web(, i === hover ? 6 : 4, 0, Math.PI * 2);
     g.fillStyle = i === hover ? "#fff" : lane.color; g.fill();
   });
   drawPlayhead(g, cv);
@@ -2340,8 +2354,7 @@ function drawLane(cv, lane, hover) {
 
 const laneCanvases = new Map();   // canvas -> {lane, hover}
 function drawAll() {
-  drawWaveCanva)sa3web") +
-    std::string(R"sa3web(s();
+  drawWaveCanvas();
   for (const [cv, s] of laneCanvases) if (cv.isConnected) drawLane(cv, s.lane, s.hover); else laneCanvases.delete(cv);
   const a = $("#audio");
   $("#time").textContent = `${(a.currentTime || 0).toFixed(2)} / ${(current ? current.dur : 0).toFixed(2)}`;
@@ -2419,17 +2432,19 @@ function attachLaneEditor(cv, tip, lane) {
 
 function showError(msg) { $("#error").textContent = msg || ""; }
 
-function buildRequest() {
+f)sa3web") +
+    std::string(R"sa3web(unction buildRequest() {
   const lanes = state.lanes.filter((l) => l.lora && l.points.length);
   const body = {
     prompt: state.prompt,
     duration: state.duration,
     steps: state.steps,
     seed: state.seed,
-    cfg_scale: sta)sa3web") +
-    std::string(R"sa3web(te.cfg,
+    cfg_scale: state.cfg,
     keep_models: false,   // frugal: on 8 GB, DiT + lane adapters + decoder together oversubscribe VRAM
     lora_envelope_mode: state.mode,
+    lane_isolation: state.mode === "velocity" ? state.iso : 0,
+    lane_isolation_until: state.isoUntil,
     lora_lanes: lanes.map((l) => ({
       loras: [{ name: l.lora, strength: l.strength }],
       envelope: l.points.map((p) => [+p[0].toFixed(3), +p[1].toFixed(3)]),
@@ -2509,7 +2524,8 @@ function setCurrent(take, autoplay) {
   if (keepAt != null) a.addEventListener("loadedmetadata", () => { a.currentTime = Math.min(keepAt, take.dur); }, { once: true });
   if (autoplay || keepAt != null) a.play().catch(() => {});
   const names = take.lanes.filter((l) => l.lora).map((l) => l.lora).join(" + ") || "base only";
-  $("#take-info").textContent = `#${take.id} · seed ${take.seed} · ${names}`;
+  $("#take-info").textContent = `#${take.id} · seed ${take)sa3web") +
+    std::string(R"sa3web(.seed} · ${names}`;
   renderTakes(); drawAll();
 }
 
@@ -2520,12 +2536,11 @@ function renderTakes() {
   for (const t of takes) {
     const div = document.createElement("div");
     div.className = "take" + (t === current ? " current" : "");
-    const lanes = t.lanes.filter((l) => l.l)sa3web") +
-    std::string(R"sa3web(ora);
+    const lanes = t.lanes.filter((l) => l.lora);
     const dots = lanes.map((l) => `<span class="swatch" style="background:${l.color};display:inline-block"></span>`).join(" ");
     div.innerHTML = `<b>#${t.id}</b> ${dots}
       <span class="lbl" title="${esc(t.request.prompt)}">${esc(lanes.map((l) => l.lora + (l.prompt ? "*" : "")).join(" + ") || "base")} — ${esc(t.request.prompt)}</span>
-      <span class="meta">${t.request.lora_envelope_mode} · seed ${t.seed} · ${t.request.steps}st · ${t.secs.toFixed(1)}s</span>
+      <span class="meta">${t.request.lora_envelope_mode}${t.request.lane_isolation ? ` · iso ${t.request.lane_isolation}@${t.request.lane_isolation_until}` : ""} · seed ${t.seed} · ${t.request.steps}st · ${t.secs.toFixed(1)}s</span>
       <button class="tiny" title="restore this take's settings into the editor">↺</button>`;
     div.onclick = () => setCurrent(t, true);
     div.querySelector("button").onclick = (e) => {
@@ -2558,7 +2573,7 @@ function init() {
   load();
   if (!state.seed) state.seed = randomSeed();
   writeForm();
-  for (const id of ["#prompt", "#negative", "#duration", "#steps", "#cfg", "#seed", "#seed-lock", "#mode"]) {
+  for (const id of ["#prompt", "#negative", "#duration", "#steps", "#cfg", "#seed", "#seed-lock", "#mode", "#iso", "#iso-until"]) {
     $(id).addEventListener("input", () => { readForm(); drawAll(); save(); });
   }
   $("#gen").onclick = generate;

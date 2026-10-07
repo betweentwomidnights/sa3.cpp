@@ -702,6 +702,13 @@ struct GenParams {
         std::string prompt;
     };
     std::vector<LoraLane> lora_lanes;
+    // Lane isolation (lanes only, experimental): while the step's sigma is above
+    // lane_isolation_until, self-attention between frames i and j is biased by
+    // -lane_isolation * Σ_k |e_k(i) - e_k(j)|, the distance between their lane mixes, so frames
+    // mostly hear frames in the same phase while the structure forms; later steps attend fully and
+    // stitch the phases together. Memory tokens stay unbiased. 0 = off (the plain graph).
+    float lane_isolation = 0.0f;
+    float lane_isolation_until = 0.9f;
 
     // Sampling-schedule distribution shift — warps the linear t schedule. Mirrors the official
     // SA3 gradio selector {LogSNR, Flux, Full, None}; the 4 params' meaning is per-type (see
@@ -1681,7 +1688,14 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         const std::vector<float>* crossb = nullptr;
     };
     std::vector<LaneIn> lane_in;
+    ggml_tensor* iso_mask = nullptr;                 // [S, S] F16 lane isolation bias (see GenParams)
+    std::vector<ggml_fp16_t> iso_on, iso_off;
+    float iso_sigma = 0.0f;                          // the current step's sigma, for the isolation mask
     auto set_lanes = [&](bool uncond) {
+        if (iso_mask) {
+            const auto& m = iso_sigma > params.lane_isolation_until ? iso_on : iso_off;
+            ggml_backend_tensor_set(iso_mask, m.data(), 0, m.size() * sizeof(ggml_fp16_t));
+        }
         for (auto& li : lane_in) {
             ggml_backend_tensor_set(li.e, li.eb.data(), 0, li.eb.size()*sizeof(float));
             if (!li.cross) continue;
@@ -1692,12 +1706,27 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     ggml_tensor* vel = nullptr;
     if (use_lanes) {
         auto map_of = [&](size_t i) { return dit_passes_[i].fl.active ? &dit_passes_[i].fl.map : nullptr; };
-        ggml_tensor* v0 = sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local, map_of(0));
-        ggml_tensor* acc = v0;
         lane_in.resize(lanes.size());
+        for (size_t k = 0; k < lanes.size(); k++) lane_in[k].eb = sample_envelope(lanes[k].envelope, lane_peak[k]);
+        if (params.lane_isolation > 0.0f) {
+            iso_mask = ggml_new_tensor_2d(dctx, GGML_TYPE_F16, S, S);
+            ggml_set_input(iso_mask);
+            const int mem = dc.mem_tokens;
+            iso_on.assign((size_t)S * S, ggml_fp32_to_fp16(0.0f));
+            iso_off = iso_on;
+            for (int i = mem; i < S; i++) for (int j = mem; j < S; j++) {
+                float d = 0.0f;
+                for (auto& li : lane_in) d += std::fabs(li.eb[i - mem] - li.eb[j - mem]);
+                iso_on[(size_t)i * S + j] = ggml_fp32_to_fp16(-params.lane_isolation * d);   // row = query
+            }
+            printf("lane isolation: bias %.2f per unit of lane-mix distance while sigma > %.2f\n",
+                   params.lane_isolation, params.lane_isolation_until);
+        }
+        ggml_tensor* v0 = sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local, map_of(0),
+                                           false, nullptr, iso_mask);
+        ggml_tensor* acc = v0;
         for (size_t k = 0; k < lanes.size(); k++) {
             LaneIn& li = lane_in[k];
-            li.eb = sample_envelope(lanes[k].envelope, lane_peak[k]);
             li.e = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, 1, T);
             ggml_set_input(li.e);
             if (!lanes[k].prompt.empty() && lanes[k].prompt != prompt) {
@@ -1706,7 +1735,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                 ggml_set_input(li.cross);
             }
             ggml_tensor* vk = sa3::dit_forward(dctx, DIT, x_in, tfeat, li.cross ? li.cross : cross, glob,
-                                               pos_d, ones, dc, local, map_of(k + 1));
+                                               pos_d, ones, dc, local, map_of(k + 1), false, nullptr, iso_mask);
             acc = ggml_add(dctx, acc, ggml_mul(dctx, ggml_sub(dctx, vk, v0), li.e));   // broadcast over io
         }
         vel = ggml_cont(dctx, acc);
@@ -1731,6 +1760,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     for (int i = 0; i < steps; i++) {
         if (params.should_cancel && params.should_cancel()) { dit_cancelled = true; break; }
         double ts = wall_time_s();
+        iso_sigma = sigmas[i];
         ggml_backend_tensor_set(cross, crossb.data(), 0, crossb.size()*sizeof(float));
         ggml_backend_tensor_set(glob,  globb.data(),  0, globb.size()*sizeof(float));
         ggml_backend_tensor_set(pos_d, posb.data(),   0, posb.size()*sizeof(int32_t));

@@ -203,8 +203,13 @@ same edge the amount-0 side sat 0.62–0.80 of the way to the adapted prediction
 lane, no lane prompt and no shared DiT adapters.
 
 Over a full generation the sides still influence each other: the whole canvas is denoised together,
-so neighbouring sections pull towards a common sound. That is the open problem these lanes exist to
-explore.
+so neighbouring sections pull towards a common sound. `"lane_isolation": λ` (CLI `--lane-isolation`)
+counters that: while the step's sigma is above `"lane_isolation_until"` (default 0.9, the first 4 of
+8 default steps), self-attention between frames i and j is biased by `−λ·Σ_k |e_k(i) − e_k(j)|`, so
+frames mostly attend to frames in the same phase while the structure forms; the later steps attend
+fully and smooth the joins. On a base -> keygen step at 10 s (3 seeds, 8 steps), the keygen half
+reached 0.40 of the full adapter's timbre without isolation and 0.79-0.86 with λ ≥ 3; isolating only
+the first 1-3 steps did nothing. Default 0 (off).
 
 The editor at `/lanes` (linked from the inference page) draws lanes over the current take's
 spectrogram or waveform and keeps a list of takes to compare.
