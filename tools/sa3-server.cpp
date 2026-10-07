@@ -1,7 +1,7 @@
 // sa3-server: a small HTTP server over the shared sa3 Pipeline — a PROOF OF CONCEPT that mirrors
 // gary4local's async job model, so a gary4juce-style client can drive it as a drop-in (SA3 on :8006).
 //   POST /generate {prompt, duration, steps, seed, negative_prompt, cfg_*, dist_shift,
-//                   duration_padding_sec, loras[], init_path, keep_models}
+//                   duration_padding_sec, loras[], lora_envelope[[sec,amount]], init_path, keep_models}
 //                 -> {success, session_id, seed}   (generation runs in the background)
 //   POST /generate/loop {prompt, duration, bpm?, bars?, ...}
 //                 -> {success, session_id, seed, bpm, bars, loop_duration, gen_duration}
@@ -1134,6 +1134,21 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
             if (p.empty()) { perr = "unknown lora '" + name + "'"; break; }
             params.loras.push_back({p, strength});
         }
+    }
+
+    // "lora_envelope": [[sec, amount], ...] -- LoRA strength automation (GenParams::lora_envelope)
+    yyjson_val* lenv = yyjson_obj_get(root, "lora_envelope");
+    if (perr.empty() && lenv && yyjson_is_arr(lenv)) {
+        yyjson_val* it; yyjson_arr_iter ai; yyjson_arr_iter_init(lenv, &ai);
+        while ((it = yyjson_arr_iter_next(&ai))) {
+            yyjson_val* tv = yyjson_is_arr(it) ? yyjson_arr_get(it, 0) : yyjson_obj_get(it, "t");
+            yyjson_val* av = yyjson_is_arr(it) ? yyjson_arr_get(it, 1) : yyjson_obj_get(it, "amount");
+            if (!tv || !av || !yyjson_is_num(tv) || !yyjson_is_num(av)) {
+                perr = "lora_envelope: each point is [seconds, amount]"; break;
+            }
+            params.lora_envelope.push_back({(float)yyjson_get_num(tv), (float)yyjson_get_num(av)});
+        }
+        if (perr.empty() && params.lora_envelope.size() > 256) perr = "lora_envelope: at most 256 points";
     }
 
     if (!perr.empty()) return false;

@@ -41,6 +41,7 @@ int main(int argc, char** argv) {
     const char* adapters_dir = (env_ad && *env_ad) ? env_ad : nullptr; // --adapters-dir / SA3_ADAPTERS_DIR (else = models_dir)
     std::string prompt = "Upbeat funk groove with slap bass, bright horns, tight drums";
     const char* wav_p = "song.wav";
+    std::vector<std::pair<float,float>> lora_envelope;   // --lora-envelope: strength automation
     const char* init_p = nullptr;            // audio2audio / inpaint: source WAV (encoded to z_init)
     float init_noise_level = 0.85f;          // sigma_max for audio2audio (1.0 == text2music)
     float inpaint_start = -1.0f, inpaint_end = -1.0f;   // inpaint: regenerate this [start,end] sec region
@@ -86,6 +87,18 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--inpaint-start") && i+1 < argc) inpaint_start = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--inpaint-end")   && i+1 < argc) inpaint_end   = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--lora")   && i+1 < argc) lora_specs.push_back({argv[++i], 1.0f});
+        else if (!strcmp(argv[i], "--lora-envelope") && i+1 < argc) {   // "sec:amount,sec:amount,..."
+            std::string spec = argv[++i];
+            size_t at = 0;
+            while (at < spec.size()) {
+                size_t comma = spec.find(',', at); if (comma == std::string::npos) comma = spec.size();
+                std::string bp = spec.substr(at, comma - at);
+                size_t colon = bp.find(':');
+                if (colon == std::string::npos) { fprintf(stderr, "--lora-envelope: '%s' is not sec:amount\n", bp.c_str()); return 1; }
+                lora_envelope.push_back({(float)atof(bp.substr(0, colon).c_str()), (float)atof(bp.substr(colon + 1).c_str())});
+                at = comma + 1;
+            }
+        }
         else if (!strcmp(argv[i], "--lora-strength") && i+1 < argc) {   // sets the most recent --lora
             if (lora_specs.empty()) { fprintf(stderr, "--lora-strength must follow a --lora\n"); return 1; }
             lora_specs.back().second = (float)atof(argv[++i]);
@@ -208,7 +221,7 @@ int main(int argc, char** argv) {
                         "                     [--t5-encoding ENC  text encoder precision; default auto, prefers F16]\n"
                         "                     [--ae-encoding ENC  autoencoder precision; default auto, prefers F32]\n"
                         "                     | --tok <f> --t5 <f> --cond <f> --dit <f> --same <f>)\n"
-                        "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
+                        "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--lora-envelope SEC:AMT,SEC:AMT...] [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
                         "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--legacy-schedule] [--duration-padding SEC]\n"
                         "                     [--cfg-scale S [--negative-prompt \"...\"] [--cfg-rescale R] [--cfg-interval min,max] [--apg-scale A] [--cfg-norm-threshold T]] [--out song.wav]\n"
                         "                     continuation splice (with --init + --inpaint-start): [--no-splice] [--mask-overlap SEC] [--splice-xfade SEC] [--no-splice-gain-match]\n");
@@ -295,6 +308,7 @@ int main(int argc, char** argv) {
     params.cfg_interval_min = cfg_interval_min; params.cfg_interval_max = cfg_interval_max;
     params.keep_models       = keep_models;   // no on_progress -> the pipeline prints the step lines itself
     for (auto& ls : lora_specs) params.loras.push_back(ls);
+    params.lora_envelope = lora_envelope;
 
     if (init_p) {   // audio2audio / inpaint source WAV -> raw planar samples + rate (pipeline resamples)
         int n_samp = 0, n_ch = 0, sr = 0;

@@ -680,6 +680,12 @@ struct GenParams {
     // (the CLI/server resolve names -> paths before building GenParams).
     std::vector<std::pair<std::string, float>> loras;   // (gguf path, strength)
 
+    // LoRA strength automation (see sa3::DitEnv). Breakpoints (seconds on the OUTPUT timeline,
+    // amount), linear between them and held flat past either end. `amount` multiplies every DiT
+    // adapter's strength above, so with strength 1.0 it reads as the strength itself. Empty = the
+    // ordinary constant-strength run. Needs the functional adapter path ('lora'/'dora-rows').
+    std::vector<std::pair<float, float>> lora_envelope;
+
     // Sampling-schedule distribution shift — warps the linear t schedule. Mirrors the official
     // SA3 gradio selector {LogSNR, Flux, Full, None}; the 4 params' meaning is per-type (see
     // sa3::dist_shift_warp / dist_shift_defaults). The defaults below are the medium model's
@@ -1235,6 +1241,17 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             (sa3::lora_target_of(ls.first.c_str()) == "dit" ? dit_loras_want : ae_want).push_back(ls);
         ae_loras_ = std::move(ae_want);
     }
+    // Automation: build the chain at the curve's peak; the graph scales it per frame (DitEnv).
+    const bool use_env = !params.lora_envelope.empty() && !dit_loras_want.empty();
+    float env_peak = 0.0f;
+    if (use_env) {
+        for (auto& bp : params.lora_envelope) {
+            if (!(bp.second >= 0.0f)) throw std::runtime_error("lora envelope: amounts must be >= 0");
+            env_peak = std::max(env_peak, bp.second);
+        }
+        if (env_peak <= 0.0f) dit_loras_want.clear();          // flat zero: the base model
+        for (auto& ls : dit_loras_want) ls.second *= env_peak;
+    }
 
     // The regenerated window [inpaint_f0, inpaint_f1) in latent frames, decided once: the init
     // encode can stop short of it, and the local conditioning below masks it.
@@ -1445,7 +1462,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // adapters/strength needs a clean base: reload + re-apply only when this request's set
     // differs from what's already baked in (resident back-to-back requests with the SAME
     // adapters skip the work; a change pays a reload).
-    if (dit_loras_ != dit_loras_want) {
+    const bool env_needs_functional = use_env && !dit_loras_want.empty();
+    if (dit_loras_ != dit_loras_want || (env_needs_functional && !dit_functional_.active)) {
         throw_if_cancelled(params.should_cancel);
         if (dit_merged_) {                   // prior request BAKED adapters in -> reload a clean base
             DIT.free();
@@ -1463,11 +1481,15 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             // forces the functional path there too, for A/B against the merged reference.
             const bool quantized = dit_base_is_quantized(DIT);
             const char* fenv = getenv("SA3_FUNCTIONAL_LORA");
-            const bool want_functional = quantized || (fenv && strcmp(fenv, "0") != 0);
+            const bool want_functional = quantized || env_needs_functional || (fenv && strcmp(fenv, "0") != 0);
             if (want_functional && sa3::functional_lora_ok(dit_adapters_)) {
                 dit_functional_ = sa3::build_functional_lora(DIT, dit_adapters_, paths_.dit);
             }
             if (!dit_functional_.active) {
+                if (env_needs_functional)
+                    throw std::runtime_error(
+                        "lora envelope: needs the functional adapter path, which takes the 'lora' "
+                        "and 'dora-rows' families; this adapter set has to be merged");
                 if (quantized)
                     throw std::runtime_error(
                         "lora: a quantized DiT (--encoding q4_k_m/q5_k_m/q8_0) supports the "
@@ -1502,8 +1524,47 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     for (ggml_tensor* t : {x_in, tfeat, cross, glob, pos_d, ones}) ggml_set_input(t);
     ggml_tensor* local = nullptr;
     if (!localb.empty()) { local = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, dc.local_dim, T); ggml_set_input(local); }
+    // LoRA automation: per-frame amount relative to the peak the chain was built at.
+    sa3::DitEnv denv;
+    std::vector<float> envS, envT;
+    if (env_needs_functional && dit_functional_.active) {
+        const int spf = sc.patch_size * sc.output_seg;
+        auto& bps = params.lora_envelope;   // sorted below by time
+        std::vector<std::pair<float,float>> pts(bps.begin(), bps.end());
+        std::sort(pts.begin(), pts.end());
+        auto amount_at = [&](float t) {
+            if (t <= pts.front().first) return pts.front().second;
+            if (t >= pts.back().first)  return pts.back().second;
+            for (size_t k = 1; k < pts.size(); k++)
+                if (t <= pts[k].first) {
+                    const float t0 = pts[k-1].first, t1 = pts[k].first;
+                    const float u = t1 > t0 ? (t - t0) / (t1 - t0) : 1.0f;
+                    return pts[k-1].second + u * (pts[k].second - pts[k-1].second);
+                }
+            return pts.back().second;
+        };
+        envT.resize(T);
+        double mean = 0.0;
+        for (int i = 0; i < T; i++) {
+            envT[i] = amount_at(((float)i + 0.5f) * (float)spf / 44100.0f) / env_peak;
+            mean += envT[i];
+        }
+        envS.assign(dc.mem_tokens, (float)(mean / std::max(1, T)));
+        envS.insert(envS.end(), envT.begin(), envT.end());
+        denv.eS = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, 1, S);
+        denv.eT = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, 1, T);
+        ggml_set_input(denv.eS); ggml_set_input(denv.eT);
+        printf("lora envelope: %zu point(s), peak %.3f, frame amount %.3f..%.3f (x peak)\n", pts.size(), env_peak,
+               *std::min_element(envT.begin(), envT.end()), *std::max_element(envT.begin(), envT.end()));
+    }
+    auto set_env = [&]() {
+        if (!denv.eS) return;
+        ggml_backend_tensor_set(denv.eS, envS.data(), 0, envS.size()*sizeof(float));
+        ggml_backend_tensor_set(denv.eT, envT.data(), 0, envT.size()*sizeof(float));
+    };
     ggml_tensor* vel = ggml_cont(dctx, sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local,
-                                                    dit_functional_.active ? &dit_functional_.map : nullptr));
+                                                    dit_functional_.active ? &dit_functional_.map : nullptr,
+                                                    false, denv.eS ? &denv : nullptr));
     ggml_set_output(vel);
     ggml_cgraph* gf_dit = ggml_new_graph_custom(dctx, 32768, false);
     ggml_build_forward_expand(gf_dit, vel);
@@ -1525,6 +1586,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         ggml_backend_tensor_set(pos_d, posb.data(),   0, posb.size()*sizeof(int32_t));
         ggml_backend_tensor_set(ones,  &one, 0, sizeof(float));
         if (local) ggml_backend_tensor_set(local, localb.data(), 0, localb.size()*sizeof(float));
+        set_env();
         ggml_backend_tensor_set(x_in,  host_x.data(), 0, N*sizeof(float));
         expo_features(sigmas[i], tf, dc.time_dim, dc.time_min_freq, dc.time_max_freq);
         ggml_backend_tensor_set(tfeat, tf.data(), 0, tf.size()*sizeof(float));
@@ -1548,6 +1610,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             ggml_backend_tensor_set(pos_d, posb.data(), 0, posb.size()*sizeof(int32_t));
             ggml_backend_tensor_set(ones,  &one, 0, sizeof(float));
             if (local) ggml_backend_tensor_set(local, localb.data(), 0, localb.size()*sizeof(float));
+            set_env();
             ggml_backend_tensor_set(cross, uncond_crossb.data(), 0, uncond_crossb.size()*sizeof(float));
             if (!compute_checked(DIT.backend, gf_dit, "DiT sampling step (unconditioned)")) break;
             dit_compute += wall_time_s() - ts;

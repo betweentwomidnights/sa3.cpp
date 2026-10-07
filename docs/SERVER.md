@@ -170,6 +170,22 @@ lora `name` resolves to `<adapters-dir>/lora-<name>-*.gguf`; a full `"path"` als
 `keep_models: true` to keep the model resident between requests (lower latency, more VRAM); the server
 reloads a clean DiT only when a request's adapter set changes, so strengths can vary per request either way.
 
+## LoRA strength automation (`lora_envelope`)
+
+`"lora_envelope": [[sec, amount], ...]` draws the adapter strength over the output timeline, so one
+request replaces crop -> continue at a higher strength -> crop. Breakpoints are linear between
+points and held flat past either end; `amount` multiplies every DiT adapter's `strength`, so with
+strength 1.0 the curve is the strength. With continuation, time 0 is the start of the kept source.
+CLI: `--lora-envelope 0:0.2,10:1.3,20:0.2`. The inference page has a drawable lane under LoRA Adapters.
+
+How: the adapter chain is built at the curve's peak and every adapted layer outputs
+`base + e(t)·(adapted − base)` per latent frame (~93 ms), with the conditioning embeds and
+cross-attention run both ways and mixed per frame (`sa3::DitEnv` in `src/dit.h`). It needs the
+functional adapter path ('lora' / 'dora-rows', which it forces on an f16 base), and costs a second
+cross-attention per block. Checked: a flat 1.0 curve matches the functional adapted run to 92.6 dB
+(16-bit rounding). The change is soft rather than sample-exact: self-attention sees the whole clip,
+so a section at low strength still picks up some of the adapter's character from its neighbours.
+
 ## loudness safety
 
 the server defaults to the same output safety chain used in gary4local: decoded audio is peak-normalized
