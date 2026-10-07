@@ -690,6 +690,19 @@ struct GenParams {
     // every adapted layer mixed per token (self-attention carries the adapter across the timeline).
     std::string lora_envelope_mode = "velocity";
 
+    // Automation lanes (velocity mode). Each lane is its own DiT pass per step: the shared `loras`
+    // above (DiT ones) followed by the lane's own, conditioned on the lane's prompt (empty = the
+    // request's). The step velocity is v_base + Σ_k e_k(t)·(v_k − v_base), where v_base runs the
+    // shared adapters alone. A lane's chain is built at its envelope's peak, so `amount` reads as a
+    // strength multiplier exactly as in lora_envelope. A non-empty lora_envelope with no lanes is
+    // the one-lane case: every DiT adapter in `loras` moves together on that curve.
+    struct LoraLane {
+        std::vector<std::pair<std::string, float>> loras;   // (gguf path, strength), DiT adapters
+        std::vector<std::pair<float, float>> envelope;      // (seconds, amount) breakpoints
+        std::string prompt;
+    };
+    std::vector<LoraLane> lora_lanes;
+
     // Sampling-schedule distribution shift — warps the linear t schedule. Mirrors the official
     // SA3 gradio selector {LogSNR, Flux, Full, None}; the 4 params' meaning is per-type (see
     // sa3::dist_shift_warp / dist_shift_defaults). The defaults below are the medium model's
@@ -834,6 +847,18 @@ private:
     bool dit_merged_ = false;                  // true => dit_loras_ were baked into DIT_ in place
     std::vector<LoraAdapter> dit_adapters_;    // kept resident for the functional path (graph reads A/B)
     FunctionalLora dit_functional_;            // graph-time adapters; empty unless the functional path is used
+    // Automation lanes: one DiT pass each, [0] the base pass (shared adapters only). Kept across
+    // resident requests like dit_loras_, keyed on each pass's chain.
+    struct DitPass {
+        std::vector<std::pair<std::string,float>> chain;
+        std::vector<LoraAdapter> adapters;
+        FunctionalLora fl;
+        DitPass() = default;
+        DitPass(DitPass&&) = default;
+        DitPass(const DitPass&) = delete;
+    };
+    std::vector<DitPass> dit_passes_;
+    void free_dit_passes() { for (auto& p : dit_passes_) p.fl.free(); dit_passes_.clear(); }
     // Autoencoder adapters (lora.target = "decoder" | "encoder"). Always MERGED: same_encode /
     // same_decode fold W straight into mul_mat and nothing hands them adapter tensors, so there is
     // no functional path here the way dit_lin is one for the DiT. That suits the AE anyway -- it is
@@ -1205,6 +1230,15 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     };
     std::vector<float> crossb = assemble_cross(t5_encode(ids, attn), attn);
     throw_if_cancelled(params.should_cancel);
+    // Automation lanes with their own prompt get their own cross-attn conditioning; encoded here
+    // because T5 is freed before the DiT loads.
+    std::map<std::string, std::vector<float>> lane_crossb;
+    for (auto& ln : params.lora_lanes) {
+        if (ln.prompt.empty() || ln.prompt == prompt || lane_crossb.count(ln.prompt)) continue;
+        std::vector<int32_t> lids, lattn; tokenize(ln.prompt, lids, lattn);
+        lane_crossb[ln.prompt] = assemble_cross(t5_encode(lids, lattn), lattn);
+        throw_if_cancelled(params.should_cancel);
+    }
     std::vector<float>& globb = secs_embed;
     // CFG: unconditioned cross-attn = the negative prompt (if given), else zeros (dit.py null_embed).
     std::vector<float> uncond_crossb;
@@ -1245,17 +1279,47 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             (sa3::lora_target_of(ls.first.c_str()) == "dit" ? dit_loras_want : ae_want).push_back(ls);
         ae_loras_ = std::move(ae_want);
     }
-    // Automation: build the chain at the curve's peak; the graph scales it per frame (DitEnv).
-    const bool use_env = !params.lora_envelope.empty() && !dit_loras_want.empty();
-    float env_peak = 0.0f;
-    if (use_env) {
-        for (auto& bp : params.lora_envelope) {
-            if (!(bp.second >= 0.0f)) throw std::runtime_error("lora envelope: amounts must be >= 0");
-            env_peak = std::max(env_peak, bp.second);
+    // ---------- automation lanes ----------
+    // A lone lora_envelope is one lane carrying every DiT adapter, with nothing shared.
+    std::vector<GenParams::LoraLane> lanes = params.lora_lanes;
+    if (lanes.empty() && !params.lora_envelope.empty() && !dit_loras_want.empty()) {
+        lanes.push_back({dit_loras_want, params.lora_envelope, ""});
+        dit_loras_want.clear();
+    }
+    std::vector<float> lane_peak;
+    for (auto& ln : lanes) {
+        if (ln.envelope.empty()) throw std::runtime_error("lora lane: needs at least one envelope point");
+        if (ln.envelope.size() > 256) throw std::runtime_error("lora lane: at most 256 envelope points");
+        float peak = 0.0f;
+        for (auto& bp : ln.envelope) {
+            if (!(bp.second >= 0.0f) || !std::isfinite(bp.first))
+                throw std::runtime_error("lora lane: amounts must be >= 0 at finite times");
+            peak = std::max(peak, bp.second);
         }
-        if (env_peak <= 0.0f) dit_loras_want.clear();          // flat zero: the base model
+        for (auto& ls : ln.loras)
+            if (sa3::lora_target_of(ls.first.c_str()) != "dit")
+                throw std::runtime_error("lora lane: " + ls.first + " is not a DiT adapter");
+        lane_peak.push_back(peak);
+    }
+    // Lanes that can never contribute (all-zero curve or no adapters) are dropped up front.
+    for (size_t k = lanes.size(); k-- > 0; )
+        if (lane_peak[k] <= 0.0f || lanes[k].loras.empty()) {
+            lanes.erase(lanes.begin() + k); lane_peak.erase(lane_peak.begin() + k);
+        }
+    // Layer mode is the one-pass alternative and only exists for a single lane on the request's
+    // prompt with nothing shared: it folds the lane into the ordinary chain and scales it per token.
+    const bool layer_mode = !lanes.empty() && params.lora_envelope_mode == "layer";
+    if (!lanes.empty() && !layer_mode && params.lora_envelope_mode != "velocity")
+        throw std::runtime_error("lora envelope: mode must be 'velocity' or 'layer'");
+    if (layer_mode && (lanes.size() != 1 || !lanes[0].prompt.empty() || !dit_loras_want.empty()))
+        throw std::runtime_error("lora envelope: layer mode takes one lane, no lane prompt and no shared DiT adapters");
+    const bool use_env = layer_mode;
+    const float env_peak = layer_mode ? lane_peak[0] : 0.0f;
+    if (layer_mode) {
+        dit_loras_want = lanes[0].loras;
         for (auto& ls : dit_loras_want) ls.second *= env_peak;
     }
+    const bool use_lanes = !lanes.empty() && !layer_mode;
 
     // The regenerated window [inpaint_f0, inpaint_f1) in latent frames, decided once: the init
     // encode can stop short of it, and the local conditioning below masks it.
@@ -1466,6 +1530,10 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     // adapters/strength needs a clean base: reload + re-apply only when this request's set
     // differs from what's already baked in (resident back-to-back requests with the SAME
     // adapters skip the work; a change pays a reload).
+    // Lanes keep every adapter functional in dit_passes_, so the ordinary chain is emptied here
+    // and the block below just leaves a clean, unmerged base.
+    std::vector<std::pair<std::string,float>> shared_dit;
+    if (use_lanes) shared_dit = std::move(dit_loras_want), dit_loras_want.clear();
     const bool env_needs_functional = use_env && !dit_loras_want.empty();
     if (dit_loras_ != dit_loras_want || (env_needs_functional && !dit_functional_.active)) {
         throw_if_cancelled(params.should_cancel);
@@ -1512,6 +1580,41 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         if (params.should_cancel && params.should_cancel())
             throw_cancelled_after_frugal_cleanup();
     }
+    if (use_lanes) {
+        // pass 0 = shared adapters alone; pass k = shared + lane k at its peak
+        std::vector<std::vector<std::pair<std::string,float>>> want(1 + lanes.size(), shared_dit);
+        for (size_t k = 0; k < lanes.size(); k++)
+            for (auto& ls : lanes[k].loras) want[k+1].push_back({ls.first, ls.second * lane_peak[k]});
+        bool same = dit_passes_.size() == want.size();
+        for (size_t i = 0; same && i < want.size(); i++) same = dit_passes_[i].chain == want[i];
+        if (!same) {
+            free_dit_passes();
+            dit_passes_.resize(want.size());
+            for (size_t i = 0; i < want.size(); i++) {
+                DitPass& p = dit_passes_[i];
+                p.chain = want[i];
+                if (p.chain.empty()) continue;
+                for (auto& ls : p.chain) p.adapters.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
+                if (sa3::functional_lora_ok(p.adapters)) p.fl = sa3::build_functional_lora(DIT, p.adapters, paths_.dit);
+                if (!p.fl.active) {
+                    free_dit_passes();
+                    throw std::runtime_error("lora lanes: every lane adapter must be a 'lora' or 'dora-rows' "
+                                             "family (the functional path)");
+                }
+            }
+            throw_if_cancelled(params.should_cancel);
+        }
+        printf("lora lanes: %zu lane(s) over %s\n", lanes.size(),
+               shared_dit.empty() ? "the base model" : "the shared adapters");
+        for (size_t k = 0; k < lanes.size(); k++) {
+            printf("  lane %zu: peak %.2f, %zu point(s)%s", k, lane_peak[k], lanes[k].envelope.size(),
+                   lanes[k].prompt.empty() ? "" : ", own prompt");
+            for (auto& ls : lanes[k].loras) printf("  %s x%.2f", ls.first.c_str(), ls.second);
+            printf("\n");
+        }
+    } else if (!dit_passes_.empty()) {
+        free_dit_passes();
+    }
 
     // ---------- DiT ping-pong ----------
     const int S = dc.mem_tokens + T;
@@ -1528,60 +1631,92 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     for (ggml_tensor* t : {x_in, tfeat, cross, glob, pos_d, ones}) ggml_set_input(t);
     ggml_tensor* local = nullptr;
     if (!localb.empty()) { local = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, dc.local_dim, T); ggml_set_input(local); }
-    // LoRA automation: per-frame amount relative to the peak the chain was built at.
-    sa3::DitEnv denv;
-    std::vector<float> envS, envT;
-    if (env_needs_functional && dit_functional_.active) {
-        const int spf = sc.patch_size * sc.output_seg;
-        auto& bps = params.lora_envelope;   // sorted below by time
+    // Automation: a lane's breakpoints sampled at each latent frame's centre, relative to the peak
+    // its chain was built at; linear between points and held flat past either end.
+    const int spf = sc.patch_size * sc.output_seg;
+    auto sample_envelope = [&](const std::vector<std::pair<float,float>>& bps, float peak) {
         std::vector<std::pair<float,float>> pts(bps.begin(), bps.end());
         std::sort(pts.begin(), pts.end());
-        auto amount_at = [&](float t) {
-            if (t <= pts.front().first) return pts.front().second;
-            if (t >= pts.back().first)  return pts.back().second;
-            for (size_t k = 1; k < pts.size(); k++)
+        std::vector<float> e(T);
+        for (int i = 0; i < T; i++) {
+            const float t = ((float)i + 0.5f) * (float)spf / 44100.0f;
+            float a = pts.back().second;
+            if (t <= pts.front().first) a = pts.front().second;
+            else for (size_t k = 1; k < pts.size(); k++)
                 if (t <= pts[k].first) {
                     const float t0 = pts[k-1].first, t1 = pts[k].first;
                     const float u = t1 > t0 ? (t - t0) / (t1 - t0) : 1.0f;
-                    return pts[k-1].second + u * (pts[k].second - pts[k-1].second);
+                    a = pts[k-1].second + u * (pts[k].second - pts[k-1].second);
+                    break;
                 }
-            return pts.back().second;
-        };
-        envT.resize(T);
-        double mean = 0.0;
-        for (int i = 0; i < T; i++) {
-            envT[i] = amount_at(((float)i + 0.5f) * (float)spf / 44100.0f) / env_peak;
-            mean += envT[i];
+            e[i] = a / peak;
         }
-        envS.assign(dc.mem_tokens, (float)(mean / std::max(1, T)));
+        return e;
+    };
+    // layer mode: one pass, the per-token amount fed to every adapted layer (sa3::DitEnv)
+    sa3::DitEnv denv;
+    std::vector<float> envS, envT;
+    if (env_needs_functional && dit_functional_.active) {
+        envT = sample_envelope(lanes[0].envelope, env_peak);
+        double mean = 0.0;
+        for (float v : envT) mean += v;
+        envS.assign(dc.mem_tokens, (float)(mean / std::max(1, T)));   // memory tokens carry the mean
         envS.insert(envS.end(), envT.begin(), envT.end());
         denv.eS = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, 1, S);
         denv.eT = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, 1, T);
         ggml_set_input(denv.eS); ggml_set_input(denv.eT);
-        printf("lora envelope: %zu point(s), peak %.3f, frame amount %.3f..%.3f (x peak)\n", pts.size(), env_peak,
+        printf("lora envelope (layer): peak %.3f, frame amount %.3f..%.3f (x peak)\n", env_peak,
                *std::min_element(envT.begin(), envT.end()), *std::max_element(envT.begin(), envT.end()));
     }
     auto set_env = [&]() {
         if (!denv.eS) return;
-        if (denv.eS->buffer) ggml_backend_tensor_set(denv.eS, envS.data(), 0, envS.size()*sizeof(float));
+        ggml_backend_tensor_set(denv.eS, envS.data(), 0, envS.size()*sizeof(float));
         ggml_backend_tensor_set(denv.eT, envT.data(), 0, envT.size()*sizeof(float));
     };
-    const bool env_velocity = denv.eS && params.lora_envelope_mode == "velocity";
-    if (denv.eS && !env_velocity && params.lora_envelope_mode != "layer")
-        throw std::runtime_error("lora envelope: mode must be 'velocity' or 'layer'");
+    // lanes: per lane an envelope input and, when the lane has its own prompt, a cross-attn input
+    struct LaneIn {
+        std::vector<float> eb;
+        ggml_tensor* e = nullptr;
+        ggml_tensor* cross = nullptr;
+        const std::vector<float>* crossb = nullptr;
+    };
+    std::vector<LaneIn> lane_in;
+    auto set_lanes = [&](bool uncond) {
+        for (auto& li : lane_in) {
+            ggml_backend_tensor_set(li.e, li.eb.data(), 0, li.eb.size()*sizeof(float));
+            if (!li.cross) continue;
+            const std::vector<float>& cb = uncond ? uncond_crossb : *li.crossb;
+            ggml_backend_tensor_set(li.cross, cb.data(), 0, cb.size()*sizeof(float));
+        }
+    };
     ggml_tensor* vel = nullptr;
-    if (env_velocity) {
-        ggml_tensor* v0 = sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local, nullptr);
-        ggml_tensor* v1 = sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local,
-                                           &dit_functional_.map);
-        vel = ggml_cont(dctx, ggml_add(dctx, v0, ggml_mul(dctx, ggml_sub(dctx, v1, v0), denv.eT)));
+    if (use_lanes) {
+        auto map_of = [&](size_t i) { return dit_passes_[i].fl.active ? &dit_passes_[i].fl.map : nullptr; };
+        ggml_tensor* v0 = sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local, map_of(0));
+        ggml_tensor* acc = v0;
+        lane_in.resize(lanes.size());
+        for (size_t k = 0; k < lanes.size(); k++) {
+            LaneIn& li = lane_in[k];
+            li.eb = sample_envelope(lanes[k].envelope, lane_peak[k]);
+            li.e = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, 1, T);
+            ggml_set_input(li.e);
+            if (!lanes[k].prompt.empty() && lanes[k].prompt != prompt) {
+                li.crossb = &lane_crossb.at(lanes[k].prompt);
+                li.cross = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, cond_dim, ctx_len);
+                ggml_set_input(li.cross);
+            }
+            ggml_tensor* vk = sa3::dit_forward(dctx, DIT, x_in, tfeat, li.cross ? li.cross : cross, glob,
+                                               pos_d, ones, dc, local, map_of(k + 1));
+            acc = ggml_add(dctx, acc, ggml_mul(dctx, ggml_sub(dctx, vk, v0), li.e));   // broadcast over io
+        }
+        vel = ggml_cont(dctx, acc);
     } else {
         vel = ggml_cont(dctx, sa3::dit_forward(dctx, DIT, x_in, tfeat, cross, glob, pos_d, ones, dc, local,
                                                dit_functional_.active ? &dit_functional_.map : nullptr,
                                                false, denv.eS ? &denv : nullptr));
     }
     ggml_set_output(vel);
-    ggml_cgraph* gf_dit = ggml_new_graph_custom(dctx, env_velocity ? 65536 : 32768, false);
+    ggml_cgraph* gf_dit = ggml_new_graph_custom(dctx, 32768 * (1 + lane_in.size()), false);
     ggml_build_forward_expand(gf_dit, vel);
     profile_log(prof, "dit_build", wall_time_s() - tp_dit);
     tp_dit = wall_time_s();
@@ -1602,6 +1737,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         ggml_backend_tensor_set(ones,  &one, 0, sizeof(float));
         if (local) ggml_backend_tensor_set(local, localb.data(), 0, localb.size()*sizeof(float));
         set_env();
+        set_lanes(false);
         ggml_backend_tensor_set(x_in,  host_x.data(), 0, N*sizeof(float));
         expo_features(sigmas[i], tf, dc.time_dim, dc.time_min_freq, dc.time_max_freq);
         ggml_backend_tensor_set(tfeat, tf.data(), 0, tf.size()*sizeof(float));
@@ -1626,6 +1762,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             ggml_backend_tensor_set(ones,  &one, 0, sizeof(float));
             if (local) ggml_backend_tensor_set(local, localb.data(), 0, localb.size()*sizeof(float));
             set_env();
+            set_lanes(true);
             ggml_backend_tensor_set(cross, uncond_crossb.data(), 0, uncond_crossb.size()*sizeof(float));
             if (!compute_checked(DIT.backend, gf_dit, "DiT sampling step (unconditioned)")) break;
             dit_compute += wall_time_s() - ts;
@@ -1656,7 +1793,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     profile_log(prof, "dit_total", wall_time_s() - t_dit_total);
     ggml_gallocr_free(alloc_dit); ggml_free(dctx);
     if (!keep_models) { DIT.free(); dit_loras_.clear(); dit_merged_ = false;
-                       dit_functional_.free(); dit_adapters_.clear(); }   // DiT gone -> next gen reloads a clean base
+                       dit_functional_.free(); dit_adapters_.clear(); free_dit_passes(); }   // DiT gone -> next gen reloads a clean base
     if (!backend_error.empty())
         throw_backend_failure();
     if (dit_cancelled)
