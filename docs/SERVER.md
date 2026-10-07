@@ -181,6 +181,33 @@ these defaults can be changed in `.env` with `SA3_PEAK_NORMALIZE_DB`, `SA3_LIMIT
 or `"peak_normalize_db": null` to disable peak normalization; do the same for `limiter_ceiling_db` to
 disable the limiter. See [`LOUDNESS.md`](LOUDNESS.md) for the short rationale and latent-control notes.
 
+## Per-request continuation splice controls
+
+The unified `/generate` endpoint accepts `splice_source` and `splice_gain_match`
+as JSON booleans, plus non-negative finite `mask_overlap` and `splice_xfade`
+seconds. Omitted fields use the existing `SA3_CONTINUE_*` environment defaults.
+Invalid values return HTTP 400 before a job is queued. These settings configure
+the pipeline's existing inpainting/source-splice implementation; they do not
+introduce separate transform or continuation routes.
+
+For continuation with source splicing enabled, pass `init_path` to the source
+WAV and `inpaint_start` equal to its duration. The pipeline applies mask overlap
+itself, so callers must not also subtract overlap from that boundary. Set
+`inpaint_end` to the generated canvas endpoint and `target_samples` to the
+desired final output length, excluding any tail padding.
+
+Completed `/poll_status/<session_id>` responses include `meta.splice`:
+`splice_applied`, `splice_end_seconds`, `splice_xfade_applied`, `splice_gain`,
+`mask_start_seconds`, and `mask_overlap`. These are measurements from the
+pipeline, including any clamping, rather than estimates reconstructed by a
+client. They are returned with both normal polling and `?consume=1`.
+
+The no-model `sa3-server-request-test` checks request validation through HTTP.
+For an optional real-model transport check (not audio-quality validation), run
+`python tests/sa3_server_splice_smoke.py SERVER_EXE MODELS_DIR`. It uses a short
+48 kHz synthetic source and one-step small-music CPU generation to verify native
+resampling, exact output length, applied splice measurements and consume polling.
+
 ## lora and prompt discovery
 
 `GET /loras` scans the adapters directory and returns GGUF adapter names and targets

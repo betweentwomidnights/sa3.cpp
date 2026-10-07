@@ -83,6 +83,7 @@ struct Job {
     int      step = 0, total_steps = 0;
     std::string audio_b64;                // base64 wav, filled on completion
     std::string loudness_json;
+    std::string splice_json;
     std::string error;
     uint64_t seed = 0;
     double   created = 0.0;
@@ -870,6 +871,10 @@ float extract_bpm_from_prompt(const std::string& prompt) {
 bool parse_generate_request(yyjson_val* root, const std::string& adir,
                             sa3::GenParams& params, uint64_t& seed_resolved,
                             std::string& perr) {
+    if (!yyjson_is_obj(root)) {
+        perr = "JSON object required";
+        return false;
+    }
     auto S = [&](const char* k, const char* d) { yyjson_val* v = yyjson_obj_get(root, k); return std::string(v && yyjson_is_str(v) ? yyjson_get_str(v) : d); };
     auto I = [&](const char* k, int d) {
         yyjson_val* v = yyjson_obj_get(root, k);
@@ -972,6 +977,22 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     request_float("limiter_knee", params.loudness.limiter_knee);
     sa3::normalize_loudness_params(params.loudness);
 
+    // These controls already live in the pipeline. Expose them per request so
+    // a host can translate its client API without changing process-wide env.
+    request_float("mask_overlap", params.splice.mask_overlap);
+    request_float("splice_xfade", params.splice.xfade);
+    auto request_bool = [&](const char* key, bool& dst) {
+        yyjson_val* v = yyjson_obj_get(root, key);
+        if (!v || !perr.empty()) return;
+        if (!yyjson_is_bool(v)) {
+            perr = std::string(key) + " must be a boolean";
+            return;
+        }
+        dst = yyjson_get_bool(v);
+    };
+    request_bool("splice_source", params.splice.enabled);
+    request_bool("splice_gain_match", params.splice.gain_match);
+
     params.negative_prompt   = S("negative_prompt", "");
     params.cfg_scale         = (float)D("cfg_scale", 1.0);
     params.cfg_rescale       = (float)D("cfg_rescale", 0.0);
@@ -1007,6 +1028,7 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
 
     if (!perr.empty()) return false;
     if (!sa3::validate_loudness_params(params.loudness, perr)) return false;
+    if (!sa3::validate_splice_params(params.splice, perr)) return false;
 
     if (!init_path.empty()) {
         if (!std::filesystem::exists(init_path)) {
@@ -1082,6 +1104,12 @@ std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved) {
             if (auto it = jobs.find(sid); it != jobs.end()) {
                 it->second.audio_b64 = std::move(b64);
                 it->second.loudness_json = loudness_meta_json(r.loudness);
+                it->second.splice_json = "{\"splice_applied\":" + std::string(r.splice.applied ? "true" : "false")
+                    + ",\"splice_end_seconds\":" + json_num(r.splice.splice_end_seconds)
+                    + ",\"splice_xfade_applied\":" + json_num(r.splice.xfade_applied)
+                    + ",\"splice_gain\":" + json_num(r.splice.gain)
+                    + ",\"mask_start_seconds\":" + json_num(r.splice.mask_start_seconds)
+                    + ",\"mask_overlap\":" + json_num(r.splice.mask_overlap_applied) + "}";
                 it->second.status = "completed"; it->second.progress = 100;
                 it->second.finished = sa3::wall_time_s();
             }
@@ -1763,6 +1791,7 @@ int main(int argc, char** argv) {
         uint64_t seed = 0;
         std::string audio_b64;
         std::string loudness_json;
+        std::string splice_json;
         std::string error;
         {
             std::lock_guard<std::mutex> lk(jobs_mtx);
@@ -1782,11 +1811,13 @@ int main(int argc, char** argv) {
             seed = j.seed;
             error = j.error;
             loudness_json = j.loudness_json;
+            splice_json = j.splice_json;
 
             if (j.status == "completed") {
                 if (consume) {
                     audio_b64.swap(j.audio_b64);
                     loudness_json.swap(j.loudness_json);
+                    splice_json.swap(j.splice_json);
                     jobs.erase(it);
                 } else {
                     audio_b64 = j.audio_b64;
@@ -1809,7 +1840,8 @@ int main(int argc, char** argv) {
         body += "\"queue_status\":" + qs;
         if (status == "completed")
             body += ",\"audio_data\":\"" + audio_b64 + "\",\"meta\":{\"seed\":" + std::to_string(seed) +
-                    ",\"loudness\":" + (loudness_json.empty() ? "{}" : loudness_json) + "}";
+                    ",\"loudness\":" + (loudness_json.empty() ? "{}" : loudness_json) +
+                    ",\"splice\":" + (splice_json.empty() ? "{}" : splice_json) + "}";
         if (status == "failed")
             body += ",\"error\":\"" + json_escape(error) + "\"";
         body += "}";

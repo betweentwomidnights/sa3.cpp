@@ -429,6 +429,10 @@ if(BUILD_TESTING)
         add_test(NAME sa3-server-runtime-contract-test
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_contract_test.py"
                          "$<TARGET_FILE:sa3-server>" "${PROJECT_VERSION}" "sa3")
+        add_test(NAME sa3-server-request-test
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sa3_server_request_test.py"
+                         "$<TARGET_FILE:sa3-server>")
+        set_tests_properties(sa3-server-request-test PROPERTIES LABELS "non-gpu;server")
         add_test(NAME sa3-model-artifacts-test
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_artifacts_test.py")
         add_test(NAME sa3-web-assets-current
