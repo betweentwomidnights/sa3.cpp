@@ -81,12 +81,15 @@
 
   /* takes */
   #takes { display: flex; flex-direction: column; gap: 3px; max-height: 260px; overflow-y: auto; }
-  .take { display: flex; gap: 8px; align-items: center; padding: 3px 6px; border-radius: 4px;
+  .take { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; padding: 3px 6px; border-radius: 4px;
           font-size: 0.78rem; cursor: pointer; border: 1px solid transparent; }
+  .take .meta { order: 9; flex-basis: 100%; padding-left: 26px; }
   .take:hover { background: #221818; }
   .take.current { border-color: var(--accent); background: #2a1719; }
   .take .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .take .meta { color: var(--muted); font-family: var(--mono); font-size: 0.72rem; }
+  .take a.tiny { color: var(--muted); text-decoration: none; padding: 0 4px; }
+  .take a.tiny:hover { color: var(--text); }
   .help { font-size: 0.74rem; color: var(--muted); line-height: 1.6; }
   .help kbd { font-family: var(--mono); background: var(--surface2); border: 1px solid var(--border);
               border-radius: 3px; padding: 0 4px; font-size: 0.7rem; }
@@ -112,7 +115,15 @@
       <textarea id="negative" rows="2"></textarea></div>
   </div>
   <div class="row" style="margin-top:8px">
-    <div class="col"><label for="duration">Duration (s)</label><input id="duration" type="number" min="1" max="190" step="1" value="20"></div>
+    <div class="col"><label for="duration">Duration (s) <span id="bars-info" class="muted"></span></label>
+      <div class="seedbox"><input id="duration" type="number" min="1" max="190" step="0.01" value="20">
+        <button class="icon" id="fit-bars" title="round the duration to whole bars at this BPM">⌗</button></div></div>
+    <div class="col"><label for="bpm" title="Added to the base prompt and every lane prompt; also draws the bar grid and Ctrl-snaps to beats">BPM</label>
+      <input id="bpm" type="number" min="0" max="300" step="1" placeholder="none"></div>
+    <div class="col"><label for="key" title="Added to every prompt, e.g. C# minor">Key</label>
+      <input id="key" type="text" placeholder="none" style="width:96px"></div>
+    <div class="col"><label for="decoder" title="Decoder adapter for the whole take (e.g. squeakfix for SAME-L)">Decoder adapter</label>
+      <select id="decoder"><option value="">none</option></select></div>
     <div class="col"><label for="steps">Steps</label><input id="steps" type="number" min="1" max="100" step="1" value="8"></div>
     <div class="col"><label for="cfg">CFG</label><input id="cfg" type="number" min="0" step="0.1" value="1"></div>
     <div class="col"><label for="seed">Seed</label>
@@ -123,6 +134,8 @@
       <input id="iso" type="number" min="0" step="0.5" value="4"></div>
     <div class="col"><label for="iso-until" title="Isolation applies while the step's sigma is above this (0.9 = the first 4 of 8 steps)">…until σ</label>
       <input id="iso-until" type="number" min="0" max="1" step="0.05" value="0.9"></div>
+    <div class="col"><label for="avg-until" title="While sigma is above this, every lane plays at its average amount, so the arrangement forms from one consistent mix before the curves apply. Continuity over separation; isolation is off during those steps. 0 = off.">Shared structure σ</label>
+      <input id="avg-until" type="number" min="0" max="1" step="0.05" value="0"></div>
     <div class="col"><label for="mode">Mixing</label>
       <select id="mode"><option value="velocity">velocity (per-pass)</option><option value="layer">layer (one pass, 1 lane)</option></select></div>
     <div class="col" style="margin-left:auto"><button class="primary" id="gen">Generate</button></div>
@@ -172,7 +185,11 @@
     The whole clip is denoised together, so sections pull towards one sound. While σ is above
     "until", isolation biases each frame's self-attention towards frames with a similar lane mix,
     so each phase forms its own identity; the remaining steps attend fully and smooth the joins.
-    λ ≈ 3 already saturates; 0 turns it off.
+    λ ≈ 3 already saturates; 0 turns it off.<br><br>
+    <b style="color:var(--text)">Shared structure</b><br>
+    The opposite trade: while σ is above this value every lane plays at its average amount, so the
+    whole clip shares one arrangement, and the drawn curves only shape the later steps. Try 0.9 with
+    isolation 0 for smoother, less "radio-dial" transitions.
   </div>
 </div>
 

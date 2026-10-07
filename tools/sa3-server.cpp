@@ -3,6 +3,7 @@
 //   POST /generate {prompt, duration, steps, seed, negative_prompt, cfg_*, dist_shift,
 //                   duration_padding_sec, loras[], lora_envelope[[sec,amount]], lora_envelope_mode,
 //                   lora_lanes[{loras[], envelope[[sec,amount]], prompt}], lane_isolation(_until),
+//                   lane_average_until,
 //                   init_path, keep_models}
 //                 -> {success, session_id, seed}   (generation runs in the background)
 //   POST /generate/loop {prompt, duration, bpm?, bars?, ...}
@@ -1166,6 +1167,8 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
         params.lane_isolation = (float)yyjson_get_num(v);
     if (yyjson_val* v = yyjson_obj_get(root, "lane_isolation_until"); v && yyjson_is_num(v))
         params.lane_isolation_until = (float)yyjson_get_num(v);
+    if (yyjson_val* v = yyjson_obj_get(root, "lane_average_until"); v && yyjson_is_num(v))
+        params.lane_average_until = (float)yyjson_get_num(v);
     yyjson_val* lanes = yyjson_obj_get(root, "lora_lanes");
     if (perr.empty() && lanes && yyjson_is_arr(lanes)) {
         if (yyjson_arr_size(lanes) > 8) perr = "lora_lanes: at most 8 lanes";
@@ -1756,6 +1759,14 @@ int main(int argc, char** argv) {
     });
     // Automation lanes: an experimental editor for lora_lanes (per-LoRA envelopes over a take)
     svr.Get("/lanes", [](const httplib::Request&, httplib::Response& res) {
+        // under --web-dir, the page on disk, so it never pairs a stale embedded page with a fresh lanes.js
+        if (!g_web_dir.empty()) {
+            std::ifstream f(std::filesystem::path(g_web_dir) / "lanes.html", std::ios::binary);
+            if (f) {
+                res.set_content(std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()), "text/html");
+                return;
+            }
+        }
         res.set_content(embedded_web::lanes_html, "text/html");
     });
     svr.Get("/lanes.js", [](const httplib::Request&, httplib::Response& res) {

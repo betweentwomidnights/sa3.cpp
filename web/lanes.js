@@ -12,9 +12,11 @@ const state = {
   prompt: "keygen music, crunchy square leads, tight chip drums",
   negative: "",
   duration: 20, steps: 8, cfg: 1, seed: 1234, seedLock: false, mode: "velocity", iso: 4, isoUntil: 0.9,
+  bpm: "", key: "", decoder: "auto", avgUntil: 0,
   lanes: [],
 };
 let loras = [];          // DiT adapters from /loras
+let decoders = [];       // decoder adapters for this model's autoencoder
 let takes = [];          // {id, url, peaks, dur, request, seed, secs, lanes}
 let current = null;      // the take on screen
 let nextLaneId = 1, nextTakeId = 1;
@@ -72,6 +74,15 @@ async function connect() {
     $("#model").textContent = `${h.model} / ${h.encoding}`;
     const r = await apiGet("/loras");
     loras = (r.loras || []).filter((l) => (l.target || "dit") === "dit");
+    // decoder adapters that fit this model's autoencoder (medium -> SAME-L, small-* -> SAME-S)
+    const fam = h.model === "medium" ? "same-l" : String(h.model).startsWith("small-") ? "same-s" : "";
+    const famOf = (l) => { const s = `${l.base_model} ${l.name}`.toLowerCase();
+      return s.includes("same-l") || s.includes("squeakfix") ? "same-l" : s.includes("same-s") || s.includes("declora") ? "same-s" : ""; };
+    decoders = (r.loras || []).filter((l) => l.target === "decoder" && famOf(l) === fam);
+    if (state.decoder === "auto") state.decoder = (decoders.find((l) => /squeakfix/i.test(l.name)) || {}).name || "";
+    $("#decoder").innerHTML = `<option value="">none</option>` +
+      decoders.map((l) => `<option value="${esc(l.name)}">${esc(l.name)}</option>`).join("");
+    $("#decoder").value = decoders.some((l) => l.name === state.decoder) ? state.decoder : "";
     if (!state.lanes.length && loras.length) { state.lanes.push(newLane()); save(); }
     renderLanes();
   } catch (e) {
@@ -99,6 +110,10 @@ function readForm() {
   state.seedLock = $("#seed-lock").checked;
   state.mode = $("#mode").value;
   state.iso = Math.max(0, +$("#iso").value || 0);
+  state.bpm = $("#bpm").value;
+  state.avgUntil = Math.min(1, Math.max(0, +$("#avg-until").value || 0));
+  state.key = $("#key").value;
+  state.decoder = $("#decoder").value;
   state.isoUntil = Math.min(1, Math.max(0, +$("#iso-until").value || 0));
 }
 function writeForm() {
@@ -111,9 +126,34 @@ function writeForm() {
   $("#seed-lock").checked = state.seedLock;
   $("#mode").value = state.mode;
   $("#iso").value = state.iso ?? 4;
+  $("#bpm").value = state.bpm ?? "";
+  $("#avg-until").value = state.avgUntil ?? 0;
+  $("#key").value = state.key ?? "";
+  if (state.decoder !== "auto") $("#decoder").value = state.decoder;
+  barsInfo();
   $("#iso-until").value = state.isoUntil ?? 0.9;
 }
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
+
+// ─── tempo / key ────────────────────────────────────────────────────────────
+
+const bpmOf = () => { const b = +state.bpm; return b > 0 ? b : 0; };
+const beatSec = () => (bpmOf() ? 60 / bpmOf() : 0);
+const barSec = () => 4 * beatSec();
+function barsInfo() {
+  const bar = barSec();
+  $("#bars-info").textContent = bar ? `≈ ${(state.duration / bar).toFixed(2)} bars` : "";
+}
+// Every prompt gets the same tempo and key, so all lanes agree on the grid; a BPM already typed
+// into a prompt is replaced rather than doubled.
+function withMusic(p) {
+  let s = String(p || "").replace(/\b(?:\d+(?:\.\d+)?\s*bpm|bpm\s*[:=]?\s*\d+(?:\.\d+)?)\b/gi, "")
+    .replace(/\s*,\s*(,\s*)+/g, ", ").replace(/^[\s,]+|[\s,]+$/g, "");
+  const key = String(state.key || "").trim();
+  if (key && !s.toLowerCase().includes(key.toLowerCase())) s += (s ? ", " : "") + key;
+  if (bpmOf()) s += (s ? ", " : "") + `${bpmOf()} BPM`;
+  return s;
+}
 
 // ─── lanes ──────────────────────────────────────────────────────────────────
 
@@ -178,7 +218,11 @@ function renderLanes() {
       catch (e) { showError(e.message); }
     };
     row.querySelectorAll("[data-preset]").forEach((b) => {
-      b.onclick = () => { lane.points = PRESETS[b.dataset.preset](state.duration).map((p) => [round(p[0], 0.01), p[1]]); drawAll(); save(); };
+      b.onclick = () => {
+        const q = barSec() || 0.01;
+        lane.points = PRESETS[b.dataset.preset](state.duration).map((p) => [Math.min(state.duration, round(p[0], q)), p[1]]);
+        drawAll(); save();
+      };
     });
     attachLaneEditor(row.querySelector("canvas"), row.querySelector(".tip"), lane);
   });
@@ -230,6 +274,19 @@ function drawWave(g, cv, peaks, dur, alpha) {
 
 function drawGrid(g, cv, withLabels) {
   const h = cv.clientHeight, d = state.duration;
+  if (bpmOf()) {
+    const beat = beatSec(), pxBeat = xOf(cv, beat) - xOf(cv, 0);
+    g.font = "10px monospace"; g.lineWidth = 1;
+    for (let b = 0, t = 0; t <= d + 1e-6; b++, t = b * beat) {
+      const bar = b % 4 === 0;
+      if (!bar && pxBeat < 7) continue;
+      const x = Math.round(xOf(cv, t)) + 0.5;
+      g.strokeStyle = bar ? "#ffffff22" : "#ffffff0b";
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+      if (withLabels && bar && x + 26 < cv.clientWidth) { g.fillStyle = "#b6a5a5"; g.fillText(`${b / 4 + 1}`, x + 2, 10); }
+    }
+    return;
+  }
   const step = d > 120 ? 10 : d > 40 ? 5 : d > 15 ? 2 : 1;
   g.strokeStyle = "#ffffff12"; g.fillStyle = "#b6a5a5"; g.font = "10px monospace"; g.lineWidth = 1;
   for (let t = 0; t <= d + 1e-6; t += step) {
@@ -381,7 +438,7 @@ function attachLaneEditor(cv, tip, lane) {
   let drag = null;   // {kind: "point", i} | {kind: "draw", t0, t1, samples}
   const pos = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   const hit = (x, y) => lane.points.findIndex((p) => Math.hypot(xOf(cv, p[0]) - x, yOf(cv, p[1], lane.max) - y) < 8);
-  const snap = (t, a, e) => e.ctrlKey || e.metaKey ? [round(t, 0.25), round(a, 0.05)] : [round(t, 0.01), round(a, 0.005)];
+  const snap = (t, a, e) => e.ctrlKey || e.metaKey ? [round(t, beatSec() || 0.25), round(a, 0.05)] : [round(t, 0.01), round(a, 0.005)];
   const showTip = (x, y, t, a) => {
     tip.style.display = "block"; tip.textContent = `${t.toFixed(2)}s · ${a.toFixed(2)}`;
     tip.style.left = Math.min(x + 10, cv.clientWidth - 90) + "px"; tip.style.top = Math.max(0, y - 22) + "px";
@@ -448,7 +505,8 @@ function showError(msg) { $("#error").textContent = msg || ""; }
 function buildRequest() {
   const lanes = state.lanes.filter((l) => l.lora && l.points.length);
   const body = {
-    prompt: state.prompt,
+    prompt: withMusic(state.prompt),
+    loras: state.decoder && state.decoder !== "auto" ? [{ name: state.decoder, strength: 1 }] : [],
     duration: state.duration,
     steps: state.steps,
     seed: state.seed,
@@ -457,10 +515,11 @@ function buildRequest() {
     lora_envelope_mode: state.mode,
     lane_isolation: state.mode === "velocity" ? state.iso : 0,
     lane_isolation_until: state.isoUntil,
+    lane_average_until: state.mode === "velocity" ? state.avgUntil : 0,
     lora_lanes: lanes.map((l) => ({
       loras: [{ name: l.lora, strength: l.strength }],
       envelope: l.points.map((p) => [+p[0].toFixed(3), +p[1].toFixed(3)]),
-      ...(l.prompt.trim() ? { prompt: l.prompt.trim() } : {}),
+      ...(l.prompt.trim() ? { prompt: withMusic(l.prompt.trim()) } : {}),
     })),
   };
   if (state.negative.trim()) body.negative_prompt = state.negative.trim();
@@ -540,6 +599,16 @@ function setCurrent(take, autoplay) {
   renderTakes(); drawAll();
 }
 
+function takeFileName(t) {
+  const lanes = t.lanes.filter((l) => l.lora).map((l) => l.lora).join("+") || "base";
+  const parts = [`take${String(t.id).padStart(2, "0")}`, lanes];
+  if (t.snapshot.bpm) parts.push(`${t.snapshot.bpm}bpm`);
+  parts.push(t.request.lane_isolation ? `iso${t.request.lane_isolation}` : "noiso");
+  if (t.request.lane_average_until) parts.push(`shared${t.request.lane_average_until}`);
+  parts.push(`seed${t.seed}`);
+  return parts.join("_").replace(/[^\w+.-]+/g, "-") + ".wav";
+}
+
 function renderTakes() {
   const host = $("#takes");
   if (!takes.length) return;
@@ -551,7 +620,8 @@ function renderTakes() {
     const dots = lanes.map((l) => `<span class="swatch" style="background:${l.color};display:inline-block"></span>`).join(" ");
     div.innerHTML = `<b>#${t.id}</b> ${dots}
       <span class="lbl" title="${esc(t.request.prompt)}">${esc(lanes.map((l) => l.lora + (l.prompt ? "*" : "")).join(" + ") || "base")} — ${esc(t.request.prompt)}</span>
-      <span class="meta">${t.request.lora_envelope_mode}${t.request.lane_isolation ? ` · iso ${t.request.lane_isolation}@${t.request.lane_isolation_until}` : ""} · seed ${t.seed} · ${t.request.steps}st · ${t.secs.toFixed(1)}s</span>
+      <span class="meta">${t.snapshot.bpm ? `${t.snapshot.bpm}bpm · ` : ""}${t.request.lane_isolation ? `iso ${t.request.lane_isolation}@${t.request.lane_isolation_until}` : "no iso"}${t.request.lane_average_until ? ` · shared@${t.request.lane_average_until}` : ""}${t.request.loras.length ? ` · ${esc(t.request.loras[0].name)}` : ""} · seed ${t.seed} · ${t.secs.toFixed(1)}s</span>
+      <a class="tiny" href="${t.url}" download="${esc(takeFileName(t))}" title="download ${esc(takeFileName(t))}" onclick="event.stopPropagation()">⬇</a>
       <button class="tiny" title="restore this take's settings into the editor">↺</button>`;
     div.onclick = () => setCurrent(t, true);
     div.querySelector("button").onclick = (e) => {
@@ -584,11 +654,17 @@ function init() {
   load();
   if (!state.seed) state.seed = randomSeed();
   writeForm();
-  for (const id of ["#prompt", "#negative", "#duration", "#steps", "#cfg", "#seed", "#seed-lock", "#mode", "#iso", "#iso-until"]) {
-    $(id).addEventListener("input", () => { readForm(); drawAll(); save(); });
+  for (const id of ["#prompt", "#negative", "#duration", "#steps", "#cfg", "#seed", "#seed-lock", "#mode", "#iso", "#iso-until",
+                    "#bpm", "#key", "#decoder", "#avg-until"]) {
+    $(id).addEventListener("input", () => { readForm(); barsInfo(); drawAll(); save(); });
   }
   $("#gen").onclick = generate;
   $("#seed-dice").onclick = () => { state.seed = randomSeed(); writeForm(); save(); };
+  $("#fit-bars").onclick = () => {
+    const bar = barSec(); if (!bar) return;
+    state.duration = +(Math.max(1, Math.round(state.duration / bar)) * bar).toFixed(3);
+    writeForm(); drawAll(); save();
+  };
   $("#base-dice").onclick = async () => {
     try { state.prompt = await dicePrompt(""); writeForm(); save(); } catch (e) { showError(e.message); }
   };

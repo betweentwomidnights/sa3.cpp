@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
     std::vector<std::pair<float,float>> lora_envelope;   // --lora-envelope: strength automation
     std::string lora_envelope_mode = "velocity";         // --lora-envelope-mode velocity|layer
     std::vector<sa3::GenParams::LoraLane> lanes;          // --lane ... (see usage)
-    float lane_isolation = 0.0f, lane_isolation_until = 0.9f;
+    float lane_isolation = 0.0f, lane_isolation_until = 0.9f, lane_average_until = 0.0f;
     const char* init_p = nullptr;            // audio2audio / inpaint: source WAV (encoded to z_init)
     float init_noise_level = 0.85f;          // sigma_max for audio2audio (1.0 == text2music)
     float inpaint_start = -1.0f, inpaint_end = -1.0f;   // inpaint: regenerate this [start,end] sec region
@@ -109,6 +109,7 @@ int main(int argc, char** argv) {
         }
         else if (!strcmp(argv[i], "--lane-isolation") && i+1 < argc) lane_isolation = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--lane-isolation-until") && i+1 < argc) lane_isolation_until = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--lane-average-until") && i+1 < argc) lane_average_until = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--lane") && i+1 < argc) {             // "name[+name...]" starts a lane
             sa3::GenParams::LoraLane ln;
             const std::string spec = argv[++i];
@@ -254,7 +255,7 @@ int main(int argc, char** argv) {
                         "                     [--ae-encoding ENC  autoencoder precision; default auto, prefers F32]\n"
                         "                     | --tok <f> --t5 <f> --cond <f> --dit <f> --same <f>)\n"
                         "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--lora-envelope SEC:AMT,SEC:AMT... [--lora-envelope-mode velocity|layer]]\n"
-                        "                     [--lane NAME[+NAME...] --lane-envelope SEC:AMT,... [--lane-strength S] [--lane-prompt \"...\"]]... [--lane-isolation B [--lane-isolation-until SIGMA]] [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
+                        "                     [--lane NAME[+NAME...] --lane-envelope SEC:AMT,... [--lane-strength S] [--lane-prompt \"...\"]]... [--lane-isolation B [--lane-isolation-until SIGMA]] [--lane-average-until SIGMA] [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
                         "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--legacy-schedule] [--duration-padding SEC]\n"
                         "                     [--cfg-scale S [--negative-prompt \"...\"] [--cfg-rescale R] [--cfg-interval min,max] [--apg-scale A] [--cfg-norm-threshold T]] [--out song.wav]\n"
                         "                     continuation splice (with --init + --inpaint-start): [--no-splice] [--mask-overlap SEC] [--splice-xfade SEC] [--no-splice-gain-match]\n");
@@ -346,6 +347,7 @@ int main(int argc, char** argv) {
     params.lora_lanes = lanes;
     params.lane_isolation = lane_isolation;
     params.lane_isolation_until = lane_isolation_until;
+    params.lane_average_until = lane_average_until;
 
     if (init_p) {   // audio2audio / inpaint source WAV -> raw planar samples + rate (pipeline resamples)
         int n_samp = 0, n_ch = 0, sr = 0;

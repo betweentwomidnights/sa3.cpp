@@ -1879,12 +1879,15 @@ inline const std::string lanes_html =
 
   /* takes */
   #takes { display: flex; flex-direction: column; gap: 3px; max-height: 260px; overflow-y: auto; }
-  .take { display: flex; gap: 8px; align-items: center; padding: 3px 6px; border-radius: 4px;
+  .take { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; padding: 3px 6px; border-radius: 4px;
           font-size: 0.78rem; cursor: pointer; border: 1px solid transparent; }
+  .take .meta { order: 9; flex-basis: 100%; padding-left: 26px; }
   .take:hover { background: #221818; }
   .take.current { border-color: var(--accent); background: #2a1719; }
   .take .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .take .meta { color: var(--muted); font-family: var(--mono); font-size: 0.72rem; }
+  .take a.tiny { color: var(--muted); text-decoration: none; padding: 0 4px; }
+  .take a.tiny:hover { color: var(--text); }
   .help { font-size: 0.74rem; color: var(--muted); line-height: 1.6; }
   .help kbd { font-family: var(--mono); background: var(--surface2); border: 1px solid var(--border);
               border-radius: 3px; padding: 0 4px; font-size: 0.7rem; }
@@ -1910,17 +1913,28 @@ inline const std::string lanes_html =
       <textarea id="negative" rows="2"></textarea></div>
   </div>
   <div class="row" style="margin-top:8px">
-    <div class="col"><label for="duration">Duration (s)</label><input id="duration" type="number" min="1" max="190" step="1" value="20"></div>
+    <div class="col"><label for="duration">Duration (s) <span id="bars-info" class="muted"></span></label>
+      <div class="seedbox"><input id="duration" type="number" min="1" max="190" step="0.01" value="20">
+        <button class="icon" id="fit-bars" title="round the duration to whole bars at this BPM">⌗</button></div></div>
+    <div class="col"><label for="bpm" title="Added to the base prompt and every lane prompt; also draws the bar grid and Ctrl-snaps to beats">BPM</label>
+      <input id="bpm" type="number" min="0" max="300" step="1" placeholder="none"></div>
+    <div class="col"><label for="key" title="Added to every prompt, e.g. C# minor">Key</label>
+      <input id="key" type="text" placeholder="none" style="width:96px"></div>
+    <div class="col"><label for="decoder" title="Decoder adapter for the whole take (e.g. squeakfix for SAME-L)">Decoder adapter</label>
+      <select id="decoder"><option value="">none</option></select></div>
     <div class="col"><label for="steps">Steps</label><input id="steps" type="number" min="1" max="100" step="1" value="8"></div>
     <div class="col"><label for="cfg">CFG</label><input id="cfg" type="number" min="0" step="0.1" value="1"></div>
     <div class="col"><label for="seed">Seed</label>
       <div class="seedbox"><input id="seed" type="number" min="0" step="1">
         <button class="icon" id="seed-dice" title="new random seed">🎲</button>
-        <label class="muted" style="display:flex;gap:3px;align-items:center;margin:0"><input id="seed-lock" type="checkbox"> lock</label></div></div>
+        <label class="muted" style="display:fle)sa3web") +
+    std::string(R"sa3web(x;gap:3px;align-items:center;margin:0"><input id="seed-lock" type="checkbox"> lock</label></div></div>
     <div class="col"><label for="iso" title="Early-step self-attention bias between frames with different lane mixes. 0 = off.">Isolation λ</label>
       <input id="iso" type="number" min="0" step="0.5" value="4"></div>
     <div class="col"><label for="iso-until" title="Isolation applies while the step's sigma is above this (0.9 = the first 4 of 8 steps)">…until σ</label>
       <input id="iso-until" type="number" min="0" max="1" step="0.05" value="0.9"></div>
+    <div class="col"><label for="avg-until" title="While sigma is above this, every lane plays at its average amount, so the arrangement forms from one consistent mix before the curves apply. Continuity over separation; isolation is off during those steps. 0 = off.">Shared structure σ</label>
+      <input id="avg-until" type="number" min="0" max="1" step="0.05" value="0"></div>
     <div class="col"><label for="mode">Mixing</label>
       <select id="mode"><option value="velocity">velocity (per-pass)</option><option value="layer">layer (one pass, 1 lane)</option></select></div>
     <div class="col" style="margin-left:auto"><button class="primary" id="gen">Generate</button></div>
@@ -1930,8 +1944,7 @@ inline const std::string lanes_html =
 
 <div class="transport">
   <button id="play" class="icon" title="play / pause (space)">▶</button>
-  )sa3web") +
-    std::string(R"sa3web(<button id="stop" class="icon" title="stop">■</button>
+  <button id="stop" class="icon" title="stop">■</button>
   <span id="time">0.00 / 0.00</span>
   <div class="progress"><div id="progress"></div></div>
   <span id="progress-label"></span>
@@ -1971,7 +1984,12 @@ inline const std::string lanes_html =
     The whole clip is denoised together, so sections pull towards one sound. While σ is above
     "until", isolation biases each frame's self-attention towards frames with a similar lane mix,
     so each phase forms its own identity; the remaining steps attend fully and smooth the joins.
-    λ ≈ 3 already saturates; 0 turns it off.
+    λ ≈ 3 already saturates; 0 turns it off.<br><br>
+    <b style="color:var(--text)">Shared structure</b><br>
+    The opposite trade: while σ is above this value every lane plays at its average amount, so the
+    whole clip shares one arrangement, and the drawn curves only shape the later steps. Try 0.9 with
+    isolation 0 for smoother, less "rad)sa3web") +
+    std::string(R"sa3web(io-dial" transitions.
   </div>
 </div>
 
@@ -1995,9 +2013,11 @@ const state = {
   prompt: "keygen music, crunchy square leads, tight chip drums",
   negative: "",
   duration: 20, steps: 8, cfg: 1, seed: 1234, seedLock: false, mode: "velocity", iso: 4, isoUntil: 0.9,
+  bpm: "", key: "", decoder: "auto", avgUntil: 0,
   lanes: [],
 };
 let loras = [];          // DiT adapters from /loras
+let decoders = [];       // decoder adapters for this model's autoencoder
 let takes = [];          // {id, url, peaks, dur, request, seed, secs, lanes}
 let current = null;      // the take on screen
 let nextLaneId = 1, nextTakeId = 1;
@@ -2055,10 +2075,20 @@ async function connect() {
     $("#model").textContent = `${h.model} / ${h.encoding}`;
     const r = await apiGet("/loras");
     loras = (r.loras || []).filter((l) => (l.target || "dit") === "dit");
+    // decoder adapters that fit this model's autoencoder (medium -> SAME-L, small-* -> SAME-S)
+    const fam = h.model === "medium" ? "same-l" : String(h.model).startsWith("small-") ? "same-s" : "";
+    const famOf = (l) => { const s = `${l.base_model} ${l.name}`.toLowerCase();
+      return s.includes("same-l") || s.includes("squeakfix") ? "same-l" : s.includes("same-s") || s.includes("declora") ? "same-s" : ""; };
+    decoders = (r.loras || []).filter((l) => l.target === "decoder" && famOf(l) === fam);
+    if (state.decoder === "auto") state.decoder = (decoders.find((l) => /squeakfix/i.test(l.name)) || {}).name || "";
+    $("#decoder").innerHTML = `<option value="">none</option>` +
+      decoders.map((l) => `<option value="${esc(l.name)}">${esc(l.name)}</option>`).join("");
+    $("#decoder").value = decoders.some((l) => l.name === state.decoder) ? state.decoder : "";
     if (!state.lanes.length && loras.length) { state.lanes.push(newLane()); save(); }
     renderLanes();
   } catch (e) {
-    st.textContent = "✗ server unreachable"; st.className = "err";
+    st.textContent = "✗ ser)sa3web") +
+    std::string(R"sa3web(ver unreachable"; st.className = "err";
   }
 }
 
@@ -2082,8 +2112,11 @@ function readForm() {
   state.seedLock = $("#seed-lock").checked;
   state.mode = $("#mode").value;
   state.iso = Math.max(0, +$("#iso").value || 0);
-  state.isoUntil = Math.mi)sa3web") +
-    std::string(R"sa3web(n(1, Math.max(0, +$("#iso-until").value || 0));
+  state.bpm = $("#bpm").value;
+  state.avgUntil = Math.min(1, Math.max(0, +$("#avg-until").value || 0));
+  state.key = $("#key").value;
+  state.decoder = $("#decoder").value;
+  state.isoUntil = Math.min(1, Math.max(0, +$("#iso-until").value || 0));
 }
 function writeForm() {
   $("#prompt").value = state.prompt;
@@ -2095,9 +2128,34 @@ function writeForm() {
   $("#seed-lock").checked = state.seedLock;
   $("#mode").value = state.mode;
   $("#iso").value = state.iso ?? 4;
+  $("#bpm").value = state.bpm ?? "";
+  $("#avg-until").value = state.avgUntil ?? 0;
+  $("#key").value = state.key ?? "";
+  if (state.decoder !== "auto") $("#decoder").value = state.decoder;
+  barsInfo();
   $("#iso-until").value = state.isoUntil ?? 0.9;
 }
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
+
+// ─── tempo / key ────────────────────────────────────────────────────────────
+
+const bpmOf = () => { const b = +state.bpm; return b > 0 ? b : 0; };
+const beatSec = () => (bpmOf() ? 60 / bpmOf() : 0);
+const barSec = () => 4 * beatSec();
+function barsInfo() {
+  const bar = barSec();
+  $("#bars-info").textContent = bar ? `≈ ${(state.duration / bar).toFixed(2)} bars` : "";
+}
+// Every prompt gets the same tempo and key, so all lanes agree on the grid; a BPM already typed
+// into a prompt is replaced rather than doubled.
+function withMusic(p) {
+  let s = String(p || "").replace(/\b(?:\d+(?:\.\d+)?\s*bpm|bpm\s*[:=]?\s*\d+(?:\.\d+)?)\b/gi, "")
+    .replace(/\s*,\s*(,\s*)+/g, ", ").replace(/^[\s,]+|[\s,]+$/g, "");
+  const key = String(state.key || "").trim();
+  if (key && !s.toLowerCase().includes(key.toLowerCase())) s += (s ? ", " : "") + key;
+  if (bpmOf()) s += (s ? ", " : "") + `${bpmOf()} BPM`;
+  return s;
+}
 
 // ─── lanes ──────────────────────────────────────────────────────────────────
 
@@ -2127,7 +2185,8 @@ function renderLanes() {
     const row = document.createElement("div");
     row.className = "tl-row";
     const opts = loras.map((l) => `<option value="${esc(l.name)}" ${l.name === lane.lora ? "selected" : ""}>${esc(l.name)}</option>`).join("");
-    const missing = lane.lora && !loras.some((l) => l.name === lane.lora) ? `<option selected>${esc(lane.lora)} (missing)</option>` : "";
+    const missing = lan)sa3web") +
+    std::string(R"sa3web(e.lora && !loras.some((l) => l.name === lane.lora) ? `<option selected>${esc(lane.lora)} (missing)</option>` : "";
     row.innerHTML = `
       <div class="tl-head lane-head">
         <div class="lane-head-top">
@@ -2162,10 +2221,13 @@ function renderLanes() {
       catch (e) { showError(e.message); }
     };
     row.querySelectorAll("[data-preset]").forEach((b) => {
-      b.onclick = () => { lane.points = PRESETS[b.dataset.preset](state.duration).map((p) => [round(p[0], 0.01), p[1]]); drawAll(); save(); };
+      b.onclick = () => {
+        const q = barSec() || 0.01;
+        lane.points = PRESETS[b.dataset.preset](state.duration).map((p) => [Math.min(state.duration, round(p[0], q)), p[1]]);
+        drawAll(); save();
+      };
     });
-    attachLaneEditor(row.query)sa3web") +
-    std::string(R"sa3web(Selector("canvas"), row.querySelector(".tip"), lane);
+    attachLaneEditor(row.querySelector("canvas"), row.querySelector(".tip"), lane);
   });
   $("#add-lane").disabled = state.lanes.length >= MAX_LANES;
   resize();
@@ -2202,7 +2264,8 @@ function resize() {
 function drawWave(g, cv, peaks, dur, alpha) {
   if (!peaks) return;
   const h = cv.clientHeight, mid = h / 2;
-  g.fillStyle = `rgba(226,59,66,${alpha})`;
+  g.fillStyle = `rgba(226,59,66,${al)sa3web") +
+    std::string(R"sa3web(pha})`;
   const x0 = xOf(cv, 0), x1 = xOf(cv, Math.min(dur, state.duration));
   const n = peaks.length / 2;
   for (let x = Math.floor(x0); x < x1; x++) {
@@ -2215,6 +2278,19 @@ function drawWave(g, cv, peaks, dur, alpha) {
 
 function drawGrid(g, cv, withLabels) {
   const h = cv.clientHeight, d = state.duration;
+  if (bpmOf()) {
+    const beat = beatSec(), pxBeat = xOf(cv, beat) - xOf(cv, 0);
+    g.font = "10px monospace"; g.lineWidth = 1;
+    for (let b = 0, t = 0; t <= d + 1e-6; b++, t = b * beat) {
+      const bar = b % 4 === 0;
+      if (!bar && pxBeat < 7) continue;
+      const x = Math.round(xOf(cv, t)) + 0.5;
+      g.strokeStyle = bar ? "#ffffff22" : "#ffffff0b";
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+      if (withLabels && bar && x + 26 < cv.clientWidth) { g.fillStyle = "#b6a5a5"; g.fillText(`${b / 4 + 1}`, x + 2, 10); }
+    }
+    return;
+  }
   const step = d > 120 ? 10 : d > 40 ? 5 : d > 15 ? 2 : 1;
   g.strokeStyle = "#ffffff12"; g.fillStyle = "#b6a5a5"; g.font = "10px monospace"; g.lineWidth = 1;
   for (let t = 0; t <= d + 1e-6; t += step) {
@@ -2260,8 +2336,7 @@ function fftMag(re, im) {          // in-place radix-2, returns nothing; re/im l
       for (let k = 0; k < len / 2; k++) {
         const a = i + k, b = a + len / 2;
         const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
-        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a])sa3web") +
-    std::string(R"sa3web( += tr; im[a] += ti;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
         const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
       }
     }
@@ -2282,7 +2357,8 @@ function spectrogram(mono, sr) {
     for (let r = 0; r < SPEC_ROWS; r++) {
       const b0 = Math.floor(edges[r]), b1 = Math.max(b0 + 1, Math.floor(edges[r + 1]));
       let acc = 0;
-      for (let b = b0; b < b1; b++) acc += re[b] * re[b] + im[b] * im[b];
+      for (le)sa3web") +
+    std::string(R"sa3web(t b = b0; b < b1; b++) acc += re[b] * re[b] + im[b] * im[b];
       db[c * SPEC_ROWS + r] = 10 * Math.log10(acc / (b1 - b0) + 1e-10);
     }
   }
@@ -2345,8 +2421,7 @@ function drawLane(cv, lane, hover) {
   envPath(g, cv, lane, lane.max);
   g.strokeStyle = lane.color; g.lineWidth = 2; g.stroke();
   lane.points.forEach((p, i) => {
-    g.beginPath(); g.arc(xOf(cv, p[0]), yOf(cv, p[1], lane.max))sa3web") +
-    std::string(R"sa3web(, i === hover ? 6 : 4, 0, Math.PI * 2);
+    g.beginPath(); g.arc(xOf(cv, p[0]), yOf(cv, p[1], lane.max), i === hover ? 6 : 4, 0, Math.PI * 2);
     g.fillStyle = i === hover ? "#fff" : lane.color; g.fill();
   });
   drawPlayhead(g, cv);
@@ -2368,7 +2443,8 @@ function attachLaneEditor(cv, tip, lane) {
   let drag = null;   // {kind: "point", i} | {kind: "draw", t0, t1, samples}
   const pos = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   const hit = (x, y) => lane.points.findIndex((p) => Math.hypot(xOf(cv, p[0]) - x, yOf(cv, p[1], lane.max) - y) < 8);
-  const snap = (t, a, e) => e.ctrlKey || e.metaKey ? [round(t, 0.25), round(a, 0.05)] : [round(t, 0.01), round(a, 0.005)];
+  const snap = (t, a, e) => e.ctrlKey || e.metaKey ? )sa3web") +
+    std::string(R"sa3web([round(t, beatSec() || 0.25), round(a, 0.05)] : [round(t, 0.01), round(a, 0.005)];
   const showTip = (x, y, t, a) => {
     tip.style.display = "block"; tip.textContent = `${t.toFixed(2)}s · ${a.toFixed(2)}`;
     tip.style.left = Math.min(x + 10, cv.clientWidth - 90) + "px"; tip.style.top = Math.max(0, y - 22) + "px";
@@ -2432,11 +2508,11 @@ function attachLaneEditor(cv, tip, lane) {
 
 function showError(msg) { $("#error").textContent = msg || ""; }
 
-f)sa3web") +
-    std::string(R"sa3web(unction buildRequest() {
+function buildRequest() {
   const lanes = state.lanes.filter((l) => l.lora && l.points.length);
   const body = {
-    prompt: state.prompt,
+    prompt: withMusic(state.prompt),
+    loras: state.decoder && state.decoder !== "auto" ? [{ name: state.decoder, strength: 1 }] : [],
     duration: state.duration,
     steps: state.steps,
     seed: state.seed,
@@ -2445,17 +2521,19 @@ f)sa3web") +
     lora_envelope_mode: state.mode,
     lane_isolation: state.mode === "velocity" ? state.iso : 0,
     lane_isolation_until: state.isoUntil,
+    lane_average_until: state.mode === "velocity" ? state.avgUntil : 0,
     lora_lanes: lanes.map((l) => ({
       loras: [{ name: l.lora, strength: l.strength }],
       envelope: l.points.map((p) => [+p[0].toFixed(3), +p[1].toFixed(3)]),
-      ...(l.prompt.trim() ? { prompt: l.prompt.trim() } : {}),
+      ...(l.prompt.trim() ? { prompt: withMusic(l.prompt.trim()) } : {}),
     })),
   };
   if (state.negative.trim()) body.negative_prompt = state.negative.trim();
   return body;
 }
 
-async function generate() {
+async fun)sa3web") +
+    std::string(R"sa3web(ction generate() {
   readForm();
   if (!state.seedLock) { state.seed = randomSeed(); writeForm(); }
   save();
@@ -2524,9 +2602,18 @@ function setCurrent(take, autoplay) {
   if (keepAt != null) a.addEventListener("loadedmetadata", () => { a.currentTime = Math.min(keepAt, take.dur); }, { once: true });
   if (autoplay || keepAt != null) a.play().catch(() => {});
   const names = take.lanes.filter((l) => l.lora).map((l) => l.lora).join(" + ") || "base only";
-  $("#take-info").textContent = `#${take.id} · seed ${take)sa3web") +
-    std::string(R"sa3web(.seed} · ${names}`;
+  $("#take-info").textContent = `#${take.id} · seed ${take.seed} · ${names}`;
   renderTakes(); drawAll();
+}
+
+function takeFileName(t) {
+  const lanes = t.lanes.filter((l) => l.lora).map((l) => l.lora).join("+") || "base";
+  const parts = [`take${String(t.id).padStart(2, "0")}`, lanes];
+  if (t.snapshot.bpm) parts.push(`${t.snapshot.bpm}bpm`);
+  parts.push(t.request.lane_isolation ? `iso${t.request.lane_isolation}` : "noiso");
+  if (t.request.lane_average_until) parts.push(`shared${t.request.lane_average_until}`);
+  parts.push(`seed${t.seed}`);
+  return parts.join("_").replace(/[^\w+.-]+/g, "-") + ".wav";
 }
 
 function renderTakes() {
@@ -2536,11 +2623,13 @@ function renderTakes() {
   for (const t of takes) {
     const div = document.createElement("div");
     div.className = "take" + (t === current ? " current" : "");
-    const lanes = t.lanes.filter((l) => l.lora);
+    const lanes = t.lanes.filt)sa3web") +
+    std::string(R"sa3web(er((l) => l.lora);
     const dots = lanes.map((l) => `<span class="swatch" style="background:${l.color};display:inline-block"></span>`).join(" ");
     div.innerHTML = `<b>#${t.id}</b> ${dots}
       <span class="lbl" title="${esc(t.request.prompt)}">${esc(lanes.map((l) => l.lora + (l.prompt ? "*" : "")).join(" + ") || "base")} — ${esc(t.request.prompt)}</span>
-      <span class="meta">${t.request.lora_envelope_mode}${t.request.lane_isolation ? ` · iso ${t.request.lane_isolation}@${t.request.lane_isolation_until}` : ""} · seed ${t.seed} · ${t.request.steps}st · ${t.secs.toFixed(1)}s</span>
+      <span class="meta">${t.snapshot.bpm ? `${t.snapshot.bpm}bpm · ` : ""}${t.request.lane_isolation ? `iso ${t.request.lane_isolation}@${t.request.lane_isolation_until}` : "no iso"}${t.request.lane_average_until ? ` · shared@${t.request.lane_average_until}` : ""}${t.request.loras.length ? ` · ${esc(t.request.loras[0].name)}` : ""} · seed ${t.seed} · ${t.secs.toFixed(1)}s</span>
+      <a class="tiny" href="${t.url}" download="${esc(takeFileName(t))}" title="download ${esc(takeFileName(t))}" onclick="event.stopPropagation()">⬇</a>
       <button class="tiny" title="restore this take's settings into the editor">↺</button>`;
     div.onclick = () => setCurrent(t, true);
     div.querySelector("button").onclick = (e) => {
@@ -2573,11 +2662,17 @@ function init() {
   load();
   if (!state.seed) state.seed = randomSeed();
   writeForm();
-  for (const id of ["#prompt", "#negative", "#duration", "#steps", "#cfg", "#seed", "#seed-lock", "#mode", "#iso", "#iso-until"]) {
-    $(id).addEventListener("input", () => { readForm(); drawAll(); save(); });
+  for (const id of ["#prompt", "#negative", "#duration", "#steps", "#cfg", "#seed", "#seed-lock", "#mode", "#iso", "#iso-until",
+                    "#bpm", "#key", "#decoder", "#avg-until"]) {
+    $(id).addEventListener("input", () => { readForm(); barsInfo(); drawAll(); save(); });
   }
   $("#gen").onclick = generate;
   $("#seed-dice").onclick = () => { state.seed = randomSeed(); writeForm(); save(); };
+  $("#fit-bars").onclick = () => {
+    const bar = barSec(); if (!bar) return;
+    state.duration = +(Math.max(1, Math.round(state.duration / bar)) * bar).toFixed(3);
+    writeForm(); drawAll(); save();
+  };
   $("#base-dice").onclick = async () => {
     try { state.prompt = await dicePrompt(""); writeForm(); save(); } catch (e) { showError(e.message); }
   };

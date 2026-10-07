@@ -709,6 +709,11 @@ struct GenParams {
     // stitch the phases together. Memory tokens stay unbiased. 0 = off (the plain graph).
     float lane_isolation = 0.0f;
     float lane_isolation_until = 0.9f;
+    // Shared structure (lanes only, experimental): while the step's sigma is above this, every lane
+    // plays at its curve's average over the clip, so the arrangement forms from one consistent mix;
+    // the drawn curves apply after. The opposite trade to isolation (continuity over separation),
+    // so the isolation bias is off during these steps. 0 = off.
+    float lane_average_until = 0.0f;
 
     // Sampling-schedule distribution shift — warps the linear t schedule. Mirrors the official
     // SA3 gradio selector {LogSNR, Flux, Full, None}; the 4 params' meaning is per-type (see
@@ -1682,7 +1687,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     };
     // lanes: per lane an envelope input and, when the lane has its own prompt, a cross-attn input
     struct LaneIn {
-        std::vector<float> eb;
+        std::vector<float> eb, eb_avg;   // per-frame amount; the same, flat at its mean
         ggml_tensor* e = nullptr;
         ggml_tensor* cross = nullptr;
         const std::vector<float>* crossb = nullptr;
@@ -1690,14 +1695,16 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     std::vector<LaneIn> lane_in;
     ggml_tensor* iso_mask = nullptr;                 // [S, S] F16 lane isolation bias (see GenParams)
     std::vector<ggml_fp16_t> iso_on, iso_off;
-    float iso_sigma = 0.0f;                          // the current step's sigma, for the isolation mask
+    float iso_sigma = 0.0f;                          // the current step's sigma (isolation, shared structure)
     auto set_lanes = [&](bool uncond) {
+        const bool averaged = params.lane_average_until > 0.0f && iso_sigma > params.lane_average_until;
         if (iso_mask) {
-            const auto& m = iso_sigma > params.lane_isolation_until ? iso_on : iso_off;
+            const auto& m = !averaged && iso_sigma > params.lane_isolation_until ? iso_on : iso_off;
             ggml_backend_tensor_set(iso_mask, m.data(), 0, m.size() * sizeof(ggml_fp16_t));
         }
         for (auto& li : lane_in) {
-            ggml_backend_tensor_set(li.e, li.eb.data(), 0, li.eb.size()*sizeof(float));
+            const auto& eb = averaged ? li.eb_avg : li.eb;
+            ggml_backend_tensor_set(li.e, eb.data(), 0, eb.size()*sizeof(float));
             if (!li.cross) continue;
             const std::vector<float>& cb = uncond ? uncond_crossb : *li.crossb;
             ggml_backend_tensor_set(li.cross, cb.data(), 0, cb.size()*sizeof(float));
@@ -1707,7 +1714,13 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     if (use_lanes) {
         auto map_of = [&](size_t i) { return dit_passes_[i].fl.active ? &dit_passes_[i].fl.map : nullptr; };
         lane_in.resize(lanes.size());
-        for (size_t k = 0; k < lanes.size(); k++) lane_in[k].eb = sample_envelope(lanes[k].envelope, lane_peak[k]);
+        for (size_t k = 0; k < lanes.size(); k++) {
+            LaneIn& li = lane_in[k];
+            li.eb = sample_envelope(lanes[k].envelope, lane_peak[k]);
+            double mean = 0.0;
+            for (float v : li.eb) mean += v;
+            li.eb_avg.assign(li.eb.size(), (float)(mean / std::max<size_t>(1, li.eb.size())));
+        }
         if (params.lane_isolation > 0.0f) {
             iso_mask = ggml_new_tensor_2d(dctx, GGML_TYPE_F16, S, S);
             ggml_set_input(iso_mask);
