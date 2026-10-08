@@ -104,7 +104,7 @@ STAGE="$BUILD_PATH/package/macos"
 rm -rf "$BUILD_PATH/package"
 mkdir -p "$STAGE"
 TOOLS=(sa3-server sat-server sat-generate sa3-train-web sa3-generate sa3-textmusic
-       sa3-codec sa3-textenc sa3-dit sa3-tokenize sa3-train sa3-lora-convert
+       sa3-codec sa3-textenc sa3-dit sa3-tokenize sa3-train sa3-lora-convert sa3-audio-analyze
        sa3-quantize sa3-quant-check sa3-quant-eval)
 BINARIES=()
 for tool in "${TOOLS[@]}"; do
@@ -149,7 +149,7 @@ done
 cp LICENSE models.sh "$STAGE/"
 cp src/libsa3_v1.h src/libsa3_training_v1.h "$STAGE/"
 cp docs/RUNTIME_RELEASE.md "$STAGE/RUNTIME_README.md"
-cp docs/SAT_SERVER.md docs/THIRD_PARTY_NOTICES.md "$STAGE/"
+cp docs/SAT_SERVER.md docs/AUDIO_ANALYSIS.md docs/THIRD_PARTY_NOTICES.md "$STAGE/"
 cp ggml/LICENSE "$STAGE/LICENSE-ggml.txt"
 cp vendor/cpp-httplib/LICENSE "$STAGE/LICENSE-cpp-httplib.txt"
 cp vendor/yyjson/LICENSE "$STAGE/LICENSE-yyjson.txt"

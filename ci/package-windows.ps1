@@ -171,6 +171,7 @@ $coreDir = Stage "core" @(
     "sat-generate.exe",
     "sat-server.exe",
     "sa3-lora-convert.exe",
+    "sa3-audio-analyze.exe",
     "sa3-smoke.exe",
     "sa3.dll",
     "ggml.dll",
@@ -182,6 +183,11 @@ Copy-Item (Join-Path $root "studio.cmd") $coreDir
 Copy-Item (Join-Path $root "studio.ps1") $coreDir
 Copy-Item (Join-Path $root "docs\RUNTIME_RELEASE.md") (Join-Path $coreDir "RUNTIME_README.md")
 Copy-Item (Join-Path $root "docs\SAT_SERVER.md") (Join-Path $coreDir "SAT_SERVER.md")
+Copy-Item (Join-Path $root "docs\AUDIO_ANALYSIS.md") (Join-Path $coreDir "AUDIO_ANALYSIS.md")
+$analysisInfo = & (Join-Path $coreDir "sa3-audio-analyze.exe") --control-info | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $analysisInfo.schema_version -ne 1 -or -not $analysisInfo.cpu_only -or -not $analysisInfo.wav_input) {
+    Fail "core audio analysis capability check failed"
+}
 Copy-Item (Join-Path $root "docs\THIRD_PARTY_NOTICES.md") (Join-Path $coreDir "THIRD_PARTY_NOTICES.md")
 Copy-Item (Join-Path $root "ggml\LICENSE") (Join-Path $coreDir "LICENSE-ggml.txt")
 Copy-Item (Join-Path $root "vendor\cpp-httplib\LICENSE") (Join-Path $coreDir "LICENSE-cpp-httplib.txt")

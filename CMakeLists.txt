@@ -200,6 +200,10 @@ endif()
 
 # --- tools -----------------------------------------------------------------
 if(SA3_BUILD_TOOLS)
+# Dataset metadata analysis is a CPU-only tool, independent of models and ggml.
+add_executable(sa3-audio-analyze tools/sa3-audio-analyze.cpp vendor/yyjson/yyjson.c)
+target_include_directories(sa3-audio-analyze PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/vendor ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
 add_executable(sa3-smoke tools/sa3-smoke.cpp)
 target_link_libraries(sa3-smoke PRIVATE sa3)
 
@@ -382,6 +386,10 @@ endif()
 
 if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME sa3-audio-analysis-cli-test COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio_analysis_cli_test.py" "$<TARGET_FILE:sa3-audio-analyze>")
+        set_tests_properties(sa3-audio-analysis-cli-test PROPERTIES LABELS "non-gpu;audio")
+    endif()
     add_test(NAME sa3-train-config-test COMMAND sa3-train-config-test)
     add_test(NAME sa3-train-cli-control-test COMMAND sa3-train-cli-control-test)
     add_test(NAME sa3-train-dataset-test COMMAND sa3-train-dataset-test)

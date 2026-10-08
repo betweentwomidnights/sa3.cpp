@@ -132,3 +132,13 @@ ad-hoc signatures; tagged release runs fail if signing credentials are missing.
 Local signing uses `SA3_SIGN_IDENTITY`, `SA3_NOTARY_KEY` (path to .p8),
 `SA3_NOTARY_KEY_ID`, and `SA3_NOTARY_ISSUER`; pass `--require-signing` for release
 packages. Publish v0.1.1 only after the dry runs and Mac inference checks pass.
+
+
+### CPU audio analysis
+
+The Windows core and macOS tool list include `sa3-audio-analyze`, a standalone
+CPU metadata helper. It has no model/backend dependencies; `--control-info`
+reports schema 1. See `AUDIO_ANALYSIS.md`. It reads WAVs directly. Hosts decoding
+compressed inputs still need a decoder such as FFmpeg; FFmpeg is not bundled in
+these core packages. The Windows packaging script checks the staged helper's
+capabilities before creating the archive.
