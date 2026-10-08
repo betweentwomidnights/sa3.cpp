@@ -324,11 +324,32 @@ is mangled by PowerShell's native-argument handling.)
 
 ## residency / lifecycle
 
-default **frugal** (`keep_models:false`): the model is freed after each generation and reloaded on the
-next request — keeps host-process memory low (good for an embedded/VST context) and makes per-request lora
-strength correct for free. for a long-running service that wants lowest latency, send `keep_models:true`
-and call `POST /unload` from your orchestrator when you need the VRAM back (model-switch, idle, pressure) —
-the same pattern as the pytorch sa3 service.
+`POST /load` initializes and validates the selected pipeline without creating a generation job.
+It returns `{success:true,status:"loaded",loaded:true,load_seconds,sample_rate}`; an initialized
+pipeline returns `status:"already_loaded"` and `load_seconds:0`. Missing or invalid models return
+503 with `{success:false,loaded:false,error}`. `POST /reload` discards the initialized pipeline and
+initializes it again. `POST /unload` frees the pipeline/backend and returns
+`{success:true,status:"unloaded",loaded:false}`.
+
+`GET /ready` returns 200 with `ready:true` after successful initialization, and 503 with
+`ready:false,loading,error` before load, during a lifecycle change, after a failed load or after unload.
+`GET /health` stays responsive during model work and exposes `loaded`, `loading`, `error`,
+`last_load_seconds`, `lifecycle_busy` and `active_generations` (including queued jobs).
+`capabilities.model_lifecycle:true` identifies this contract.
+
+Reload, unload and model selection require an idle pipeline. They return 409 immediately if any
+generation is queued/running or another lifecycle change is in progress. New generation submissions
+also return 409 during an explicit lifecycle change. Repeated `/load` remains idempotent when an
+already initialized pipeline is generating. Failed loads remain visible in health/readiness until
+a successful retry or unload.
+
+`loaded`/`ready` mean the pipeline is initialized, not that every weight tensor stays resident.
+Initialization reads and validates models one at a time, then frees their weights. The default
+**frugal** generation policy (`keep_models:false`) also loads/frees networks by phase, freeing the
+heavy weights after generation while keeping the initialized pipeline available. This keeps memory
+low on smaller GPUs. For repeated requests with retained weights, send `keep_models:true`, then
+call `/unload` when the orchestrator needs the VRAM back. A successful frugal generation therefore
+leaves `ready:true`; full unload sets it false.
 
 ## the init-audio pool (`--audio-in-dir`)
 

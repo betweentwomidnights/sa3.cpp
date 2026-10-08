@@ -46,13 +46,30 @@ def main():
                 if process.poll() is not None:
                     raise AssertionError("server exited before startup")
                 try:
-                    status, _ = request(port, "/health")
+                    status, health = request(port, "/health")
                     assert status == 200
                     break
                 except (OSError, TimeoutError):
                     time.sleep(0.1)
             else:
                 raise AssertionError("server did not start")
+
+            assert health["capabilities"]["model_lifecycle"] is True
+            assert health["loaded"] is False and health["loading"] is False and health["error"] is None
+            status, ready = request(port, "/ready")
+            assert status == 503 and ready["ready"] is False and ready["error"] is None
+            for path in ("/load", "/reload"):
+                status, failure = request(port, path, {})
+                assert status == 503 and failure["success"] is False and failure["error"], (path, status, failure)
+                status, health = request(port, "/health")
+                assert status == 200 and health["error"] == failure["error"] and health["loading"] is False
+                assert health["active_generations"] == 0 and health["lifecycle_busy"] is False
+                status, ready = request(port, "/ready")
+                assert status == 503 and ready["error"] == failure["error"]
+                status, unloaded = request(port, "/unload", {})
+                assert status == 200 and unloaded["success"] is True and unloaded["loaded"] is False
+                _, health = request(port, "/health")
+                assert health["error"] is None
 
             for path in ("/generate", "/generate/loop"):
                 for payload, message in [
@@ -88,6 +105,8 @@ def main():
                     time.sleep(0.05)
                 else:
                     raise AssertionError("missing-model job did not fail promptly")
+            _, health = request(port, "/health")
+            assert health["loaded"] is False and health["error"]
         finally:
             process.terminate()
             try:

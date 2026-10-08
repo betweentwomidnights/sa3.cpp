@@ -8,8 +8,10 @@
 //   GET  /poll_status/<session_id>
 //                 -> {success, generation_in_progress, progress, step, total_steps, status,
 //                     queue_status, audio_data (base64 wav, on "completed"), meta:{seed}}
-//   POST /unload   -> free the model (full VRAM release; orchestrator owns the unload policy)
-//   GET  /health   -> {status, model, encoding, loaded}
+//   POST /load, /reload -> initialize/reinitialize the selected pipeline without generating
+//   POST /unload   -> idle-only full backend release; orchestrator owns the unload policy
+//   GET  /ready    -> initialization readiness (not persistent weight residency)
+//   GET  /health   -> quick lifecycle state/error/capabilities while model work runs
 // The Pipeline carries the reusable primitives (incl. GenParams::on_progress); a synchronous or SSE
 // transport is left to real apps — this server only demonstrates the poll_status pattern.
 #include "sa3_pipeline.h"
@@ -56,8 +58,45 @@ namespace {
 
 std::mutex g_mtx;                         // serialize: one generation (one GPU graph) at a time
 std::mutex g_selection_mtx;               // short reads for /health without waiting on inference
-std::unique_ptr<sa3::Pipeline> g_pipe;    // loaded lazily on first generate; freed on /unload
+std::unique_ptr<sa3::Pipeline> g_pipe;    // initialized on /load or first generate; freed on /unload
 std::atomic<bool> g_loaded{false};        // lock-free view for /health (won't block during a gen)
+struct LifecycleState {
+    bool loading = false;
+    bool changing = false;
+    size_t active_generations = 0;        // includes queued jobs, not only the graph holding g_mtx
+    std::string error;
+    double last_load_seconds = 0.0;
+};
+std::mutex g_lifecycle_mtx;              // short admission/state reads; never held across model work
+LifecycleState g_lifecycle;
+
+// An idle lifecycle operation reserves admission before taking g_mtx. No new
+// job can slip between the idle check and a model switch/unload/reload.
+struct LifecycleOperation {
+    bool entered = false;
+    LifecycleOperation() {
+        std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+        if (!g_lifecycle.changing && g_lifecycle.active_generations == 0) {
+            g_lifecycle.changing = true;
+            entered = true;
+        }
+    }
+    ~LifecycleOperation() {
+        if (entered) {
+            std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+            g_lifecycle.changing = false;
+        }
+    }
+    LifecycleOperation(const LifecycleOperation&) = delete;
+    LifecycleOperation& operator=(const LifecycleOperation&) = delete;
+};
+
+struct GenerationReservation {
+    ~GenerationReservation() {
+        std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+        --g_lifecycle.active_generations;
+    }
+};
 std::string g_variant   = "medium";
 std::string g_encoding  = "f16";
 // Text-encoder precision, resolved apart from g_encoding -- the combination worth having on a
@@ -825,15 +864,68 @@ void jobs_prune() {
 // (re)load the pipeline under the caller's g_mtx. Returns false + message on failure.
 bool ensure_loaded(std::string& err) {
     if (g_pipe && g_pipe->loaded()) { g_loaded = true; return true; }
-    sa3::ModelPaths mp;
-    if (!sa3::ModelPaths::resolve(g_models_dir, g_variant, g_encoding, g_t5_encoding, g_ae_encoding, mp, err))
-        return false;
+    const double started = sa3::wall_time_s();
+    {
+        std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+        g_lifecycle.loading = true;
+        g_lifecycle.error.clear();
+        g_loaded = false;
+    }
+    bool success = false;
     try {
-        g_pipe = std::make_unique<sa3::Pipeline>();
-        g_pipe->load(mp, g_cpu_threads);
-    } catch (const std::exception& e) { g_pipe.reset(); g_loaded = false; err = e.what(); return false; }
-    g_loaded = true;
-    return true;
+        sa3::ModelPaths mp;
+        if (sa3::ModelPaths::resolve(g_models_dir, g_variant, g_encoding, g_t5_encoding, g_ae_encoding, mp, err)) {
+            g_pipe = std::make_unique<sa3::Pipeline>();
+            g_pipe->load(mp, g_cpu_threads);
+            success = true;
+        }
+    } catch (const std::exception& e) { err = e.what(); }
+    if (!success) g_pipe.reset();
+    {
+        std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+        g_loaded = success;
+        g_lifecycle.loading = false;
+        g_lifecycle.error = success ? "" : err;
+        g_lifecycle.last_load_seconds = sa3::wall_time_s() - started;
+    }
+    return success;
+}
+
+// Called with g_mtx and lifecycle admission reserved, so health remains quick
+// while the destructor frees backends and weights.
+void unload_pipeline() {
+    { std::lock_guard<std::mutex> lk(g_lifecycle_mtx); g_loaded = false; }
+    g_pipe.reset();
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+    g_lifecycle.error.clear();
+}
+
+void lifecycle_busy(httplib::Response& res) {
+    res.status = 409;
+    res.set_content("{\"success\":false,\"error\":\"generation or model lifecycle operation in progress - retry when idle\"}", "application/json");
+}
+
+void handle_load(httplib::Response& res, bool reload) {
+    if (!reload) {
+        std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+        if (g_loaded && !g_lifecycle.loading && !g_lifecycle.changing) {
+            res.set_content("{\"success\":true,\"status\":\"already_loaded\",\"loaded\":true,\"load_seconds\":0,\"sample_rate\":44100}", "application/json");
+            return;
+        }
+    }
+    LifecycleOperation operation;
+    if (!operation.entered) { lifecycle_busy(res); return; }
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (reload) unload_pipeline();
+    std::string error;
+    if (!ensure_loaded(error)) {
+        res.status = 503;
+        res.set_content("{\"success\":false,\"loaded\":false,\"error\":\"" + json_escape(error) + "\"}", "application/json");
+        return;
+    }
+    double seconds;
+    { std::lock_guard<std::mutex> state_lk(g_lifecycle_mtx); seconds = g_lifecycle.last_load_seconds; }
+    res.set_content("{\"success\":true,\"status\":\"loaded\",\"loaded\":true,\"load_seconds\":" + json_num(seconds) + ",\"sample_rate\":44100}", "application/json");
 }
 
 int env_int(const char* name, int fallback) {
@@ -1066,7 +1158,15 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     return true;
 }
 
-std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved) {
+std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved, std::string& error) {
+    {
+        std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+        if (g_lifecycle.changing) {
+            error = "model lifecycle operation in progress - retry when idle";
+            return "";
+        }
+        ++g_lifecycle.active_generations;
+    }
     const std::string sid = new_session_id();
     {
         std::lock_guard<std::mutex> lk(jobs_mtx);
@@ -1086,7 +1186,9 @@ std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved) {
             params.encode_chunk_size, params.encode_overlap, params.decode_chunk_size, params.decode_overlap,
             peak_norm_log.c_str(), limiter_log.c_str());
     fflush(stderr);
-    std::thread([sid, seed_resolved, params = std::move(params)]() mutable {
+    auto run_generation = [sid, seed_resolved, params = std::move(params)]() mutable {
+        // Declared before g_mtx's lock: admission releases after the graph lock.
+        GenerationReservation reservation;
         params.on_progress = [sid](const sa3::Progress& p) {
             fprintf(stderr, "[sa3-server] job %s %s %d/%d %.0f%%\n",
                     sid.c_str(), p.stage, p.step, p.total, p.fraction * 100.0f);
@@ -1110,7 +1212,9 @@ std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved) {
             fprintf(stderr, "[sa3-server] job %s failed to load model: %s\n", sid.c_str(), err.c_str());
             fflush(stderr);
             std::lock_guard<std::mutex> jl(jobs_mtx);
-            if (auto it = jobs.find(sid); it != jobs.end()) { it->second.status = "failed"; it->second.error = err; }
+            if (auto it = jobs.find(sid); it != jobs.end()) {
+                it->second.status = "failed"; it->second.error = err; it->second.finished = sa3::wall_time_s();
+            }
             return;
         }
         fprintf(stderr, "[sa3-server] job %s model ready\n", sid.c_str());
@@ -1148,7 +1252,15 @@ std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved) {
                 it->second.status = "failed"; it->second.error = e.what(); it->second.finished = sa3::wall_time_s();
             }
         }
-    }).detach();
+    };
+    try {
+        std::thread(std::move(run_generation)).detach();
+    } catch (const std::exception& e) {
+        { std::lock_guard<std::mutex> lk(g_lifecycle_mtx); --g_lifecycle.active_generations; }
+        { std::lock_guard<std::mutex> lk(jobs_mtx); jobs.erase(sid); }
+        error = std::string("cannot start generation: ") + e.what();
+        return "";
+    }
     return sid;
 }
 
@@ -1316,7 +1428,7 @@ int main(int argc, char** argv) {
         // path prefix, so a *directory* of that name shadows it just as a file would -- and it
         // is the endpoint clients poll for generation progress, so losing it is not obvious
         // from the symptom. fs::exists covers both file and directory.
-        for (const char* reserved : {"health", "loras", "prompts", "poll_status", "init-audio", "models"}) {
+        for (const char* reserved : {"health", "ready", "loras", "prompts", "poll_status", "init-audio", "models"}) {
             if (fs::exists(fs::path(g_web_dir) / reserved, ec))
                 fprintf(stderr, "[sa3-server] warning: %s/%s shadows the GET /%s endpoint\n",
                         g_web_dir.c_str(), reserved, reserved);
@@ -1331,7 +1443,13 @@ int main(int argc, char** argv) {
     }
 
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        const bool loaded = g_loaded.load();   // atomic: never blocks behind an in-flight generation
+        bool loaded;
+        LifecycleState state;
+        {
+            std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+            loaded = g_loaded.load();
+            state = g_lifecycle;
+        }
         std::lock_guard<std::mutex> selection_lk(g_selection_mtx);
         std::string body = "{\"status\":\"ok\",\"model\":\"" + g_variant + "\",\"encoding\":\"" +
                            g_encoding + "\",\"t5_encoding\":\"" +
@@ -1339,10 +1457,34 @@ int main(int argc, char** argv) {
                            "\",\"ae_encoding\":\"" +
                            (g_ae_encoding.empty() ? "auto" : g_ae_encoding) +
                            "\",\"loaded\":" + (loaded ? "true" : "false") +
-                           ",\"capabilities\":{\"fixed_prefix\":true,\"request_splice\":true,\"conditioning_duration\":true}" +
+                           ",\"loading\":" + (state.loading ? "true" : "false") +
+                           ",\"error\":" + (state.error.empty() ? "null" : "\"" + json_escape(state.error) + "\"") +
+                           ",\"last_load_seconds\":" + json_num(state.last_load_seconds) +
+                           ",\"lifecycle_busy\":" + (state.changing ? "true" : "false") +
+                           ",\"active_generations\":" + std::to_string(state.active_generations) +
+                           ",\"capabilities\":{\"fixed_prefix\":true,\"request_splice\":true,\"conditioning_duration\":true,\"model_lifecycle\":true}" +
                            ",\"loudness_defaults\":" + loudness_params_json(sa3::loudness_defaults_from_env()) + "}";
         res.set_content(body, "application/json");
     });
+
+    svr.Get("/ready", [](const httplib::Request&, httplib::Response& res) {
+        bool ready;
+        LifecycleState state;
+        {
+            std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+            state = g_lifecycle;
+            ready = g_loaded && !state.loading && !state.changing;
+        }
+        std::string model;
+        { std::lock_guard<std::mutex> lk(g_selection_mtx); model = g_variant; }
+        if (!ready) res.status = 503;
+        res.set_content("{\"ready\":" + std::string(ready ? "true" : "false") +
+                        ",\"model\":\"" + json_escape(model) + "\",\"loading\":" + (state.loading ? "true" : "false") +
+                        ",\"error\":" + (state.error.empty() ? "null" : "\"" + json_escape(state.error) + "\"") + "}", "application/json");
+    });
+
+    svr.Post("/load", [](const httplib::Request&, httplib::Response& res) { handle_load(res, false); });
+    svr.Post("/reload", [](const httplib::Request&, httplib::Response& res) { handle_load(res, true); });
 
     svr.Get("/props", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(sa3::runtime_props_json("sa3"), "application/json");
@@ -1398,21 +1540,14 @@ int main(int argc, char** argv) {
         if (!sa3::ModelPaths::resolve(g_models_dir, variant, encoding, t5_encoding, ae_encoding, paths, err)) {
             res.status = 409; res.set_content(json_err("model set is incomplete: " + err), "application/json"); return;
         }
+        LifecycleOperation operation;
+        if (!operation.entered) { lifecycle_busy(res); return; }
         std::lock_guard<std::mutex> inference_lk(g_mtx);
-        {
-            std::lock_guard<std::mutex> jobs_lk(jobs_mtx);
-            jobs_prune();
-            for (const auto& item : jobs) {
-                if (item.second.status == "queued" || item.second.status == "generating" || item.second.status == "encoding") {
-                    res.status = 409; res.set_content(json_err("wait for the current generation before switching models"), "application/json"); return;
-                }
-            }
-        }
         {
             std::lock_guard<std::mutex> selection_lk(g_selection_mtx);
             g_variant = variant; g_encoding = encoding;
-            g_pipe.reset(); g_loaded = false;
         }
+        unload_pipeline();
         res.set_content("{\"success\":true,\"variant\":\"" + variant + "\",\"encoding\":\"" + encoding + "\"}", "application/json");
     });
 
@@ -1707,10 +1842,11 @@ int main(int argc, char** argv) {
     });
 
     svr.Post("/unload", [](const httplib::Request&, httplib::Response& res) {
+        LifecycleOperation operation;
+        if (!operation.entered) { lifecycle_busy(res); return; }
         std::lock_guard<std::mutex> lk(g_mtx);
-        g_pipe.reset();   // Pipeline dtor frees nets + backend (full VRAM release)
-        g_loaded = false;
-        res.set_content("{\"status\":\"unloaded\"}", "application/json");
+        unload_pipeline();   // Pipeline dtor frees nets + backend (full VRAM release)
+        res.set_content("{\"success\":true,\"status\":\"unloaded\",\"loaded\":false}", "application/json");
     });
 
     // POST /generate: parse + validate on the request thread, then run the generation on a background
@@ -1729,7 +1865,8 @@ int main(int argc, char** argv) {
         }
         yyjson_doc_free(doc);
 
-        const std::string sid = queue_generation(std::move(params), seed_resolved);
+        const std::string sid = queue_generation(std::move(params), seed_resolved, perr);
+        if (sid.empty()) { res.status = 409; res.set_content(json_err(perr), "application/json"); return; }
         res.set_content("{\"success\":true,\"session_id\":\"" + sid + "\",\"seed\":" + std::to_string(seed_resolved) + "}", "application/json");
     });
 
@@ -1793,7 +1930,8 @@ int main(int argc, char** argv) {
         params.target_n_samp = target_samples;
         params.duration_padding_sec = 0.0f;
 
-        const std::string sid = queue_generation(std::move(params), seed_resolved);
+        const std::string sid = queue_generation(std::move(params), seed_resolved, perr);
+        if (sid.empty()) { res.status = 409; res.set_content(json_err(perr), "application/json"); return; }
         std::string body = "{\"success\":true,\"session_id\":\"" + sid + "\",\"seed\":" + std::to_string(seed_resolved);
         body += ",\"bpm\":" + json_num(bpm);
         body += ",\"bars\":" + std::to_string(bars);

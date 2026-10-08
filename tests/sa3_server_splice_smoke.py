@@ -54,6 +54,65 @@ def main():
                         time.sleep(0.1)
                 else:
                     raise AssertionError("server did not start")
+                status, ready = request(port, "/ready")
+                assert status == 503 and ready["ready"] is False
+                status, loaded = request(port, "/load", {})
+                assert status == 200 and loaded["status"] == "loaded" and loaded["load_seconds"] > 0
+                status, loaded = request(port, "/load", {})
+                assert status == 200 and loaded["status"] == "already_loaded" and loaded["load_seconds"] == 0
+                status, ready = request(port, "/ready")
+                assert status == 200 and ready["ready"] is True
+                status, reloaded = request(port, "/reload", {})
+                assert status == 200 and reloaded["success"] is True
+
+                # Two admitted jobs cover both running and queued generations.
+                # Lifecycle routes must answer promptly, not wait for g_mtx and
+                # then unload/switch between those jobs.
+                pending = []
+                for _ in range(2):
+                    status, submitted = request(port, "/generate", {
+                        "prompt": "a soft tone", "duration": 1, "steps": 32, "seed": 42,
+                        "duration_padding_sec": 0, "keep_models": False,
+                    })
+                    assert status == 200 and submitted["success"] is True
+                    pending.append(submitted["session_id"])
+                _, busy = request(port, "/health")
+                assert busy["active_generations"] == 2, busy
+                started = time.monotonic()
+                status, already_loaded = request(port, "/load", {})
+                assert status == 200 and already_loaded["status"] == "already_loaded"
+                assert time.monotonic() - started < 1
+                for path, payload in [("/unload", {}), ("/reload", {}),
+                                      ("/models/select", {"variant": "small-music", "encoding": "q4_k_m"})]:
+                    started = time.monotonic()
+                    status, response = request(port, path, payload)
+                    assert status == 409 and "in progress" in response["error"], (path, status, response)
+                    assert time.monotonic() - started < 1, "busy lifecycle request blocked behind inference"
+                for sid in pending:
+                    deadline = time.monotonic() + 180
+                    while time.monotonic() < deadline:
+                        _, poll = request(port, "/poll_status/" + sid + "?consume=1")
+                        assert poll["status"] != "failed", poll
+                        if poll["status"] == "completed":
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise AssertionError("queued lifecycle test job did not finish")
+                for _ in range(100):
+                    _, health = request(port, "/health")
+                    if health["active_generations"] == 0:
+                        break
+                    time.sleep(0.01)
+                assert health["loaded"] is True and health["active_generations"] == 0
+                # Ready means initialized/validated, not persistent weight
+                # residency: both completed jobs used the frugal policy.
+                status, ready = request(port, "/ready")
+                assert status == 200 and ready["ready"] is True
+                status, unloaded = request(port, "/unload", {})
+                assert status == 200 and unloaded["success"] is True
+                status, ready = request(port, "/ready")
+                assert status == 503 and ready["ready"] is False
+                print("PASS: native load/reload/readiness, frugal initialization and prompt idle-only lifecycle controls")
                 for fixed_prefix in (False, True):
                     status, submitted = request(port, "/generate", {
                         "prompt": "a soft tone", "duration": 1, "steps": 1, "seed": 42,
