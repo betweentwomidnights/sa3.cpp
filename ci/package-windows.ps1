@@ -128,7 +128,13 @@ $configure = @(
     "-DSA3_BUILD_SAT=ON",
     "-DBUILD_TESTING=ON"
 )
-if ($CudaArch) { $configure += "-DCMAKE_CUDA_ARCHITECTURES=$CudaArch" }
+if ($CudaArch) {
+    $configure += "-DCMAKE_CUDA_ARCHITECTURES=$CudaArch"
+} elseif (-not $CpuOnly) {
+    # A prior local smoke build may have cached "native". An ordinary package
+    # must restore ggml's portable defaults, even when reusing that build folder.
+    $configure += @("-U", "CMAKE_CUDA_ARCHITECTURES")
+}
 Invoke-Checked $cmake $configure
 Invoke-Checked $cmake @("--build", $buildPath, "--config", "Release", "--parallel", "$Jobs")
 
@@ -198,6 +204,8 @@ $buildInfo = [ordered]@{
     dirty       = [bool](git status --porcelain --untracked-files=no)
     ggml_commit = (git -C ggml rev-parse HEAD).Trim()
     platform    = "windows-x64"
+    build_flavor = $(if ($CpuOnly) { "cpu-smoke" } elseif ($CudaArch) { "gpu-smoke" } else { "portable" })
+    cuda_architecture_policy = $(if ($CpuOnly) { $null } elseif ($CudaArch) { $CudaArch } else { "ggml-default" })
     backends    = @()
     cuda        = $(if ($CpuOnly) { $null } else { $cudaVersion })
     vulkan_sdk  = $(if ($CpuOnly) { $null } else { Split-Path -Leaf $env:VULKAN_SDK })

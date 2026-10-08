@@ -67,6 +67,16 @@ def main():
 
     build = json.loads((directory / "BUILD-INFO.json").read_bytes())
     assert build["service"] == "sa3" and build["version"] == "v" + version, build
+    if build.get("platform") == "windows-x64" and "build_flavor" in build:
+        flavor = build["build_flavor"]
+        assert flavor in {"portable", "cpu-smoke", "gpu-smoke"}, build
+        if flavor == "cpu-smoke":
+            assert build["backends"] == [] and build["cuda_architecture_policy"] is None, build
+        else:
+            assert set(build["backends"]) == {"cuda", "vulkan"}, build
+            assert build["cuda_architecture_policy"], build
+            if flavor == "portable":
+                assert build["cuda_architecture_policy"] == "ggml-default", build
     print(f"PASS packaged SA3/SAT versions/devices and SA3 server/trainer/analyzer controls ({args.arch or 'native'})")
 
 

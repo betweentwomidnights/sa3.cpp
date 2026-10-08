@@ -3,6 +3,14 @@ project(sa3_cpp VERSION 0.1.1 LANGUAGES C CXX)
 
 include(CTest)
 
+if(WIN32)
+    # ggml's Vulkan shader helper is an ExternalProject. Its default nested
+    # directory can break MSBuild tracking in longer checkout/build paths.
+    # Keep all external build components near this build root; leave ggml clean.
+    include(ExternalProject)
+    set_property(DIRECTORY PROPERTY EP_BASE "${CMAKE_BINARY_DIR}/ep")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)

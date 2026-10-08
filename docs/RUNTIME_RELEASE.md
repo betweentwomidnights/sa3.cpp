@@ -163,3 +163,16 @@ on a downloaded package (add `--arch arm64` or `--arch x86_64` on macOS).
 
 These controls are compatibility-branch additions for a future release; the
 published v0.1.1 assets do not satisfy the complete migration contract.
+
+## Windows build provenance
+
+Windows `BUILD-INFO.json` distinguishes `portable`, `cpu-smoke` and `gpu-smoke`
+builds and records the CUDA architecture policy. Local `-CpuOnly` or
+`-CudaArch native` packages are smoke artifacts, even when their version matches
+a release tag. Omitting `-CudaArch` clears a cached architecture override before
+configuration, restoring ggml's portable defaults rather than silently reusing
+a previous native-only build. The release workflow uses that portable path.
+
+Windows external projects use a short directory under the build root. This
+keeps Vulkan's shader helper compiler probes and MSBuild tracking paths out of
+the deeply nested default layout without modifying the ggml submodule.
