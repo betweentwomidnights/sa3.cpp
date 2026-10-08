@@ -1272,6 +1272,10 @@ int main(int argc, char** argv) {
             puts(sa3::runtime_version());
             return 0;
         }
+        if (strcmp(argv[i], "--control-info") == 0) {
+            puts(sa3::sa3_server_control_info_json().c_str());
+            return 0;
+        }
         if (strcmp(argv[i], "--props") == 0) {
             puts(sa3::runtime_props_json("sa3").c_str());
             return 0;
@@ -1462,7 +1466,7 @@ int main(int argc, char** argv) {
                            ",\"last_load_seconds\":" + json_num(state.last_load_seconds) +
                            ",\"lifecycle_busy\":" + (state.changing ? "true" : "false") +
                            ",\"active_generations\":" + std::to_string(state.active_generations) +
-                           ",\"capabilities\":{\"fixed_prefix\":true,\"request_splice\":true,\"conditioning_duration\":true,\"model_lifecycle\":true}" +
+                           ",\"capabilities\":" + sa3::sa3_server_capabilities_json() +
                            ",\"loudness_defaults\":" + loudness_params_json(sa3::loudness_defaults_from_env()) + "}";
         res.set_content(body, "application/json");
     });

@@ -54,6 +54,10 @@ def main():
             else:
                 raise AssertionError("server did not start")
 
+            offline = json.loads(subprocess.check_output(
+                [executable, "--control-info"], cwd=directory, env=env,
+                text=True, timeout=10))
+            assert health["capabilities"] == offline["capabilities"]
             assert health["capabilities"]["model_lifecycle"] is True
             assert health["loaded"] is False and health["loading"] is False and health["error"] is None
             status, ready = request(port, "/ready")

@@ -142,3 +142,24 @@ reports schema 1. See `AUDIO_ANALYSIS.md`. It reads WAVs directly. Hosts decodin
 compressed inputs still need a decoder such as FFmpeg; FFmpeg is not bundled in
 these core packages. The Windows packaging script checks the staged helper's
 capabilities before creating the archive.
+
+## Offline host controls
+
+`sa3-server --control-info` returns schema 1, service/version, and the same
+capabilities advertised by `/health`: `fixed_prefix`, `request_splice`,
+`conditioning_duration`, and `model_lifecycle`. It exits before reading `.env`,
+initializing backends, loading models, or binding ports. Hosts should require
+these capabilities rather than relying on a version string alone. SAT has its
+own API and does not advertise the SA3 control contract.
+
+Both packaging scripts check the staged servers' versions/devices, SA3 server
+controls, cooperative trainer cancellation/atomic progress, and CPU audio
+analysis from an empty working directory. These checks also run with
+`-SkipTests` / `--skip-tests`. Python 3 is required on the build machine for
+package verification; the installed runtime remains native. macOS checks each
+runnable universal slice after library rewriting/signing. Use
+`python ci/check-runtime-package.py <unpacked-core> <tag>` to repeat the check
+on a downloaded package (add `--arch arm64` or `--arch x86_64` on macOS).
+
+These controls are compatibility-branch additions for a future release; the
+published v0.1.1 assets do not satisfy the complete migration contract.

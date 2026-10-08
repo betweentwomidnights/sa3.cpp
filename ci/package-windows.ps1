@@ -184,10 +184,6 @@ Copy-Item (Join-Path $root "studio.ps1") $coreDir
 Copy-Item (Join-Path $root "docs\RUNTIME_RELEASE.md") (Join-Path $coreDir "RUNTIME_README.md")
 Copy-Item (Join-Path $root "docs\SAT_SERVER.md") (Join-Path $coreDir "SAT_SERVER.md")
 Copy-Item (Join-Path $root "docs\AUDIO_ANALYSIS.md") (Join-Path $coreDir "AUDIO_ANALYSIS.md")
-$analysisInfo = & (Join-Path $coreDir "sa3-audio-analyze.exe") --control-info | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or $analysisInfo.schema_version -ne 1 -or -not $analysisInfo.cpu_only -or -not $analysisInfo.wav_input) {
-    Fail "core audio analysis capability check failed"
-}
 Copy-Item (Join-Path $root "docs\THIRD_PARTY_NOTICES.md") (Join-Path $coreDir "THIRD_PARTY_NOTICES.md")
 Copy-Item (Join-Path $root "ggml\LICENSE") (Join-Path $coreDir "LICENSE-ggml.txt")
 Copy-Item (Join-Path $root "vendor\cpp-httplib\LICENSE") (Join-Path $coreDir "LICENSE-cpp-httplib.txt")
@@ -212,6 +208,15 @@ if (-not $CpuOnly) { $buildInfo.backends = @("cuda", "vulkan") }
     (Join-Path $coreDir "BUILD-INFO.json"),
     ($buildInfo | ConvertTo-Json) + "`n",
     (New-Object System.Text.UTF8Encoding($false)))
+
+# Verify the staged tools, not the build tree. Require Python even with
+# -SkipTests so packaging cannot silently omit the host contract checks.
+$pythonEntry = Get-Content (Join-Path $buildPath "CMakeCache.txt") |
+    Where-Object { $_ -match '^_?Python3_EXECUTABLE:(INTERNAL|FILEPATH)=.+$' } |
+    Select-Object -First 1
+if (-not $pythonEntry) { Fail "Python 3 is required to verify the staged package" }
+$python = ($pythonEntry -split '=', 2)[1]
+Invoke-Checked $python @((Join-Path $root "ci/check-runtime-package.py"), $coreDir, $Version)
 
 # A GPU backend that landed in the core zip would load on every machine, and
 # one missing from its own zip would never load anywhere. Check both ways.

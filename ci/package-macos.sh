@@ -196,6 +196,7 @@ for a in arm64 x86_64; do
   done < <(otool -L "$SCRATCH/contract-$a" | awk '/^[[:space:]]/ {print $1}')
   codesign --force --sign - "$SCRATCH/contract-$a"
   (cd "$SCRATCH"; arch -"$a" ./contract-"$a"; arch -"$a" "$STAGE/sa3-server" --props > "props-$a.json")
+  python3 "$ROOT/ci/check-runtime-package.py" "$STAGE" "$VERSION" --arch "$a"
 done
 # --- zip, notarize, checksum --------------------------------------------------
 
