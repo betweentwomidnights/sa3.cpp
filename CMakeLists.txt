@@ -300,6 +300,9 @@ add_executable(sa3-train-config-test tests/train_config_test.cpp vendor/yyjson/y
 target_link_libraries(sa3-train-config-test PRIVATE sa3)
 target_include_directories(sa3-train-config-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
 
+add_executable(sa3-train-cli-control-test tests/train_cli_control_test.cpp vendor/yyjson/yyjson.c)
+target_include_directories(sa3-train-cli-control-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+
 add_executable(sa3-train-dataset-test tests/train_dataset_test.cpp vendor/yyjson/yyjson.c)
 target_link_libraries(sa3-train-dataset-test PRIVATE sa3)
 target_include_directories(sa3-train-dataset-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
@@ -380,6 +383,7 @@ endif()
 if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     add_test(NAME sa3-train-config-test COMMAND sa3-train-config-test)
+    add_test(NAME sa3-train-cli-control-test COMMAND sa3-train-cli-control-test)
     add_test(NAME sa3-train-dataset-test COMMAND sa3-train-dataset-test)
     add_test(NAME sa3-train-model-paths-test COMMAND sa3-train-model-paths-test)
     add_test(NAME sa3-train-audio-test COMMAND sa3-train-audio-test)
@@ -426,6 +430,10 @@ if(BUILD_TESTING)
                              sa3-sat-cli-vpred-steps-test PROPERTIES WILL_FAIL TRUE)
     endif()
     if(Python3_Interpreter_FOUND)
+        add_test(NAME sa3-train-cli-control-smoke
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/train_cli_control_smoke.py"
+                         "$<TARGET_FILE:sa3-train>")
+        set_tests_properties(sa3-train-cli-control-smoke PROPERTIES LABELS "non-gpu;training")
         add_test(NAME sa3-server-runtime-contract-test
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_contract_test.py"
                          "$<TARGET_FILE:sa3-server>" "${PROJECT_VERSION}" "sa3")
