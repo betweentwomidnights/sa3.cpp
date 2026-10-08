@@ -84,6 +84,7 @@ struct Job {
     std::string audio_b64;                // base64 wav, filled on completion
     std::string loudness_json;
     std::string splice_json;
+    int prefix_latent_tokens = 0, latent_sample_size = 0;
     std::string error;
     uint64_t seed = 0;
     double   created = 0.0;
@@ -992,6 +993,9 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     };
     request_bool("splice_source", params.splice.enabled);
     request_bool("splice_gain_match", params.splice.gain_match);
+    request_bool("fixed_prefix", params.fixed_prefix);
+    if (params.fixed_prefix && (init_path.empty() || !std::isfinite(params.inpaint_start) || params.inpaint_start < 0.0f))
+        perr = "fixed_prefix requires init_path and a non-negative inpaint_start";
 
     params.negative_prompt   = S("negative_prompt", "");
     params.cfg_scale         = (float)D("cfg_scale", 1.0);
@@ -1104,6 +1108,8 @@ std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved) {
             if (auto it = jobs.find(sid); it != jobs.end()) {
                 it->second.audio_b64 = std::move(b64);
                 it->second.loudness_json = loudness_meta_json(r.loudness);
+                it->second.prefix_latent_tokens = r.prefix_latent_tokens;
+                it->second.latent_sample_size = r.latent_sample_size;
                 it->second.splice_json = "{\"splice_applied\":" + std::string(r.splice.applied ? "true" : "false")
                     + ",\"splice_end_seconds\":" + json_num(r.splice.splice_end_seconds)
                     + ",\"splice_xfade_applied\":" + json_num(r.splice.xfade_applied)
@@ -1788,6 +1794,7 @@ int main(int argc, char** argv) {
 
         std::string status;
         int progress = 0, step = 0, total_steps = 0;
+        int prefix_latent_tokens = 0, latent_sample_size = 0;
         uint64_t seed = 0;
         std::string audio_b64;
         std::string loudness_json;
@@ -1812,6 +1819,8 @@ int main(int argc, char** argv) {
             error = j.error;
             loudness_json = j.loudness_json;
             splice_json = j.splice_json;
+            prefix_latent_tokens = j.prefix_latent_tokens;
+            latent_sample_size = j.latent_sample_size;
 
             if (j.status == "completed") {
                 if (consume) {
@@ -1841,7 +1850,9 @@ int main(int argc, char** argv) {
         if (status == "completed")
             body += ",\"audio_data\":\"" + audio_b64 + "\",\"meta\":{\"seed\":" + std::to_string(seed) +
                     ",\"loudness\":" + (loudness_json.empty() ? "{}" : loudness_json) +
-                    ",\"splice\":" + (splice_json.empty() ? "{}" : splice_json) + "}";
+                    ",\"splice\":" + (splice_json.empty() ? "{}" : splice_json) +
+                    ",\"prefix_latent_tokens\":" + std::to_string(prefix_latent_tokens) +
+                    ",\"latent_sample_size\":" + std::to_string(latent_sample_size) + "}";
         if (status == "failed")
             body += ",\"error\":\"" + json_escape(error) + "\"";
         body += "}";

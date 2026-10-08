@@ -63,6 +63,8 @@ def main():
                     ({"splice_xfade": "inf"}, "finite number"),
                     ({"splice_source": "false"}, "must be a boolean"),
                     ({"splice_gain_match": 1}, "must be a boolean"),
+                    ({"fixed_prefix": "true"}, "must be a boolean"),
+                    ({"fixed_prefix": True}, "requires init_path"),
                 ]:
                     status, body = request(port, path, payload)
                     assert status == 400 and message in body["error"], (path, status, body)

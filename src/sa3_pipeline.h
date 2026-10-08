@@ -666,6 +666,10 @@ struct GenParams {
     float init_noise_level = 0.85f;    // sigma_max for a2a (1.0 == text2music)
     float inpaint_start = -1.0f;       // inpaint region in seconds; needs init_audio + a local-cond DiT
     float inpaint_end   = -1.0f;       // also the TOTAL output duration (a short clip can extend)
+    // In addition to local inpaint conditioning, pin the source prefix on a
+    // fixed clean/noise trajectory throughout ping-pong sampling. This is
+    // latent-prefix continuation, not output source splicing.
+    bool fixed_prefix = false;
 
     // Adapters applied (in order) for THIS request, then reset. Paths are full gguf paths
     // (the CLI/server resolve names -> paths before building GenParams).
@@ -738,6 +742,8 @@ struct GenResult {
     int sample_rate = 44100;
     LoudnessMeta loudness;
     SpliceMeta splice;
+    int prefix_latent_tokens = 0;
+    int latent_sample_size = 0;
 };
 
 // Holds the loaded models for the life of the process. Move-only (owns the backend + buffers).
@@ -911,6 +917,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     const bool do_cfg = (cfg_scale != 1.0f);
     const bool inpaint = (inpaint_start >= 0.0f || inpaint_end >= 0.0f);
     const bool has_init = !params.init_audio.empty();
+    if (params.fixed_prefix && (!has_init || !inpaint || !std::isfinite(inpaint_start) || inpaint_start < 0.0f))
+        throw std::invalid_argument("fixed_prefix requires init audio and a non-negative inpaint_start");
     auto release_all_for_frugal_cancel = [&]() {
         if (!keep_models) {
             TE.free();
@@ -1200,6 +1208,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         inpaint_f0 = std::max(0, std::min(T, ceil_div(sa, ds)));
         inpaint_f1 = std::max(inpaint_f0, std::min(T, ceil_div(ea, ds)));
     }
+    // Match the host reference's round(samples / downsampling_ratio), with
+    // at least one token for a positive source, independently of ceil-based
+    // local-conditioning bounds. Encode enough for either kind of mask.
+    const int prefix_tokens = params.fixed_prefix
+        ? (int)std::min((double)T, std::max(1.0, std::nearbyint(std::nearbyint((double)mask_start * 44100.0) / ds)))
+        : 0;
 
     std::vector<float> z_init;
     if (has_init) {
@@ -1267,7 +1281,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         // of the canvas lets the encode stop early; rows past enc_T stay zero and are masked out.
         const bool chunk_path = encode_chunk_size > 0 && !sc.chunk;
         const int enc_T = inpaint
-            ? init_encode_frames(T, inpaint_f0, inpaint_f1, chunk_path ? encode_chunk_size : 0,
+            ? init_encode_frames(T, std::max(inpaint_f0, prefix_tokens), inpaint_f1, chunk_path ? encode_chunk_size : 0,
                                  encode_overlap, sc.chunk ? 2 : 1)
             : T;
         if (enc_T < T)
@@ -1342,6 +1356,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     sa3::Rng rng(seed);
     std::vector<float> host_x(N); rng.fill_normal(host_x.data(), N);
     std::vector<float> stepnoise((size_t)steps*N); rng.fill_normal(stepnoise.data(), stepnoise.size());
+    std::vector<float> prefix_noise((size_t)prefix_tokens * dc.io);
+    if (params.fixed_prefix) {
+        rng.fill_normal(prefix_noise.data(), prefix_noise.size());
+        sa3::sampling::rf_impose_prefix(host_x.data(), z_init.data(), prefix_noise.data(),
+                                        prefix_noise.size(), sigmas.front());
+    }
     if (has_init && !inpaint)
         for (int j = 0; j < N; j++) host_x[j] = z_init[j]*(1.0f - sigma_max) + host_x[j]*sigma_max;
 
@@ -1503,6 +1523,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         sa3::sampling::rf_pingpong_step(host_x.data(), v_use,
                                         stepnoise.data() + (size_t)i*N, (size_t)N,
                                         tcur, tnext);
+        if (params.fixed_prefix)
+            sa3::sampling::rf_impose_prefix(host_x.data(), z_init.data(), prefix_noise.data(),
+                                            prefix_noise.size(), tnext);
         dit_download_update += wall_time_s() - ts;
         if (params.on_progress)   // sampling spans 0..0.9 of the overall bar; callback overrides the printf
             params.on_progress({"sampling", i+1, steps, 0.9f * (float)(i+1) / (float)steps});
@@ -1698,6 +1721,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     r.sample_rate = 44100;
     r.loudness = loudness_meta;
     r.splice = splice_meta;
+    r.prefix_latent_tokens = prefix_tokens;
+    r.latent_sample_size = T;
     return r;
 }
 

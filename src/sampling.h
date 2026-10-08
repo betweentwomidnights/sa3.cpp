@@ -60,6 +60,19 @@ inline void rf_pingpong_step(float* x,
     }
 }
 
+// Pin a contiguous time-major latent prefix to one fixed noise trajectory.
+// At t=1 it is noise; at t=0 it is exactly the encoded source. Generated tokens
+// outside this prefix are untouched. Call before the first model evaluation
+// and after every ping-pong update, including the final update.
+inline void rf_impose_prefix(float* x, const float* clean, const float* fixed_noise,
+                             size_t prefix_n, float t) {
+    if (!x || !clean || !fixed_noise) throw std::invalid_argument("null prefix buffer");
+    if (!std::isfinite(t) || t < 0.0f || t > 1.0f)
+        throw std::invalid_argument("prefix timestep must be finite and in [0, 1]");
+    for (size_t i = 0; i < prefix_n; ++i)
+        x[i] = clean[i] * (1.0f - t) + fixed_noise[i] * t;
+}
+
 // First-order ODE integration used by stable-audio-tools' rectified-flow Euler
 // sampler. `dt` is negative because inference traverses t=1 -> 0.
 inline void rf_euler_step(float* x,

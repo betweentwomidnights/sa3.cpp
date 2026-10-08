@@ -208,6 +208,22 @@ For an optional real-model transport check (not audio-quality validation), run
 48 kHz synthetic source and one-step small-music CPU generation to verify native
 resampling, exact output length, applied splice measurements and consume polling.
 
+## Latent-prefix continuation
+
+`/generate` accepts the boolean `fixed_prefix` alongside `init_path` and a
+non-negative `inpaint_start`. It retains ordinary local inpainting conditioning
+and additionally pins the source-prefix latent tokens to a fixed noise trajectory
+at the first timestep and after every ping-pong update. At the final timestep
+those tokens equal the clean encoded source. The source-splice overlap also
+sets the prefix boundary; output source splicing remains a separate operation.
+
+Completed polling metadata includes `prefix_latent_tokens` (zero when disabled)
+and `latent_sample_size`, including consume polling. The no-model HTTP suite
+checks invalid requests, the sampling schedule test verifies intermediate and
+final prefix values and an untouched generated suffix, and the real-model
+splice smoke exercises both modes. This capability is on the compatibility
+branch and is not in the published v0.1.1 release.
+
 ## lora and prompt discovery
 
 `GET /loras` scans the adapters directory and returns GGUF adapter names and targets
