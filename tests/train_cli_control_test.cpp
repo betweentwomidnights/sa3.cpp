@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <fstream>
 #include <limits>
+#include <thread>
+#include <chrono>
 
 static void expect(bool ok, const char* message) {
     if (!ok) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
@@ -51,6 +53,37 @@ int main() {
     expect(std::string(yyjson_get_str(yyjson_obj_get(value,"message"))) == control.message, "JSON escaping preserves message");
     expect(yyjson_is_null(yyjson_obj_get(value,"loss")), "nonfinite metrics are explicitly unavailable");
     yyjson_doc_free(doc); file.close();
+#ifdef _WIN32
+    // Windows readers (including scanners) can briefly deny rename/delete.
+    // Such a reader must not abort an otherwise healthy training run.
+    HANDLE reader = CreateFileW((root / "progress.json").c_str(), GENERIC_READ,
+                               FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    expect(reader != INVALID_HANDLE_VALUE, "open a reader without delete sharing");
+    std::thread release_reader([reader]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        CloseHandle(reader);
+    });
+    control.step = 3;
+    std::string publish_error;
+    try { control.publish(); } catch (const std::exception& e) { publish_error = e.what(); }
+    release_reader.join();
+    if (!publish_error.empty()) std::fprintf(stderr, "%s\n", publish_error.c_str());
+    expect(publish_error.empty(), "transient Windows reader lock must not fail training progress");
+    expect(SetFileAttributesW((root / "progress.json").c_str(), FILE_ATTRIBUTE_READONLY) != 0,
+           "make destination permanently non-replaceable");
+    control.step = 4;
+    publish_error.clear();
+    try { control.publish(); } catch (const std::exception& e) { publish_error = e.what(); }
+    expect(SetFileAttributesW((root / "progress.json").c_str(), FILE_ATTRIBUTE_NORMAL) != 0,
+           "restore destination permissions");
+    expect(!publish_error.empty(), "permanent permission failure remains an error after bounded retries");
+    std::ifstream preserved(root / "progress.json");
+    const std::string preserved_data((std::istreambuf_iterator<char>(preserved)), {});
+    yyjson_doc* preserved_doc = yyjson_read(preserved_data.data(), preserved_data.size(), 0);
+    expect(preserved_doc && yyjson_get_int(yyjson_obj_get(yyjson_doc_get_root(preserved_doc), "step")) == 3,
+           "failed publication preserves the previous complete progress");
+    yyjson_doc_free(preserved_doc); preserved.close();
+#endif
     std::ofstream(root / "cancel.requested") << "stop";
     expect(control.should_cancel(), "cancel file observed without removing it");
     for (const auto& item : fs::directory_iterator(root))

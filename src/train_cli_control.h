@@ -133,8 +133,19 @@ struct TrainCliControl {
             file.close();
             if (!file) throw std::runtime_error("cannot flush training progress staging file");
 #ifdef _WIN32
-            if (!MoveFileExW(stage.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-                throw std::runtime_error("cannot publish training progress: Windows error " + std::to_string(GetLastError()));
+            // Readers and antivirus scanners can briefly deny delete sharing.
+            // Preserve the previous complete JSON while retrying the atomic
+            // replacement; a single transient lock must not abort training.
+            constexpr int attempts = 101;
+            for (int attempt = 0; ; ++attempt) {
+                if (MoveFileExW(stage.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                    break;
+                const DWORD error = GetLastError();
+                const bool transient = error == ERROR_ACCESS_DENIED || error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION;
+                if (!transient || attempt + 1 >= attempts)
+                    throw std::runtime_error("cannot publish training progress to " + progress_file + ": Windows error " + std::to_string(error));
+                Sleep(20);
+            }
 #else
             fs::rename(stage, path);
 #endif
