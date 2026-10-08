@@ -85,6 +85,8 @@ struct Job {
     std::string loudness_json;
     std::string splice_json;
     int prefix_latent_tokens = 0, latent_sample_size = 0;
+    float conditioning_seconds_total = 0.0f;
+    int conditioning_latent_frames = 0;
     std::string error;
     uint64_t seed = 0;
     double   created = 0.0;
@@ -909,7 +911,14 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     }
     params.frames = frames_for_target_samples(duration_target_samples);
     params.steps            = I("steps", 8);
-    seed_resolved           = sa3::pick_seed(I("seed", -1));  // omitted/negative => random
+    yyjson_val* seed_value = yyjson_obj_get(root, "seed");
+    if (seed_value && !yyjson_is_null(seed_value) && !yyjson_is_int(seed_value)) {
+        perr = "seed must be an integer";
+        return false;
+    }
+    seed_resolved = seed_value && yyjson_is_uint(seed_value)
+        ? yyjson_get_uint(seed_value)
+        : sa3::pick_seed(seed_value && yyjson_is_sint(seed_value) ? yyjson_get_sint(seed_value) : -1);
     params.seed             = seed_resolved;
     params.keep_models      = B("keep_models", false);        // FRUGAL default
     params.init_noise_level = (float)D("init_noise_level", 0.85);
@@ -981,6 +990,11 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
     // These controls already live in the pipeline. Expose them per request so
     // a host can translate its client API without changing process-wide env.
     request_float("mask_overlap", params.splice.mask_overlap);
+    request_float("conditioning_seconds_total", params.conditioning_seconds_total);
+    request_float("inpaint_padding_sec", params.inpaint_padding_sec);
+    if (params.conditioning_seconds_total < 0.0f || params.conditioning_seconds_total > max_duration ||
+        params.inpaint_padding_sec < 0.0f || params.inpaint_padding_sec > 60.0f)
+        perr = "conditioning_seconds_total must be within the duration limit; inpaint_padding_sec must be in [0, 60]";
     request_float("splice_xfade", params.splice.xfade);
     auto request_bool = [&](const char* key, bool& dst) {
         yyjson_val* v = yyjson_obj_get(root, key);
@@ -1110,6 +1124,8 @@ std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved) {
                 it->second.loudness_json = loudness_meta_json(r.loudness);
                 it->second.prefix_latent_tokens = r.prefix_latent_tokens;
                 it->second.latent_sample_size = r.latent_sample_size;
+                it->second.conditioning_seconds_total = r.conditioning_seconds_total;
+                it->second.conditioning_latent_frames = r.conditioning_latent_frames;
                 it->second.splice_json = "{\"splice_applied\":" + std::string(r.splice.applied ? "true" : "false")
                     + ",\"splice_end_seconds\":" + json_num(r.splice.splice_end_seconds)
                     + ",\"splice_xfade_applied\":" + json_num(r.splice.xfade_applied)
@@ -1323,6 +1339,7 @@ int main(int argc, char** argv) {
                            "\",\"ae_encoding\":\"" +
                            (g_ae_encoding.empty() ? "auto" : g_ae_encoding) +
                            "\",\"loaded\":" + (loaded ? "true" : "false") +
+                           ",\"capabilities\":{\"fixed_prefix\":true,\"request_splice\":true,\"conditioning_duration\":true}" +
                            ",\"loudness_defaults\":" + loudness_params_json(sa3::loudness_defaults_from_env()) + "}";
         res.set_content(body, "application/json");
     });
@@ -1795,6 +1812,8 @@ int main(int argc, char** argv) {
         std::string status;
         int progress = 0, step = 0, total_steps = 0;
         int prefix_latent_tokens = 0, latent_sample_size = 0;
+        float conditioning_seconds_total = 0.0f;
+        int conditioning_latent_frames = 0;
         uint64_t seed = 0;
         std::string audio_b64;
         std::string loudness_json;
@@ -1821,6 +1840,8 @@ int main(int argc, char** argv) {
             splice_json = j.splice_json;
             prefix_latent_tokens = j.prefix_latent_tokens;
             latent_sample_size = j.latent_sample_size;
+            conditioning_seconds_total = j.conditioning_seconds_total;
+            conditioning_latent_frames = j.conditioning_latent_frames;
 
             if (j.status == "completed") {
                 if (consume) {
@@ -1852,7 +1873,9 @@ int main(int argc, char** argv) {
                     ",\"loudness\":" + (loudness_json.empty() ? "{}" : loudness_json) +
                     ",\"splice\":" + (splice_json.empty() ? "{}" : splice_json) +
                     ",\"prefix_latent_tokens\":" + std::to_string(prefix_latent_tokens) +
-                    ",\"latent_sample_size\":" + std::to_string(latent_sample_size) + "}";
+                    ",\"latent_sample_size\":" + std::to_string(latent_sample_size) +
+                    ",\"conditioning_seconds_total\":" + json_num(conditioning_seconds_total) +
+                    ",\"conditioning_latent_frames\":" + std::to_string(conditioning_latent_frames) + "}";
         if (status == "failed")
             body += ",\"error\":\"" + json_escape(error) + "\"";
         body += "}";

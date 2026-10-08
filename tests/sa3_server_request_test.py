@@ -65,15 +65,21 @@ def main():
                     ({"splice_gain_match": 1}, "must be a boolean"),
                     ({"fixed_prefix": "true"}, "must be a boolean"),
                     ({"fixed_prefix": True}, "requires init_path"),
+                    ({"conditioning_seconds_total": -1}, "duration limit"),
+                    ({"inpaint_padding_sec": 61}, "[0, 60]"),
+                    ({"inpaint_padding_sec": "nan"}, "finite number"),
+                    ({"seed": 1.5}, "integer"),
                 ]:
                     status, body = request(port, path, payload)
                     assert status == 400 and message in body["error"], (path, status, body)
 
-            for overrides in ({}, {"splice_source": False, "splice_gain_match": False,
+            for overrides in ({"seed": 4294967295}, {"splice_source": False, "splice_gain_match": False,
                                     "mask_overlap": 0, "splice_xfade": 0.05}):
                 status, body = request(port, "/generate", {"prompt": "test", "duration": 1,
                                                             "steps": 1, **overrides})
                 assert status == 200 and body["success"], (status, body)
+                if "seed" in overrides:
+                    assert body["seed"] == overrides["seed"], body
                 for _ in range(100):
                     status, poll = request(port, "/poll_status/" + body["session_id"])
                     if poll["status"] == "failed":

@@ -208,6 +208,27 @@ For an optional real-model transport check (not audio-quality validation), run
 48 kHz synthetic source and one-step small-music CPU generation to verify native
 resampling, exact output length, applied splice measurements and consume polling.
 
+## Conditioning length, hidden canvas and seeds
+
+`conditioning_seconds_total` optionally sets the seconds conditioner and
+distribution-shift schedule length independently of `target_samples`, the
+final returned crop. Zero (the default) preserves historical length resolution.
+`inpaint_padding_sec` optionally adds up to 60 seconds of hidden canvas beyond
+the inpaint region; its default is zero. This does not extend `inpaint_end`.
+The completed job reports the actual `conditioning_seconds_total` and
+`conditioning_latent_frames` alongside its full `latent_sample_size`.
+
+Mono init WAVs are duplicated to the model's stereo channels inside the pipeline,
+and resampling remains native. HTTP seeds are parsed without narrowing them to
+a signed 32-bit integer; non-negative integer seeds are retained for recall,
+and negative/omitted seeds still request a random seed. The native RNG remains
+32-bit internally, as documented in `rng.h`.
+
+`/health.capabilities` advertises `conditioning_duration`, `request_splice` and
+`fixed_prefix`. Hosts should check these before using the controls: older
+servers ignore unknown request fields. These additions are on the compatibility
+branch, pending a release; they are absent from v0.1.1.
+
 ## Latent-prefix continuation
 
 `/generate` accepts the boolean `fixed_prefix` alongside `init_path` and a
