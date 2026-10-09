@@ -13,6 +13,7 @@
 #pragma once
 
 #include "dit.h"          // DitLora / DitLoraParam, for the functional (unmerged) path below
+#include "lora_legacy.h"
 #include "ggml.h"
 #include "gguf_model.h"
 
@@ -70,6 +71,26 @@ inline LoraAdapter load_lora(const char* path, float strength = 1.0f, ggml_backe
     a.gguf = load_gguf(path, backend);   // load onto the base's backend so the GPU apply graph can read it
     int ti = gguf_find_key(a.gguf.gguf, "lora.adapter_type");
     a.type     = ti < 0 ? "lora" : gguf_get_val_str(a.gguf.gguf, ti);
+    if (a.type == "dora") {
+        // Also accept already-converted migration copies. Requiring users to
+        // reimport would strand adapters whose original file is unavailable.
+        std::vector<LegacyDoraShape> shapes;
+        for (const auto& kv : a.gguf.tensors) {
+            const std::string suffix = ".magnitude";
+            if (kv.first.size() < suffix.size() ||
+                kv.first.compare(kv.first.size()-suffix.size(), suffix.size(), suffix) != 0) continue;
+            const auto stem = kv.first.substr(0, kv.first.size()-suffix.size());
+            if (!a.gguf.has(stem + ".lora_A") || !a.gguf.has(stem + ".lora_B")) continue;
+            auto* A = a.gguf.get(stem + ".lora_A");
+            auto* B = a.gguf.get(stem + ".lora_B");
+            auto* m = kv.second;
+            shapes.push_back({A->ne[0], B->ne[1], ggml_nelements(m),
+                              m->ne[0] == 1 && m->ne[1] > 1 ? 1 : -1});
+        }
+        // Square-only flattened magnitudes retain the legacy Gary/Python rows
+        // default. Gary's previous trainer always used row-normalized DoRA.
+        a.type = resolve_legacy_dora(shapes);
+    }
     int gi = gguf_find_key(a.gguf.gguf, "lora.target");
     a.target   = gi < 0 ? "dit" : gguf_get_val_str(a.gguf.gguf, gi);
     if (a.target != "dit" && a.target != "decoder" && a.target != "encoder")
