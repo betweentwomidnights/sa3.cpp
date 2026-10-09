@@ -194,7 +194,19 @@ inline bool lora_base_needs_host(const GgufModel& base, const std::vector<std::s
 // must already be loaded on base.backend (load_lora(..., base.backend)).
 inline LoraStack apply_loras_graph(GgufModel& base, std::vector<LoraAdapter>& adapters,
                                    const std::vector<std::string>& targets) {
-    const size_t nn = targets.size()*20 + 64;
+    // The merge graph grows with each active adapter on each weight. A fixed
+    // 20 nodes per target only covered two DoRAs; three overflowed on real
+    // models, even though small fixtures fit inside the extra 64 nodes.
+    // Budget the cast/copy plus each chain member, with room for ggml views
+    // and tensor metadata. Unmatched and zero-strength adapters add no ops.
+    size_t nn = targets.size()*4 + 64;
+    for (const auto& wname : targets) {
+        const std::string stem = wname.substr(0, wname.size()-7);
+        for (const auto& a : adapters) {
+            if (!a.gguf.has(stem + ".lora_A") || a.strength == 0.0f) continue;
+            nn += a.type == "dora-rows" ? 12 : 8;
+        }
+    }
     ggml_init_params ip = { nn*ggml_tensor_overhead() + ggml_graph_overhead_custom(nn, false) + (1<<20), nullptr, true };
     ggml_context* ctx = ggml_init(ip);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx, nn, false);
