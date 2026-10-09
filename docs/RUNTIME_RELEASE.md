@@ -50,9 +50,9 @@ controls.
 On Windows with Visual Studio 2022, CUDA Toolkit 12.8, and Vulkan SDK:
 
 ```powershell
-.\ci\package-windows.ps1 -Version v0.1.1
+.\ci\package-windows.ps1 -Version v0.1.2
 # Add a separate cudart zip for testing gary4local's shared-runtime install:
-.\ci\package-windows.ps1 -Version v0.1.1 -CudaRuntime
+.\ci\package-windows.ps1 -Version v0.1.2 -CudaRuntime
 ```
 
 For a quick local check of the core package without GPU toolchains, use
@@ -76,7 +76,7 @@ local tracked files differed from the commit.
    gary4local's `GARY4LOCAL_NATIVE_PACKAGE_DIR` override: that folder then
    contains the split service packages and a shared-runtime test zip. Exercise
    both CUDA and Vulkan and inspect `--props` from the unpacked core.
-3. **Publish:** tag and publish the verified commit as `v0.1.1`. The release
+3. **Publish:** tag and publish the verified commit as `v0.1.2`. The release
    event runs the same package script on that tag, attests each zip, and
    attaches the four zips and `SHA256SUMS`. A dispatch with an existing tag
    can replace missing assets after a runner failure, before a consumer pins it.
@@ -100,7 +100,7 @@ Windows checksum asset.
 Build on Apple Silicon with Xcode command line tools, CMake and Rosetta:
 
 ```sh
-./ci/package-macos.sh --version v0.1.1 --jobs 3
+./ci/package-macos.sh --version v0.1.2 --jobs 3
 ```
 
 The script builds each architecture separately, runs CTest (Intel under Rosetta
@@ -131,4 +131,49 @@ Dispatch `release.yml` with `platforms=macos` for a macOS-only dry run, or
 ad-hoc signatures; tagged release runs fail if signing credentials are missing.
 Local signing uses `SA3_SIGN_IDENTITY`, `SA3_NOTARY_KEY` (path to .p8),
 `SA3_NOTARY_KEY_ID`, and `SA3_NOTARY_ISSUER`; pass `--require-signing` for release
-packages. Publish v0.1.1 only after the dry runs and Mac inference checks pass.
+packages. Publish v0.1.2 only after the dry runs and Mac inference checks pass.
+
+
+### CPU audio analysis
+
+The Windows core and macOS tool list include `sa3-audio-analyze`, a standalone
+CPU metadata helper. It has no model/backend dependencies; `--control-info`
+reports schema 1. See `AUDIO_ANALYSIS.md`. It reads WAVs directly. Hosts decoding
+compressed inputs still need a decoder such as FFmpeg; FFmpeg is not bundled in
+these core packages. The Windows packaging script checks the staged helper's
+capabilities before creating the archive.
+
+## Offline host controls
+
+`sa3-server --control-info` returns schema 1, service/version, and the same
+capabilities advertised by `/health`: `fixed_prefix`, `request_splice`,
+`conditioning_duration`, and `model_lifecycle`. It exits before reading `.env`,
+initializing backends, loading models, or binding ports. Hosts should require
+these capabilities rather than relying on a version string alone. SAT has its
+own API and does not advertise the SA3 control contract.
+
+Both packaging scripts check the staged servers' versions/devices, SA3 server
+controls, cooperative trainer cancellation/atomic progress, and CPU audio
+analysis from an empty working directory. These checks also run with
+`-SkipTests` / `--skip-tests`. Python 3 is required on the build machine for
+package verification; the installed runtime remains native. macOS checks each
+runnable universal slice after library rewriting/signing. Use
+`python ci/check-runtime-package.py <unpacked-core> <tag>` to repeat the check
+on a downloaded package (add `--arch arm64` or `--arch x86_64` on macOS).
+
+These controls are included in v0.1.2; the published v0.1.1 assets do not
+satisfy the complete migration contract. Hosts must check capabilities before
+enabling migration.
+
+## Windows build provenance
+
+Windows `BUILD-INFO.json` distinguishes `portable`, `cpu-smoke` and `gpu-smoke`
+builds and records the CUDA architecture policy. Local `-CpuOnly` or
+`-CudaArch native` packages are smoke artifacts, even when their version matches
+a release tag. Omitting `-CudaArch` clears a cached architecture override before
+configuration, restoring ggml's portable defaults rather than silently reusing
+a previous native-only build. The release workflow uses that portable path.
+
+Windows external projects use a short directory under the build root. This
+keeps Vulkan's shader helper compiler probes and MSBuild tracking paths out of
+the deeply nested default layout without modifying the ggml submodule.

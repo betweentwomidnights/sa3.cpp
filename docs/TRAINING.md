@@ -14,6 +14,28 @@ and monitoring runs is documented in [TRAINING_WEB.md](TRAINING_WEB.md) (`sa3-tr
 
 ## Quickstart
 
+Hosts that launch the CLI can probe `sa3-train --control-info` before starting
+a job. The JSON response advertises schema 1, atomic progress files and
+cooperative cancellation. These controls do not require models or a GPU.
+
+```sh
+sa3-train --dataset /path/to/dataset --steps 2000 \
+          --progress-file /path/to/run/progress.json \
+          --cancel-file /path/to/run/cancel.requested
+```
+
+The CLI replaces the progress JSON atomically after log messages and optimizer
+updates. It includes status/phase/message, step/epoch/target, metrics and the
+final adapter plus last immutable checkpoint pair. Terminal status is
+`completed`, `cancelled` or `failed`; a successful process exit alone does not
+mean the requested steps completed. Non-finite metrics are represented by null.
+Creating the cancellation file requests a stop at the next sample boundary,
+including during pre-encode. Cancellation after updates saves the resumable
+adapter/state pair and final adapter; cancellation before the first update
+produces no adapter. The CLI leaves the marker in place. Use a new marker path
+or remove the old marker before launching a resumed run. Set
+`--latents-cache-dir` when a host needs cached latents outside the dataset.
+
 Everything below has a working default. In practice these are the four knobs worth touching:
 
 ```sh

@@ -12,6 +12,7 @@
 
 #include "ggml.h"
 #include "gguf.h"
+#include "lora_legacy.h"
 #include "yyjson.h"
 
 #include <cstdint>
@@ -277,6 +278,35 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
         err = "no " + std::string(target == "dit" ? "DiT" : target) +
               " LoRA tensors found in " + safetensors_path;
         return false;
+    }
+
+    if (adapter_type == "dora") {
+        std::unordered_map<std::string, const Emit*> by_name;
+        for (const auto& e : emits) by_name[e.name] = &e;
+        std::vector<LegacyDoraShape> shapes;
+        for (const auto& e : emits) {
+            const std::string suffix = ".magnitude";
+            if (e.name.size() < suffix.size() ||
+                e.name.compare(e.name.size()-suffix.size(), suffix.size(), suffix) != 0) continue;
+            const auto stem = e.name.substr(0, e.name.size()-suffix.size());
+            const auto ai = by_name.find(stem + ".lora_A"), bi = by_name.find(stem + ".lora_B");
+            if (ai == by_name.end() || bi == by_name.end() ||
+                ai->second->shape.size() != 2 || bi->second->shape.size() != 2) {
+                err = "legacy dora magnitude requires paired 2D lora_A/lora_B: " + e.name;
+                return false;
+            }
+            int axis = -1;
+            if (e.shape.size() == 2) {
+                if (e.shape[0] == 1 && e.shape[1] > 1) axis = 0;
+                else if (e.shape[1] == 1 && e.shape[0] > 1) axis = 1;
+                else if (e.n != 1) { err = "legacy dora magnitude must be a vector: " + e.name; return false; }
+            } else if (e.shape.size() != 1) {
+                err = "legacy dora magnitude must be 1D or 2D: " + e.name; return false;
+            }
+            shapes.push_back({ai->second->shape[1], bi->second->shape[0], (int64_t)e.n, axis});
+        }
+        try { adapter_type = resolve_legacy_dora(shapes); }
+        catch (const std::exception& e) { err = e.what(); return false; }
     }
 
     // --- build the gguf: KV + tensors (ggml ne = reversed safetensors shape) ---

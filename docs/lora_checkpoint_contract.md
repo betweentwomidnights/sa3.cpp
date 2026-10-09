@@ -89,3 +89,28 @@ Mapped DiT stems include top-level weights such as `dit.pre_conv`, `dit.post_con
 ## Loader filename contract
 
 `sa3-generate --lora <path>` accepts an existing file directly. `--lora <name>` resolves in the adapters directory as `lora-<name>-*.gguf`. Training outputs intended for bare-name loading should therefore be named like `lora-<run-name>-stepNNNN.gguf` or `lora-<run-name>-final.gguf`. Any `.gguf` path remains valid for explicit path loading.
+
+
+## Legacy PyTorch checkpoint export
+
+`tools/lora_ckpt_export.py` is the one-time bridge from a LoRA/DoRA `.ckpt`
+containing `state_dict` and `lora_config` to the native converter. Run it using an
+existing PyTorch + safetensors environment:
+
+```powershell
+python tools/lora_ckpt_export.py --ckpt loras/adapter.ckpt --out loras/exported-adapter
+python tests/lora_ckpt_export_test.py
+```
+
+The exporter loads on CPU with `weights_only=True`; incompatible arbitrary
+pickle objects are rejected without an unrestricted fallback. The config must
+be a nonempty JSON-compatible dictionary. Floating tensors are exported as F32,
+integer tensors retain their type, and shared storage is copied so every named
+tensor is retained. Safetensors embeds the config; a matching JSON sidecar is
+also written. Existing destination files are never overwritten, failed exports
+remove only their own outputs, and the original checkpoint remains unchanged.
+The native converter consumes either the embedded config or the sidecar.
+
+Hosts retiring a Python runtime should export all retained CKPT history first,
+record input/output hashes, and preserve those exported copies for later native
+conversion. Native inference and training do not require this Python helper.

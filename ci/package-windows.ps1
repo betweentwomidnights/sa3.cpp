@@ -128,7 +128,13 @@ $configure = @(
     "-DSA3_BUILD_SAT=ON",
     "-DBUILD_TESTING=ON"
 )
-if ($CudaArch) { $configure += "-DCMAKE_CUDA_ARCHITECTURES=$CudaArch" }
+if ($CudaArch) {
+    $configure += "-DCMAKE_CUDA_ARCHITECTURES=$CudaArch"
+} elseif (-not $CpuOnly) {
+    # A prior local smoke build may have cached "native". An ordinary package
+    # must restore ggml's portable defaults, even when reusing that build folder.
+    $configure += @("-U", "CMAKE_CUDA_ARCHITECTURES")
+}
 Invoke-Checked $cmake $configure
 Invoke-Checked $cmake @("--build", $buildPath, "--config", "Release", "--parallel", "$Jobs")
 
@@ -171,6 +177,7 @@ $coreDir = Stage "core" @(
     "sat-generate.exe",
     "sat-server.exe",
     "sa3-lora-convert.exe",
+    "sa3-audio-analyze.exe",
     "sa3-smoke.exe",
     "sa3.dll",
     "ggml.dll",
@@ -182,6 +189,7 @@ Copy-Item (Join-Path $root "studio.cmd") $coreDir
 Copy-Item (Join-Path $root "studio.ps1") $coreDir
 Copy-Item (Join-Path $root "docs\RUNTIME_RELEASE.md") (Join-Path $coreDir "RUNTIME_README.md")
 Copy-Item (Join-Path $root "docs\SAT_SERVER.md") (Join-Path $coreDir "SAT_SERVER.md")
+Copy-Item (Join-Path $root "docs\AUDIO_ANALYSIS.md") (Join-Path $coreDir "AUDIO_ANALYSIS.md")
 Copy-Item (Join-Path $root "docs\THIRD_PARTY_NOTICES.md") (Join-Path $coreDir "THIRD_PARTY_NOTICES.md")
 Copy-Item (Join-Path $root "ggml\LICENSE") (Join-Path $coreDir "LICENSE-ggml.txt")
 Copy-Item (Join-Path $root "vendor\cpp-httplib\LICENSE") (Join-Path $coreDir "LICENSE-cpp-httplib.txt")
@@ -196,6 +204,8 @@ $buildInfo = [ordered]@{
     dirty       = [bool](git status --porcelain --untracked-files=no)
     ggml_commit = (git -C ggml rev-parse HEAD).Trim()
     platform    = "windows-x64"
+    build_flavor = $(if ($CpuOnly) { "cpu-smoke" } elseif ($CudaArch) { "gpu-smoke" } else { "portable" })
+    cuda_architecture_policy = $(if ($CpuOnly) { $null } elseif ($CudaArch) { $CudaArch } else { "ggml-default" })
     backends    = @()
     cuda        = $(if ($CpuOnly) { $null } else { $cudaVersion })
     vulkan_sdk  = $(if ($CpuOnly) { $null } else { Split-Path -Leaf $env:VULKAN_SDK })
@@ -206,6 +216,15 @@ if (-not $CpuOnly) { $buildInfo.backends = @("cuda", "vulkan") }
     (Join-Path $coreDir "BUILD-INFO.json"),
     ($buildInfo | ConvertTo-Json) + "`n",
     (New-Object System.Text.UTF8Encoding($false)))
+
+# Verify the staged tools, not the build tree. Require Python even with
+# -SkipTests so packaging cannot silently omit the host contract checks.
+$pythonEntry = Get-Content (Join-Path $buildPath "CMakeCache.txt") |
+    Where-Object { $_ -match '^_?Python3_EXECUTABLE:(INTERNAL|FILEPATH)=.+$' } |
+    Select-Object -First 1
+if (-not $pythonEntry) { Fail "Python 3 is required to verify the staged package" }
+$python = ($pythonEntry -split '=', 2)[1]
+Invoke-Checked $python @((Join-Path $root "ci/check-runtime-package.py"), $coreDir, $Version)
 
 # A GPU backend that landed in the core zip would load on every machine, and
 # one missing from its own zip would never load anywhere. Check both ways.

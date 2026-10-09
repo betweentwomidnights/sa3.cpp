@@ -13,6 +13,7 @@
 #pragma once
 
 #include "dit.h"          // DitLora / DitLoraParam, for the functional (unmerged) path below
+#include "lora_legacy.h"
 #include "ggml.h"
 #include "gguf_model.h"
 
@@ -70,6 +71,26 @@ inline LoraAdapter load_lora(const char* path, float strength = 1.0f, ggml_backe
     a.gguf = load_gguf(path, backend);   // load onto the base's backend so the GPU apply graph can read it
     int ti = gguf_find_key(a.gguf.gguf, "lora.adapter_type");
     a.type     = ti < 0 ? "lora" : gguf_get_val_str(a.gguf.gguf, ti);
+    if (a.type == "dora") {
+        // Also accept already-converted migration copies. Requiring users to
+        // reimport would strand adapters whose original file is unavailable.
+        std::vector<LegacyDoraShape> shapes;
+        for (const auto& kv : a.gguf.tensors) {
+            const std::string suffix = ".magnitude";
+            if (kv.first.size() < suffix.size() ||
+                kv.first.compare(kv.first.size()-suffix.size(), suffix.size(), suffix) != 0) continue;
+            const auto stem = kv.first.substr(0, kv.first.size()-suffix.size());
+            if (!a.gguf.has(stem + ".lora_A") || !a.gguf.has(stem + ".lora_B")) continue;
+            auto* A = a.gguf.get(stem + ".lora_A");
+            auto* B = a.gguf.get(stem + ".lora_B");
+            auto* m = kv.second;
+            shapes.push_back({A->ne[0], B->ne[1], ggml_nelements(m),
+                              m->ne[0] == 1 && m->ne[1] > 1 ? 1 : -1});
+        }
+        // Square-only flattened magnitudes retain the legacy Gary/Python rows
+        // default. Gary's previous trainer always used row-normalized DoRA.
+        a.type = resolve_legacy_dora(shapes);
+    }
     int gi = gguf_find_key(a.gguf.gguf, "lora.target");
     a.target   = gi < 0 ? "dit" : gguf_get_val_str(a.gguf.gguf, gi);
     if (a.target != "dit" && a.target != "decoder" && a.target != "encoder")
@@ -194,7 +215,19 @@ inline bool lora_base_needs_host(const GgufModel& base, const std::vector<std::s
 // must already be loaded on base.backend (load_lora(..., base.backend)).
 inline LoraStack apply_loras_graph(GgufModel& base, std::vector<LoraAdapter>& adapters,
                                    const std::vector<std::string>& targets) {
-    const size_t nn = targets.size()*20 + 64;
+    // The merge graph grows with each active adapter on each weight. A fixed
+    // 20 nodes per target only covered two DoRAs; three overflowed on real
+    // models, even though small fixtures fit inside the extra 64 nodes.
+    // Budget the cast/copy plus each chain member, with room for ggml views
+    // and tensor metadata. Unmatched and zero-strength adapters add no ops.
+    size_t nn = targets.size()*4 + 64;
+    for (const auto& wname : targets) {
+        const std::string stem = wname.substr(0, wname.size()-7);
+        for (const auto& a : adapters) {
+            if (!a.gguf.has(stem + ".lora_A") || a.strength == 0.0f) continue;
+            nn += a.type == "dora-rows" ? 12 : 8;
+        }
+    }
     ggml_init_params ip = { nn*ggml_tensor_overhead() + ggml_graph_overhead_custom(nn, false) + (1<<20), nullptr, true };
     ggml_context* ctx = ggml_init(ip);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx, nn, false);

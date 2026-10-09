@@ -181,6 +181,70 @@ these defaults can be changed in `.env` with `SA3_PEAK_NORMALIZE_DB`, `SA3_LIMIT
 or `"peak_normalize_db": null` to disable peak normalization; do the same for `limiter_ceiling_db` to
 disable the limiter. See [`LOUDNESS.md`](LOUDNESS.md) for the short rationale and latent-control notes.
 
+## Per-request continuation splice controls
+
+The unified `/generate` endpoint accepts `splice_source` and `splice_gain_match`
+as JSON booleans, plus non-negative finite `mask_overlap` and `splice_xfade`
+seconds. Omitted fields use the existing `SA3_CONTINUE_*` environment defaults.
+Invalid values return HTTP 400 before a job is queued. These settings configure
+the pipeline's existing inpainting/source-splice implementation; they do not
+introduce separate transform or continuation routes.
+
+For continuation with source splicing enabled, pass `init_path` to the source
+WAV and `inpaint_start` equal to its duration. The pipeline applies mask overlap
+itself, so callers must not also subtract overlap from that boundary. Set
+`inpaint_end` to the generated canvas endpoint and `target_samples` to the
+desired final output length, excluding any tail padding.
+
+Completed `/poll_status/<session_id>` responses include `meta.splice`:
+`splice_applied`, `splice_end_seconds`, `splice_xfade_applied`, `splice_gain`,
+`mask_start_seconds`, and `mask_overlap`. These are measurements from the
+pipeline, including any clamping, rather than estimates reconstructed by a
+client. They are returned with both normal polling and `?consume=1`.
+
+The no-model `sa3-server-request-test` checks request validation through HTTP.
+For an optional real-model transport check (not audio-quality validation), run
+`python tests/sa3_server_splice_smoke.py SERVER_EXE MODELS_DIR`. It uses a short
+48 kHz synthetic source and one-step small-music CPU generation to verify native
+resampling, exact output length, applied splice measurements and consume polling.
+
+## Conditioning length, hidden canvas and seeds
+
+`conditioning_seconds_total` optionally sets the seconds conditioner and
+distribution-shift schedule length independently of `target_samples`, the
+final returned crop. Zero (the default) preserves historical length resolution.
+`inpaint_padding_sec` optionally adds up to 60 seconds of hidden canvas beyond
+the inpaint region; its default is zero. This does not extend `inpaint_end`.
+The completed job reports the actual `conditioning_seconds_total` and
+`conditioning_latent_frames` alongside its full `latent_sample_size`.
+
+Mono init WAVs are duplicated to the model's stereo channels inside the pipeline,
+and resampling remains native. HTTP seeds are parsed without narrowing them to
+a signed 32-bit integer; non-negative integer seeds are retained for recall,
+and negative/omitted seeds still request a random seed. The native RNG remains
+32-bit internally, as documented in `rng.h`.
+
+`/health.capabilities` advertises `conditioning_duration`, `request_splice` and
+`fixed_prefix`. Hosts should check these before using the controls: older
+servers ignore unknown request fields. These additions are on the compatibility
+branch, pending a release; they are absent from v0.1.1.
+
+## Latent-prefix continuation
+
+`/generate` accepts the boolean `fixed_prefix` alongside `init_path` and a
+non-negative `inpaint_start`. It retains ordinary local inpainting conditioning
+and additionally pins the source-prefix latent tokens to a fixed noise trajectory
+at the first timestep and after every ping-pong update. At the final timestep
+those tokens equal the clean encoded source. The source-splice overlap also
+sets the prefix boundary; output source splicing remains a separate operation.
+
+Completed polling metadata includes `prefix_latent_tokens` (zero when disabled)
+and `latent_sample_size`, including consume polling. The no-model HTTP suite
+checks invalid requests, the sampling schedule test verifies intermediate and
+final prefix values and an untouched generated suffix, and the real-model
+splice smoke exercises both modes. This capability is on the compatibility
+branch and is not in the published v0.1.1 release.
+
 ## lora and prompt discovery
 
 `GET /loras` scans the adapters directory and returns GGUF adapter names and targets
@@ -260,11 +324,32 @@ is mangled by PowerShell's native-argument handling.)
 
 ## residency / lifecycle
 
-default **frugal** (`keep_models:false`): the model is freed after each generation and reloaded on the
-next request — keeps host-process memory low (good for an embedded/VST context) and makes per-request lora
-strength correct for free. for a long-running service that wants lowest latency, send `keep_models:true`
-and call `POST /unload` from your orchestrator when you need the VRAM back (model-switch, idle, pressure) —
-the same pattern as the pytorch sa3 service.
+`POST /load` initializes and validates the selected pipeline without creating a generation job.
+It returns `{success:true,status:"loaded",loaded:true,load_seconds,sample_rate}`; an initialized
+pipeline returns `status:"already_loaded"` and `load_seconds:0`. Missing or invalid models return
+503 with `{success:false,loaded:false,error}`. `POST /reload` discards the initialized pipeline and
+initializes it again. `POST /unload` frees the pipeline/backend and returns
+`{success:true,status:"unloaded",loaded:false}`.
+
+`GET /ready` returns 200 with `ready:true` after successful initialization, and 503 with
+`ready:false,loading,error` before load, during a lifecycle change, after a failed load or after unload.
+`GET /health` stays responsive during model work and exposes `loaded`, `loading`, `error`,
+`last_load_seconds`, `lifecycle_busy` and `active_generations` (including queued jobs).
+`capabilities.model_lifecycle:true` identifies this contract.
+
+Reload, unload and model selection require an idle pipeline. They return 409 immediately if any
+generation is queued/running or another lifecycle change is in progress. New generation submissions
+also return 409 during an explicit lifecycle change. Repeated `/load` remains idempotent when an
+already initialized pipeline is generating. Failed loads remain visible in health/readiness until
+a successful retry or unload.
+
+`loaded`/`ready` mean the pipeline is initialized, not that every weight tensor stays resident.
+Initialization reads and validates models one at a time, then frees their weights. The default
+**frugal** generation policy (`keep_models:false`) also loads/frees networks by phase, freeing the
+heavy weights after generation while keeping the initialized pipeline available. This keeps memory
+low on smaller GPUs. For repeated requests with retained weights, send `keep_models:true`, then
+call `/unload` when the orchestrator needs the VRAM back. A successful frugal generation therefore
+leaves `ready:true`; full unload sets it false.
 
 ## the init-audio pool (`--audio-in-dir`)
 

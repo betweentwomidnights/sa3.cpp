@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <random>
 #include <cmath>
 #include <cstdint>
@@ -414,7 +415,8 @@ struct ModelPaths {
     // arriving as a side effect of the DiT's tier.
     static bool resolve(const std::string& models_dir, const std::string& variant,
                         const std::string& encoding, const std::string& text_encoding,
-                        const std::string& ae_encoding, ModelPaths& out, std::string& err);
+                        const std::string& ae_encoding, ModelPaths& out, std::string& err,
+                        const std::string& dit_override = "");
 };
 
 // True if the DiT's projection weights are stored as a quantized type. Checked on a weight
@@ -585,7 +587,8 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
 
 inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
                                 const std::string& encoding, const std::string& text_encoding,
-                                const std::string& ae_encoding, ModelPaths& out, std::string& err) {
+                                const std::string& ae_encoding, ModelPaths& out, std::string& err,
+                                const std::string& dit_override) {
     // The requested encoding is resolved EXACTLY: this project's whole point is numeric parity,
     // so silently substituting a different precision than the caller asked for is not acceptable.
     // A missing file is an error naming what was looked for and what else is present.
@@ -619,7 +622,9 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
     out.t5   = resolve_text_encoder(md, text_encoding, err);
     out.cond = one("stable-audio-3-" + variant + "-conditioner-", ".gguf",       "conditioner");
     const std::string dit_pre  = "stable-audio-3-" + variant + "-dit-";
-    out.dit  = one(dit_pre,  "-" + ENC + ".gguf",  "DiT");
+    // Training supplies its distinct base DiT; shared components must not require
+    // an unrelated inference DiT at the same quantization tier to be installed.
+    out.dit  = dit_override.empty() ? one(dit_pre, "-" + ENC + ".gguf", "DiT") : dit_override;
     out.same = resolve_autoencoder(md, variant, ae_encoding, ENC, err);
     if (!err.empty()) {
         // The --encoding hint belongs only to a DiT miss now. The text encoder and the autoencoder
@@ -666,6 +671,10 @@ struct GenParams {
     float init_noise_level = 0.85f;    // sigma_max for a2a (1.0 == text2music)
     float inpaint_start = -1.0f;       // inpaint region in seconds; needs init_audio + a local-cond DiT
     float inpaint_end   = -1.0f;       // also the TOTAL output duration (a short clip can extend)
+    // In addition to local inpaint conditioning, pin the source prefix on a
+    // fixed clean/noise trajectory throughout ping-pong sampling. This is
+    // latent-prefix continuation, not output source splicing.
+    bool fixed_prefix = false;
 
     // Adapters applied (in order) for THIS request, then reset. Paths are full gguf paths
     // (the CLI/server resolve names -> paths before building GenParams).
@@ -688,6 +697,13 @@ struct GenParams {
     // >0 leaves room so the kept region has no ending — the basis for continuation / loop generation.
     float duration_padding_sec = 6.0f;
     int target_n_samp = 0;          // optional exact final sample count; 0 = frames*4096
+    // Optional conditioning/schedule length independent of the final crop.
+    // Zero keeps the historical length resolution. Hosts that generate a
+    // padded take then crop it should supply the actual conditioned seconds.
+    float conditioning_seconds_total = 0.0f;
+    // Extra hidden canvas for inpaint, beyond its mask_end. Kept separate from
+    // the regenerated window so the caller can preserve a padded zero tail.
+    float inpaint_padding_sec = 0.0f;
 
     // Classifier-free guidance (matches dit.py:479-619). cfg_scale==1.0 => a single conditioned pass
     // (no CFG, byte-identical to before). Otherwise each step also runs an UNconditioned pass (negative
@@ -738,6 +754,10 @@ struct GenResult {
     int sample_rate = 44100;
     LoudnessMeta loudness;
     SpliceMeta splice;
+    int prefix_latent_tokens = 0;
+    int latent_sample_size = 0;
+    float conditioning_seconds_total = 0.0f;
+    int conditioning_latent_frames = 0;
 };
 
 // Holds the loaded models for the life of the process. Move-only (owns the backend + buffers).
@@ -911,6 +931,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     const bool do_cfg = (cfg_scale != 1.0f);
     const bool inpaint = (inpaint_start >= 0.0f || inpaint_end >= 0.0f);
     const bool has_init = !params.init_audio.empty();
+    if (!std::isfinite(params.conditioning_seconds_total) || params.conditioning_seconds_total < 0.0f ||
+        params.conditioning_seconds_total > (double)std::numeric_limits<int>::max() / 44100.0 ||
+        !std::isfinite(params.inpaint_padding_sec) || params.inpaint_padding_sec < 0.0f)
+        throw std::invalid_argument("conditioning_seconds_total and inpaint_padding_sec must be finite and non-negative");
+    if (params.fixed_prefix && (!has_init || !inpaint || !std::isfinite(inpaint_start) || inpaint_start < 0.0f))
+        throw std::invalid_argument("fixed_prefix requires init audio and a non-negative inpaint_start");
     auto release_all_for_frugal_cancel = [&]() {
         if (!keep_models) {
             TE.free();
@@ -963,7 +989,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     int init_src_n = 0;    // valid samples in init_audio; init_L is the padded stride, not this
     TransformDuration transform_length;
     if (has_init) {
-        int n_samp = params.init_n_samp; const int n_ch = params.init_n_ch;
+        int n_samp = params.init_n_samp; int n_ch = params.init_n_ch;
         // resample the init source to the model rate (44.1 kHz) if the caller passed another rate.
         std::vector<float> resampled;
         const std::vector<float>* rawp = &params.init_audio;
@@ -974,12 +1000,27 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             printf("init: resampled %d Hz -> 44100 Hz (%d -> %d samples)\n", params.init_sample_rate, n_samp, out_ns);
             n_samp = out_ns; rawp = &resampled;
         }
+        const int model_channels = sc.out_channels / sc.patch_size;
+        std::vector<float> channel_audio;
+        if (n_ch == 1 && model_channels == 2) {
+            channel_audio.reserve((size_t)n_samp * 2);
+            channel_audio.insert(channel_audio.end(), rawp->begin(), rawp->end());
+            channel_audio.insert(channel_audio.end(), rawp->begin(), rawp->end());
+            rawp = &channel_audio;
+            n_ch = 2;
+        }
         const std::vector<float>& raw = *rawp;
-        if (n_ch != sc.out_channels / sc.patch_size)
+        if (n_ch != model_channels)
             throw std::runtime_error("init audio must be " + std::to_string(sc.out_channels / sc.patch_size) + "-channel");
         const int mult = sc.chunk ? 2 * ds : ds;
         int want = n_samp;
         if (inpaint && inpaint_end > 0.0f) want = std::max(want, (int)(inpaint_end * 44100.0f));
+        if (inpaint && params.inpaint_padding_sec > 0.0f) {
+            const double padded = want + (double)params.inpaint_padding_sec * 44100.0;
+            if (padded > std::numeric_limits<int>::max() - mult)
+                throw std::invalid_argument("inpaint padding exceeds the sample-count limit");
+            want = (int)padded;
+        }
         if (!inpaint) {
             transform_length = transform_duration(n_samp, ds, sc.chunk ? 2 : 1);
             want = transform_length.canvas_samples;
@@ -1033,13 +1074,18 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     const int samples_per_frame = sc.patch_size * sc.output_seg;
     const sa3::Text2MusicDuration text_length =
         sa3::text2music_duration(params.target_n_samp, eff_frames, samples_per_frame);
-    const float conditioned_secs = has_init
+    const float resolved_secs = has_init
         ? (inpaint ? (float)eff_frames * (float)samples_per_frame / 44100.0f
                    : transform_length.seconds_total)
         : text_length.seconds_total;
-    const int schedule_frames = has_init
+    const int resolved_schedule_frames = has_init
         ? (inpaint ? eff_frames : transform_length.schedule_frames)
         : text_length.schedule_frames;
+    const float conditioned_secs = params.conditioning_seconds_total > 0.0f
+        ? params.conditioning_seconds_total : resolved_secs;
+    const int schedule_frames = params.conditioning_seconds_total > 0.0f
+        ? std::max(1, (int)std::ceil((double)conditioned_secs * 44100.0 / samples_per_frame))
+        : resolved_schedule_frames;
     int pad_frames = 0;
     if (!has_init && duration_padding_sec > 0.0f) {
         const int mult = sc.chunk ? 2 : 1;                      // SAME-S needs an even latent length
@@ -1200,6 +1246,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         inpaint_f0 = std::max(0, std::min(T, ceil_div(sa, ds)));
         inpaint_f1 = std::max(inpaint_f0, std::min(T, ceil_div(ea, ds)));
     }
+    // Match the host reference's round(samples / downsampling_ratio), with
+    // at least one token for a positive source, independently of ceil-based
+    // local-conditioning bounds. Encode enough for either kind of mask.
+    const int prefix_tokens = params.fixed_prefix
+        ? (int)std::min((double)T, std::max(1.0, std::nearbyint(std::nearbyint((double)mask_start * 44100.0) / ds)))
+        : 0;
 
     std::vector<float> z_init;
     if (has_init) {
@@ -1267,7 +1319,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         // of the canvas lets the encode stop early; rows past enc_T stay zero and are masked out.
         const bool chunk_path = encode_chunk_size > 0 && !sc.chunk;
         const int enc_T = inpaint
-            ? init_encode_frames(T, inpaint_f0, inpaint_f1, chunk_path ? encode_chunk_size : 0,
+            ? init_encode_frames(T, std::max(inpaint_f0, prefix_tokens), inpaint_f1, chunk_path ? encode_chunk_size : 0,
                                  encode_overlap, sc.chunk ? 2 : 1)
             : T;
         if (enc_T < T)
@@ -1342,6 +1394,12 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     sa3::Rng rng(seed);
     std::vector<float> host_x(N); rng.fill_normal(host_x.data(), N);
     std::vector<float> stepnoise((size_t)steps*N); rng.fill_normal(stepnoise.data(), stepnoise.size());
+    std::vector<float> prefix_noise((size_t)prefix_tokens * dc.io);
+    if (params.fixed_prefix) {
+        rng.fill_normal(prefix_noise.data(), prefix_noise.size());
+        sa3::sampling::rf_impose_prefix(host_x.data(), z_init.data(), prefix_noise.data(),
+                                        prefix_noise.size(), sigmas.front());
+    }
     if (has_init && !inpaint)
         for (int j = 0; j < N; j++) host_x[j] = z_init[j]*(1.0f - sigma_max) + host_x[j]*sigma_max;
 
@@ -1503,6 +1561,9 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         sa3::sampling::rf_pingpong_step(host_x.data(), v_use,
                                         stepnoise.data() + (size_t)i*N, (size_t)N,
                                         tcur, tnext);
+        if (params.fixed_prefix)
+            sa3::sampling::rf_impose_prefix(host_x.data(), z_init.data(), prefix_noise.data(),
+                                            prefix_noise.size(), tnext);
         dit_download_update += wall_time_s() - ts;
         if (params.on_progress)   // sampling spans 0..0.9 of the overall bar; callback overrides the printf
             params.on_progress({"sampling", i+1, steps, 0.9f * (float)(i+1) / (float)steps});
@@ -1698,6 +1759,10 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     r.sample_rate = 44100;
     r.loudness = loudness_meta;
     r.splice = splice_meta;
+    r.prefix_latent_tokens = prefix_tokens;
+    r.latent_sample_size = T;
+    r.conditioning_seconds_total = conditioned_secs;
+    r.conditioning_latent_frames = schedule_frames;
     return r;
 }
 

@@ -31,6 +31,19 @@ inline std::string runtime_json_quote(const char* input) {
     return out + '"';
 }
 
+// Model-free host contract. Keep /health and --control-info on one capability
+// definition. This probe must not initialize ggml, read .env, or bind a port.
+inline const char* sa3_server_capabilities_json() {
+    return "{\"fixed_prefix\":true,\"request_splice\":true,"
+           "\"conditioning_duration\":true,\"model_lifecycle\":true}";
+}
+
+inline std::string sa3_server_control_info_json() {
+    return std::string("{\"schema_version\":1,\"service\":\"sa3\",\"version\":") +
+        runtime_json_quote(runtime_version()) + ",\"capabilities\":" +
+        sa3_server_capabilities_json() + "}";
+}
+
 // Gary4local checks this before installing a model or binding a service port.
 // Use the registry name (CUDA/Vulkan/CPU), not the numbered device name.
 inline std::string runtime_props_json(const char* service) {

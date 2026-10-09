@@ -1102,6 +1102,15 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                 do_checkpoint(cursor_epoch, cursor_next_sample);
         }
 
+        if (loop.step <= 0 && out.cancelled) {
+            // A host may cancel after pre-encode but before the first update,
+            // including during an accumulated batch. No resumable optimizer
+            // state exists yet; report cancellation without inventing an adapter.
+            sa3::free_train_dit_ckpt(ck);
+            sa3::free_train_dit_graph(graph);
+            cond.free(); ae.free(); dit.free(); te.free();
+            return true;
+        }
         if (loop.step <= 0) throw std::runtime_error("training completed without an optimizer update");
         out.steps = loop.step;
         if (step_seconds_count > 0) {

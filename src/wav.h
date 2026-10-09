@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -115,10 +116,14 @@ inline std::string wav_planar_bytes(const float* data, int n_samples, int n_ch, 
 // Read a PCM/float WAV into planar f32 channels (ch0[0..n-1], ch1[0..n-1], ...),
 // the same layout write_wav_planar consumes and same_encode expects ([L, ch], L fastest).
 inline std::vector<float> read_wav_planar(const std::string& path, int& n_samples,
-                                          int& n_ch, int& sample_rate) {
+                                          int& n_ch, int& sample_rate, bool clamp = true) {
     using namespace wav_detail;
 
+#ifdef _WIN32
+    FileHandle fh{_wfopen(std::filesystem::u8path(path).c_str(), L"rb")};
+#else
     FileHandle fh{fopen(path.c_str(), "rb")};
+#endif
     FILE* f = fh.f;
     if (!f) throw std::runtime_error("cannot open " + path);
 
@@ -164,7 +169,7 @@ inline std::vector<float> read_wav_planar(const std::string& path, int& n_sample
         throw std::runtime_error(path + ": unsupported or empty WAV (fmt=" + std::to_string(fmt) +
                                  " bits=" + std::to_string(bits) + " ch=" + std::to_string(ch) + ")");
     }
-    if (!(bits == 16 || bits == 24 || bits == 32 || (fmt == 3 && bits == 64))) {
+    if (!((fmt == 1 && bits == 8) || bits == 16 || bits == 24 || bits == 32 || (fmt == 3 && bits == 64))) {
         throw std::runtime_error(path + ": unsupported WAV bit depth " + std::to_string(bits));
     }
     if (fmt == 3 && !(bits == 32 || bits == 64)) {
@@ -191,6 +196,8 @@ inline std::vector<float> read_wav_planar(const std::string& path, int& n_sample
                     std::memcpy(&d, p, sizeof(double));
                     v = (float)d;
                 }
+            } else if (bits == 8) {
+                v = (int(p[0]) - 128) / 128.0f;
             } else if (bits == 16) {
                 int16_t sample = (int16_t)u16le(p);
                 v = sample / 32768.0f;
@@ -199,7 +206,7 @@ inline std::vector<float> read_wav_planar(const std::string& path, int& n_sample
             } else {
                 v = s32le(p) / 2147483648.0f;
             }
-            planar[(size_t)c*n_samples + s] = std::max(-1.0f, std::min(1.0f, v));
+            planar[(size_t)c*n_samples + s] = clamp ? std::max(-1.0f, std::min(1.0f, v)) : v;
         }
     }
     return planar;

@@ -78,6 +78,32 @@ int main() {
                          + transform[1] * noise;
     expect(std::fabs(x - expected) < 1e-6f, "ping-pong must accept an upward first timestep");
 
+    // Fixed-prefix continuation follows one clean/noise path at every step,
+    // independently of model velocity and fresh step noise. The rest of the
+    // canvas follows the ordinary ping-pong update without being overwritten.
+    {
+        const float clean[] = {2.f, -3.f, 4.f, -5.f};
+        const float fixed_noise[] = {-1.f, 2.f, -3.f, 4.f};
+        std::vector<float> canvas = {99.f, 99.f, 99.f, 99.f, 6.f, -7.f};
+        sa3::sampling::rf_impose_prefix(canvas.data(), clean, fixed_noise, 4, 1.f);
+        expect(canvas == std::vector<float>({-1.f, 2.f, -3.f, 4.f, 6.f, -7.f}),
+               "initial prefix is fixed noise and generated suffix is untouched");
+        const float velocity[] = {100.f, -100.f, 200.f, -200.f, 1.f, -2.f};
+        const float fresh_noise[] = {9.f, 9.f, 9.f, 9.f, 3.f, 4.f};
+        sa3::sampling::rf_pingpong_step(canvas.data(), velocity, fresh_noise, canvas.size(), 1.f, .25f);
+        sa3::sampling::rf_impose_prefix(canvas.data(), clean, fixed_noise, 4, .25f);
+        expect(canvas == std::vector<float>({1.25f, -1.75f, 2.25f, -2.75f, 4.5f, -2.75f}),
+               "intermediate prefix uses fixed trajectory; suffix uses model and fresh noise");
+        sa3::sampling::rf_pingpong_step(canvas.data(), velocity, fresh_noise, canvas.size(), .25f, 0.f);
+        sa3::sampling::rf_impose_prefix(canvas.data(), clean, fixed_noise, 4, 0.f);
+        expect(canvas == std::vector<float>({2.f, -3.f, 4.f, -5.f, 4.25f, -2.25f}),
+               "final prefix is exactly clean; generated suffix is not pinned");
+        bool rejected = false;
+        try { sa3::sampling::rf_impose_prefix(canvas.data(), clean, fixed_noise, 4, INFINITY); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        expect(rejected, "non-finite prefix timesteps are rejected");
+    }
+
     // Init encode for inpaint: a continuation of a 4 s source by 30 s (+6 s ending) is a 431-frame
     // canvas whose window runs to the end. The encode must cover the kept frames and stop well
     // short of the canvas, and anything keeping input after its window must encode it all.
