@@ -415,7 +415,8 @@ struct ModelPaths {
     // arriving as a side effect of the DiT's tier.
     static bool resolve(const std::string& models_dir, const std::string& variant,
                         const std::string& encoding, const std::string& text_encoding,
-                        const std::string& ae_encoding, ModelPaths& out, std::string& err);
+                        const std::string& ae_encoding, ModelPaths& out, std::string& err,
+                        const std::string& dit_override = "");
 };
 
 // True if the DiT's projection weights are stored as a quantized type. Checked on a weight
@@ -586,7 +587,8 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
 
 inline bool ModelPaths::resolve(const std::string& md, const std::string& variant,
                                 const std::string& encoding, const std::string& text_encoding,
-                                const std::string& ae_encoding, ModelPaths& out, std::string& err) {
+                                const std::string& ae_encoding, ModelPaths& out, std::string& err,
+                                const std::string& dit_override) {
     // The requested encoding is resolved EXACTLY: this project's whole point is numeric parity,
     // so silently substituting a different precision than the caller asked for is not acceptable.
     // A missing file is an error naming what was looked for and what else is present.
@@ -620,7 +622,9 @@ inline bool ModelPaths::resolve(const std::string& md, const std::string& varian
     out.t5   = resolve_text_encoder(md, text_encoding, err);
     out.cond = one("stable-audio-3-" + variant + "-conditioner-", ".gguf",       "conditioner");
     const std::string dit_pre  = "stable-audio-3-" + variant + "-dit-";
-    out.dit  = one(dit_pre,  "-" + ENC + ".gguf",  "DiT");
+    // Training supplies its distinct base DiT; shared components must not require
+    // an unrelated inference DiT at the same quantization tier to be installed.
+    out.dit  = dit_override.empty() ? one(dit_pre, "-" + ENC + ".gguf", "DiT") : dit_override;
     out.same = resolve_autoencoder(md, variant, ae_encoding, ENC, err);
     if (!err.empty()) {
         // The --encoding hint belongs only to a DiT miss now. The text encoder and the autoencoder

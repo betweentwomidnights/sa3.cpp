@@ -53,6 +53,35 @@ int main() {
     fails += expect(p.cond.find("conditioner") != std::string::npos, "conditioner resolved");
     fails += expect(p.dit.find("medium-base-dit") != std::string::npos, "medium-base training dit resolved");
 
+    const fs::path q4_base = root / "stable-audio-3-medium-base-dit-1.5B-v1.0-Q4_K_M.gguf";
+    std::ofstream(q4_base) << "stub";
+    sa3::TrainConfig q4_cfg = cfg;
+    q4_cfg.encoding = "q4_k_m";
+    err.clear();
+    fails += expect(sa3::resolve_train_model_paths(q4_cfg, p, err),
+                    "Q4 training base resolves with only an F16 inference DiT installed");
+    fails += expect(p.dit == q4_base.string(), "Q4 training selects the requested base tier");
+    fs::remove(root / "stable-audio-3-medium-dit-1.5B-v1.0-F16.gguf");
+    err.clear();
+    fails += expect(sa3::resolve_train_model_paths(q4_cfg, p, err),
+                    "training needs no inference DiT installed");
+    sa3::ModelPaths inference;
+    err.clear();
+    fails += expect(!sa3::ModelPaths::resolve(root.string(), "medium", "q4_k_m", inference, err),
+                    "inference still requires its own requested DiT");
+    sa3::TrainConfig override_cfg = cfg;
+    override_cfg.dit_path = q4_base.string();
+    err.clear();
+    fails += expect(sa3::resolve_train_model_paths(override_cfg, p, err),
+                    "explicit training DiT resolves shared components without an inference DiT");
+    fails += expect(p.dit == q4_base.string(), "explicit training DiT retained");
+    std::ofstream(root / "stable-audio-3-medium-base-dit-duplicate-Q4_K_M.gguf") << "stub";
+    err.clear();
+    fails += expect(!sa3::resolve_train_model_paths(q4_cfg, p, err), "ambiguous training base rejected");
+    fails += expect(err.find("multiple medium-base") != std::string::npos, "ambiguous base guidance");
+    // Keep an inference DiT present for the missing-base rejection below.
+    std::ofstream(root / "stable-audio-3-medium-dit-1.5B-v1.0-F16.gguf") << "stub";
+
     const fs::path marked = root / "marked-medium-base.gguf";
     const fs::path unmarked = root / "unmarked-medium.gguf";
     const fs::path false_marker = root / "false-medium-base.gguf";

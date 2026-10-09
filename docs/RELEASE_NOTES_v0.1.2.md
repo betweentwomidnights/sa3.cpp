@@ -9,6 +9,8 @@
   changes reject requests while generation is running or queued.
 - Add model-free host capability probes, atomic trainer progress and cooperative
   cancellation. Windows progress publication tolerates transient reader locks.
+- Resolve standalone training directly against the requested base DiT, so a
+  matching inference DiT download is no longer required for training.
 - Fix the LoRA merge graph allocation that could abort with three full-scope
   DoRAs. Resolve legacy PyTorch `dora` metadata during conversion and when
   loading existing GGUFs; Gary's historical row normalization is preserved.
