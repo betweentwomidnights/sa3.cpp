@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: existing release tag to build and attach to (e.g. v0.1.2); empty for a dry run
+        description: existing release tag to build and attach to (e.g. v0.1.3); empty for a dry run
         required: false
         type: string
       platforms:

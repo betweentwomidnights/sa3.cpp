@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sa3_cpp VERSION 0.1.2 LANGUAGES C CXX)
+project(sa3_cpp VERSION 0.1.3 LANGUAGES C CXX)
 
 include(CTest)
 
