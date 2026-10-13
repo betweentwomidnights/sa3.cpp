@@ -70,41 +70,183 @@ function Invoke-Checked([string]$program, [string[]]$arguments) {
 # own folder before System32, so copies beside it win over whatever the
 # machine has, and nobody needs an administrator install of the
 # redistributable. They come from the redistributable folder of the Visual
-# Studio that built the package, and must be at least as new as its compiler:
-# binaries from a newer toolset can crash on an older msvcp140 (std::mutex
-# changed in 14.40).
-function Get-VcRuntime([string]$buildDir) {
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-    if (-not (Test-Path $vswhere)) { Fail "vswhere.exe was not found; install Visual Studio 2022" }
-    $vs = & $vswhere -latest -products * -version "[17.0,18.0)" `
-        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if (-not $vs) { Fail "no Visual Studio 2022 with the C++ x64 tools was found" }
-    $versionFile = Join-Path $vs "VC\Auxiliary\Build\Microsoft.VCRedistVersion.default.txt"
-    if (-not (Test-Path $versionFile)) { Fail "$vs has no VC redistributable version file" }
-    $redist = Join-Path $vs "VC\Redist\MSVC\$((Get-Content $versionFile -Raw).Trim())\x64"
+# Studio that CMake built the package with, and must be at least as new as its
+# compiler: binaries from a newer toolset can crash on an older msvcp140
+# (std::mutex changed in 14.40).
+$vcRuntimeNames = "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "vcomp140.dll"
 
-    # The compiler CMake used, as 19.MM; its runtime is 14.MM.
-    $compiler = Get-ChildItem -Path (Join-Path $buildDir "CMakeFiles") -Filter CMakeCXXCompiler.cmake -Recurse |
-        Select-String -Pattern 'set\(CMAKE_CXX_COMPILER_VERSION "19\.(\d+)' | Select-Object -First 1
-    if (-not $compiler) { Fail "cannot tell the MSVC version from $buildDir" }
-    $toolsetMinor = [int]$compiler.Matches[0].Groups[1].Value
+function Get-VcRuntime([string]$buildDir) {
+    # Everything comes from the build's own configuration, not from whichever
+    # Visual Studio or CMake happens to be newest: the cache names the CMake
+    # that configured it and the Visual Studio instance it used, and that
+    # CMake's own version folder holds the compiler it found.
+    $cache = Get-Content (Join-Path $buildDir "CMakeCache.txt")
+    function Cached([string]$name) {
+        $line = $cache | Where-Object { $_ -match "^$([regex]::Escape($name)):[A-Z]+=(.+)$" } | Select-Object -First 1
+        if (-not $line) { Fail "$buildDir\CMakeCache.txt has no $name" }
+        return ($line -replace "^[^=]+=", "")
+    }
+    $instance = [System.IO.Path]::GetFullPath((Cached "CMAKE_GENERATOR_INSTANCE"))
+    $cmakeVersion = (& (Cached "CMAKE_COMMAND") -E capabilities | ConvertFrom-Json).version.string
+    $compilerFile = Join-Path $buildDir "CMakeFiles\$cmakeVersion\CMakeCXXCompiler.cmake"
+    if (-not (Test-Path $compilerFile)) { Fail "$compilerFile is missing; configure $buildDir with CMake $cmakeVersion" }
+    $record = Get-Content $compilerFile -Raw
+    if ($record -notmatch 'set\(CMAKE_CXX_COMPILER "([^"]+)"\)') { Fail "$compilerFile names no C++ compiler" }
+    $compiler = [System.IO.Path]::GetFullPath($Matches[1])
+    if (-not $compiler.StartsWith($instance.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        Fail "the compiler $compiler is not part of the Visual Studio at $instance"
+    }
+    # The compiler reports 19.MM; its runtime is 14.MM.
+    if ($record -notmatch 'set\(CMAKE_CXX_COMPILER_VERSION "19\.(\d+)') { Fail "$compilerFile has no MSVC version" }
+    $toolsetMinor = [int]$Matches[1]
+
+    $versionFile = Join-Path $instance "VC\Auxiliary\Build\Microsoft.VCRedistVersion.default.txt"
+    if (-not (Test-Path $versionFile)) { Fail "$instance has no VC redistributable version file" }
+    $redist = Join-Path $instance "VC\Redist\MSVC\$((Get-Content $versionFile -Raw).Trim())\x64"
 
     $files = @()
-    foreach ($entry in @(
-        @{ folder = "Microsoft.VC143.CRT"; name = "msvcp140.dll" },
-        @{ folder = "Microsoft.VC143.CRT"; name = "vcruntime140.dll" },
-        @{ folder = "Microsoft.VC143.CRT"; name = "vcruntime140_1.dll" },
-        @{ folder = "Microsoft.VC143.OpenMP"; name = "vcomp140.dll" }
-    )) {
-        $file = Join-Path $redist "$($entry.folder)\$($entry.name)"
+    foreach ($name in $vcRuntimeNames) {
+        $folder = if ($name -eq "vcomp140.dll") { "Microsoft.VC143.OpenMP" } else { "Microsoft.VC143.CRT" }
+        $file = Join-Path $redist "$folder\$name"
         if (-not (Test-Path $file)) { Fail "$file is missing; install the MSVC v143 redistributable files" }
         $info = (Get-Item $file).VersionInfo
         if ($info.FileMajorPart -ne 14 -or $info.FileMinorPart -lt $toolsetMinor) {
-            Fail "$($entry.name) $($info.FileVersion) is older than the 14.$toolsetMinor toolset that built the package"
+            Fail "$name $($info.FileVersion) is older than the 14.$toolsetMinor compiler that built the package"
         }
         $files += $file
     }
     return $files
+}
+
+# Records every DLL a process loads, by the path Windows actually opened, by
+# running it to exit as its debugger. Unlike listing a live process's modules
+# it can't miss a short-lived one, and it sees backends loaded at run time.
+if (-not ("DllLoadRecorder" -as [type])) { Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class DllLoadRecorder
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFO
+    {
+        public int cb;
+        public string lpReserved, lpDesktop, lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcessW(string application, StringBuilder commandLine, IntPtr processAttributes,
+        IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory,
+        ref STARTUPINFO startup, out PROCESS_INFORMATION process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool WaitForDebugEvent(byte[] debugEvent, uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ContinueDebugEvent(int processId, int threadId, uint status);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(IntPtr process, uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern uint GetFinalPathNameByHandleW(IntPtr file, StringBuilder path, uint size, uint flags);
+
+    const uint DEBUG_ONLY_THIS_PROCESS = 0x2, CREATE_NO_WINDOW = 0x08000000;
+    const uint DBG_CONTINUE = 0x00010002, DBG_EXCEPTION_NOT_HANDLED = 0x80010001;
+    const uint EXCEPTION_DEBUG_EVENT = 1, CREATE_PROCESS_DEBUG_EVENT = 3, EXIT_PROCESS_DEBUG_EVENT = 5,
+        LOAD_DLL_DEBUG_EVENT = 6, EXCEPTION_BREAKPOINT = 0x80000003;
+    // DEBUG_EVENT on x64: code, process id and thread id, then the union at 16.
+    const int UNION = 16;
+
+    public static List<string> Run(string exe, string commandLine, string directory, int timeoutMs, out int exitCode)
+    {
+        var startup = new STARTUPINFO();
+        startup.cb = Marshal.SizeOf(startup);
+        PROCESS_INFORMATION process;
+        if (!CreateProcessW(exe, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false,
+                DEBUG_ONLY_THIS_PROCESS | CREATE_NO_WINDOW, IntPtr.Zero, directory, ref startup, out process))
+            throw new Win32Exception();
+        var loaded = new List<string>();
+        var debugEvent = new byte[256];
+        int deadline = Environment.TickCount + timeoutMs;
+        try
+        {
+            while (true)
+            {
+                int left = deadline - Environment.TickCount;
+                if (left <= 0)
+                {
+                    TerminateProcess(process.hProcess, 1);
+                    throw new TimeoutException(exe + " did not exit within " + (timeoutMs / 1000) + " s");
+                }
+                if (!WaitForDebugEvent(debugEvent, (uint)left)) continue;
+                uint code = BitConverter.ToUInt32(debugEvent, 0);
+                int processId = BitConverter.ToInt32(debugEvent, 4), threadId = BitConverter.ToInt32(debugEvent, 8);
+                uint status = DBG_CONTINUE;
+                if (code == EXCEPTION_DEBUG_EVENT)
+                {
+                    // The loader's initial breakpoint is ours; anything else is the program's.
+                    if (BitConverter.ToUInt32(debugEvent, UNION) != EXCEPTION_BREAKPOINT) status = DBG_EXCEPTION_NOT_HANDLED;
+                }
+                else if (code == CREATE_PROCESS_DEBUG_EVENT || code == LOAD_DLL_DEBUG_EVENT)
+                {
+                    // Both start with the image's file handle, which the debugger must close.
+                    var file = new IntPtr(BitConverter.ToInt64(debugEvent, UNION));
+                    if (file != IntPtr.Zero)
+                    {
+                        if (code == LOAD_DLL_DEBUG_EVENT)
+                        {
+                            var path = new StringBuilder(1024);
+                            if (GetFinalPathNameByHandleW(file, path, (uint)path.Capacity, 0) > 0)
+                                loaded.Add(path.ToString().Replace(@"\\?\", ""));
+                        }
+                        CloseHandle(file);
+                    }
+                }
+                else if (code == EXIT_PROCESS_DEBUG_EVENT)
+                {
+                    exitCode = BitConverter.ToInt32(debugEvent, UNION);
+                    ContinueDebugEvent(processId, threadId, DBG_CONTINUE);
+                    return loaded;
+                }
+                ContinueDebugEvent(processId, threadId, status);
+            }
+        }
+        finally
+        {
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+        }
+    }
+}
+'@ }
+
+# Run a staged executable from an unrelated working directory and fail unless
+# every Visual C++ runtime DLL it loads, which must be all four (the arguments
+# have to load a CPU backend, which brings in vcomp140), came from its own
+# folder. The build machine has the runtime in System32 too, so this is what
+# proves the package's copies are the ones that load.
+function Assert-AppLocalVcRuntime([string]$exe, [string[]]$arguments) {
+    $folder = Split-Path -Parent ([System.IO.Path]::GetFullPath($exe))
+    $commandLine = (@("`"$exe`"") + ($arguments | ForEach-Object { "`"$_`"" })) -join " "
+    $exitCode = 0
+    $loaded = [DllLoadRecorder]::Run($exe, $commandLine, $env:TEMP, 120000, [ref]$exitCode)
+    if ($exitCode -ne 0) { Fail "$(Split-Path -Leaf $exe) $($arguments -join ' ') exited with $exitCode under the DLL check" }
+    foreach ($name in $vcRuntimeNames) {
+        $paths = @($loaded | Where-Object { (Split-Path -Leaf $_) -ieq $name })
+        if ($paths.Count -eq 0) { Fail "$(Split-Path -Leaf $exe) $($arguments -join ' ') never loaded $name" }
+        foreach ($path in $paths) {
+            if ((Split-Path -Parent $path) -ne $folder) { Fail "$(Split-Path -Leaf $exe) loaded $name from $path, not from the package" }
+        }
+    }
+    Write-Host "app-local VC runtime: $(Split-Path -Leaf $exe) loads all four from its own folder"
 }
 
 # --- toolchain --------------------------------------------------------------
@@ -270,6 +412,7 @@ $pythonEntry = Get-Content (Join-Path $buildPath "CMakeCache.txt") |
 if (-not $pythonEntry) { Fail "Python 3 is required to verify the staged package" }
 $python = ($pythonEntry -split '=', 2)[1]
 Invoke-Checked $python @((Join-Path $root "ci/check-runtime-package.py"), $coreDir, $Version)
+Assert-AppLocalVcRuntime (Join-Path $coreDir "sa3-server.exe") @("--props")
 
 # A GPU backend that landed in the core zip would load on every machine, and
 # one missing from its own zip would never load anywhere. Check both ways.
