@@ -8,7 +8,7 @@ separately.
 
 | Archive | Contents |
 |---|---|
-| `sa3-<tag>-windows-x64-core.zip` | Servers, training and generation tools, `sa3.dll`, ggml core and CPU variants, licenses, `BUILD-INFO.json`, and documentation; for gary4local |
+| `sa3-<tag>-windows-x64-core.zip` | Servers, training and generation tools, `sa3.dll`, ggml core and CPU variants, the Visual C++ runtime, licenses, `BUILD-INFO.json`, and documentation; for gary4local |
 | `sa3-<tag>-windows-x64-cuda.zip` | `ggml-cuda.dll` for NVIDIA GPUs |
 | `sa3-<tag>-windows-x64-vulkan.zip` | `ggml-vulkan.dll` for AMD, Intel, or Vulkan-capable NVIDIA GPUs |
 | `sa3-<tag>-windows-x64-standalone.zip` | Core, both GPU backends, CUDA runtime and EULA, `models.cmd`, default prompt pools, and startup guide; for direct use |
@@ -22,6 +22,15 @@ Both servers answer `--version` and `--props` before loading models; the package
 script rejects a tag that disagrees with their compiled version. For supervised
 launches, `SA3_PORT`, `SA3_MODELS_DIR`, and `SA3_DEVICE` set the port, model
 directory, and ggml backend in each server process.
+
+The core also carries the Visual C++ runtime (`msvcp140`, `vcruntime140`,
+`vcruntime140_1`, `vcomp140`) from the redistributable folder of the Visual
+Studio that built it. Windows loads DLLs from an executable's own folder before
+System32, so the servers run on the runtime they were built against whatever
+the machine has installed, and no one needs an administrator install of the
+redistributable. The package script fails if that runtime is older than the
+compiler, since binaries from a newer toolset can crash on an older `msvcp140`,
+and `BUILD-INFO.json` records its version.
 
 The same core and backend files can serve SA3, Foundation-1, and SAOS on
 separate ports. Each SAT model gets its own `sat-server` process, keeping its
