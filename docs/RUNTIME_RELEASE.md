@@ -31,6 +31,10 @@ the machine has installed, and no one needs an administrator install of the
 redistributable. The package script fails if that runtime is older than the
 compiler, since binaries from a newer toolset can crash on an older `msvcp140`,
 and `BUILD-INFO.json` records its version.
+Both come from the build's own CMake configuration, never from whichever
+Visual Studio is newest. The script also runs the staged
+`sa3-server.exe --props` under a DLL-load recorder and fails unless all four
+runtime DLLs load from the package's own folder rather than System32.
 
 The same core and backend files can serve SA3, Foundation-1, and SAOS on
 separate ports. Each SAT model gets its own `sat-server` process, keeping its
