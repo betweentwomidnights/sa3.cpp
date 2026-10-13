@@ -8,7 +8,7 @@ separately.
 
 | Archive | Contents |
 |---|---|
-| `sa3-<tag>-windows-x64-core.zip` | Servers, training and generation tools, `sa3.dll`, ggml core and CPU variants, licenses, `BUILD-INFO.json`, and documentation; for gary4local |
+| `sa3-<tag>-windows-x64-core.zip` | Servers, training and generation tools, `sa3.dll`, ggml core and CPU variants, the Visual C++ runtime, licenses, `BUILD-INFO.json`, and documentation; for gary4local |
 | `sa3-<tag>-windows-x64-cuda.zip` | `ggml-cuda.dll` for NVIDIA GPUs |
 | `sa3-<tag>-windows-x64-vulkan.zip` | `ggml-vulkan.dll` for AMD, Intel, or Vulkan-capable NVIDIA GPUs |
 | `sa3-<tag>-windows-x64-standalone.zip` | Core, both GPU backends, CUDA runtime and EULA, `models.cmd`, default prompt pools, and startup guide; for direct use |
@@ -22,6 +22,15 @@ Both servers answer `--version` and `--props` before loading models; the package
 script rejects a tag that disagrees with their compiled version. For supervised
 launches, `SA3_PORT`, `SA3_MODELS_DIR`, and `SA3_DEVICE` set the port, model
 directory, and ggml backend in each server process.
+
+The core also carries the Visual C++ runtime (`msvcp140`, `vcruntime140`,
+`vcruntime140_1`, `vcomp140`) from the redistributable folder of the Visual
+Studio that built it. Windows loads DLLs from an executable's own folder before
+System32, so the servers run on the runtime they were built against whatever
+the machine has installed, and no one needs an administrator install of the
+redistributable. The package script fails if that runtime is older than the
+compiler, since binaries from a newer toolset can crash on an older `msvcp140`,
+and `BUILD-INFO.json` records its version.
 
 The same core and backend files can serve SA3, Foundation-1, and SAOS on
 separate ports. Each SAT model gets its own `sat-server` process, keeping its
@@ -50,9 +59,9 @@ controls.
 On Windows with Visual Studio 2022, CUDA Toolkit 12.8, and Vulkan SDK:
 
 ```powershell
-.\ci\package-windows.ps1 -Version v0.1.3
+.\ci\package-windows.ps1 -Version v0.1.4
 # Add a separate cudart zip for testing gary4local's shared-runtime install:
-.\ci\package-windows.ps1 -Version v0.1.3 -CudaRuntime
+.\ci\package-windows.ps1 -Version v0.1.4 -CudaRuntime
 ```
 
 For a quick local check of the core package without GPU toolchains, use
@@ -76,7 +85,7 @@ local tracked files differed from the commit.
    gary4local's `GARY4LOCAL_NATIVE_PACKAGE_DIR` override: that folder then
    contains the split service packages and a shared-runtime test zip. Exercise
    both CUDA and Vulkan and inspect `--props` from the unpacked core.
-3. **Publish:** tag and publish the verified commit as `v0.1.3`. The release
+3. **Publish:** tag and publish the verified commit as `v0.1.4`. The release
    event runs the same package script on that tag, attests each zip, and
    attaches the four zips and `SHA256SUMS`. A dispatch with an existing tag
    can replace missing assets after a runner failure, before a consumer pins it.
@@ -100,7 +109,7 @@ Windows checksum asset.
 Build on Apple Silicon with Xcode command line tools, CMake and Rosetta:
 
 ```sh
-./ci/package-macos.sh --version v0.1.3 --jobs 3
+./ci/package-macos.sh --version v0.1.4 --jobs 3
 ```
 
 The script builds each architecture separately, runs CTest (Intel under Rosetta
@@ -131,7 +140,7 @@ Dispatch `release.yml` with `platforms=macos` for a macOS-only dry run, or
 ad-hoc signatures; tagged release runs fail if signing credentials are missing.
 Local signing uses `SA3_SIGN_IDENTITY`, `SA3_NOTARY_KEY` (path to .p8),
 `SA3_NOTARY_KEY_ID`, and `SA3_NOTARY_ISSUER`; pass `--require-signing` for release
-packages. Publish v0.1.3 only after the dry runs and Mac inference checks pass.
+packages. Publish v0.1.4 only after the dry runs and Mac inference checks pass.
 
 
 ### CPU audio analysis

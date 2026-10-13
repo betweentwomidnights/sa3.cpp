@@ -13,6 +13,12 @@ project's `LICENSE`:
   [source](https://github.com/Signalsmith-Audio/linear/tree/de55e6a50ffcf6f8f43f649692d94691c7025151),
   MIT License, copyright (c) 2025 Signalsmith Audio.
 
+It also carries the Microsoft Visual C++ runtime (`msvcp140.dll`,
+`vcruntime140.dll`, `vcruntime140_1.dll`, `vcomp140.dll`) beside the
+executables, so they need no system-wide install. These are redistributable
+files from Visual Studio 2022, shipped under its license terms for
+distributable code.
+
 The separate CUDA runtime archive includes NVIDIA's EULA. Model weights are not
 included in these runtime packages; each model's license and download terms
 remain with its model repository.
