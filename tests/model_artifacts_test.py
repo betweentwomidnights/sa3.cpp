@@ -50,11 +50,23 @@ class ModelArtifactsTest(unittest.TestCase):
             with self.subTest(model=model):
                 plan = build_sat_large_download_plan("thepatch", model)
                 self.assertEqual(plan[0][0], f"thepatch/{repo}")
-                self.assertEqual(plan[0][1], [
+                expected = [
                     sat_large_dit_filename(model, "F16"),
                     sat_t5_128_filename("F16"),
                     sat_oobleck_filename("F16"),
-                ])
+                ]
+                # Foundation-1 also carries the audio-to-audio encoder.
+                if model == "foundation-1":
+                    expected.append("stable-audio-open-oobleck-encoder-v1.0-F16.gguf")
+                self.assertEqual(plan[0][1], expected)
+
+    def test_keybeds_bundle_is_unchanged_by_the_encoder(self):
+        plan = build_sat_large_download_plan("thepatch", "foundation-1.2-keybeds")
+        self.assertEqual(plan[0][1], [
+            sat_large_dit_filename("foundation-1.2-keybeds", "F16"),
+            sat_t5_128_filename("F16"),
+            sat_oobleck_filename("F16"),
+        ])
 
     def test_large_sat_alias_and_canonical_filenames(self):
         self.assertEqual(
@@ -229,11 +241,13 @@ class ModelArtifactsTest(unittest.TestCase):
             "test-models",
         ], cwd=REPO_ROOT, check=True, text=True, capture_output=True)
         output = result.stdout.replace("\\", "/")
-        self.assertEqual(output.count("[plan]"), 3)
+        self.assertEqual(output.count("[plan]"), 4)
         self.assertIn("thepatch/foundation-1-GGUF/resolve/main/", output)
         self.assertIn("foundation-1-dit-1.1B-v1.0-Q4_K_M.gguf", output)
         self.assertIn("t5-base-encoder-128tok-0.1B-v1.0-Q4_K_M.gguf", output)
         self.assertIn("stable-audio-open-oobleck-v1.0-Q4_K_M.gguf", output)
+        # The encoder is F16 at every tier.
+        self.assertIn("stable-audio-open-oobleck-encoder-v1.0-F16.gguf", output)
 
     def test_python_downloader_sao1_alias_plan(self):
         result = subprocess.run([

@@ -113,57 +113,58 @@ inline std::string wav_planar_bytes(const float* data, int n_samples, int n_ch, 
     return out;
 }
 
-// Read a PCM/float WAV into planar f32 channels (ch0[0..n-1], ch1[0..n-1], ...),
-// the same layout write_wav_planar consumes and same_encode expects ([L, ch], L fastest).
-inline std::vector<float> read_wav_planar(const std::string& path, int& n_samples,
-                                          int& n_ch, int& sample_rate, bool clamp = true) {
+// Read a PCM/float WAV held in memory into planar f32 channels (ch0[0..n-1],
+// ch1[0..n-1], ...), the same layout write_wav_planar consumes and same_encode
+// expects ([L, ch], L fastest). `what` names the source in error messages.
+inline std::vector<float> read_wav_planar_bytes(const uint8_t* bytes, size_t size,
+                                                const std::string& what, int& n_samples,
+                                                int& n_ch, int& sample_rate, bool clamp = true) {
     using namespace wav_detail;
-
-#ifdef _WIN32
-    FileHandle fh{_wfopen(std::filesystem::u8path(path).c_str(), L"rb")};
-#else
-    FileHandle fh{fopen(path.c_str(), "rb")};
-#endif
-    FILE* f = fh.f;
-    if (!f) throw std::runtime_error("cannot open " + path);
-
-    char riff[12];
-    if (fread(riff, 1, 12, f) != 12 || memcmp(riff, "RIFF", 4) || memcmp(riff+8, "WAVE", 4)) {
+    const std::string& path = what;
+    if (size < 12 || memcmp(bytes, "RIFF", 4) || memcmp(bytes + 8, "WAVE", 4)) {
         throw std::runtime_error(path + " is not a RIFF/WAVE file");
     }
 
     uint16_t fmt = 0, ch = 0, bits = 0;
     uint32_t rate = 0;
-    std::vector<uint8_t> data;
+    const uint8_t* data_start = nullptr;
+    size_t data_size = 0;
 
-    char id[4];
-    uint8_t szb[4];
-    while (fread(id, 1, 4, f) == 4 && fread(szb, 1, 4, f) == 4) {
-        uint32_t sz = u32le(szb);
+    size_t pos = 12;
+    while (size - pos >= 8) {
+        const uint8_t* id = bytes + pos;
+        const uint32_t sz = u32le(bytes + pos + 4);
+        pos += 8;
+        if (sz > size - pos) {
+            // A truncated fmt or data chunk is an error; a truncated trailing
+            // chunk of any other kind ends the file, as seeking past it did.
+            if (!memcmp(id, "data", 4) || !memcmp(id, "fmt ", 4))
+                throw std::runtime_error("unexpected end of file while reading " +
+                                         std::string(!memcmp(id, "data", 4) ? "data chunk" : "fmt chunk"));
+            break;
+        }
         if (!memcmp(id, "fmt ", 4)) {
-            std::vector<uint8_t> fmt_data(sz);
-            read_exact(f, fmt_data.data(), fmt_data.size(), "fmt chunk");
-            if (sz & 1) fseek(f, 1, SEEK_CUR);
-            if (fmt_data.size() < 16) throw std::runtime_error(path + ": invalid fmt chunk");
-
-            fmt = u16le(fmt_data.data());
-            ch = u16le(fmt_data.data() + 2);
-            rate = u32le(fmt_data.data() + 4);
-            bits = u16le(fmt_data.data() + 14);
+            if (sz < 16) throw std::runtime_error(path + ": invalid fmt chunk");
+            const uint8_t* fmt_data = bytes + pos;
+            fmt = u16le(fmt_data);
+            ch = u16le(fmt_data + 2);
+            rate = u32le(fmt_data + 4);
+            bits = u16le(fmt_data + 14);
 
             // WAVE_FORMAT_EXTENSIBLE stores the real codec in the SubFormat GUID.
-            if (fmt == 0xfffe && fmt_data.size() >= 40) {
-                uint16_t sub_format = u16le(fmt_data.data() + 24);
+            if (fmt == 0xfffe && sz >= 40) {
+                uint16_t sub_format = u16le(fmt_data + 24);
                 if (sub_format == 1 || sub_format == 3) fmt = sub_format;
             }
         } else if (!memcmp(id, "data", 4)) {
-            data.resize(sz);
-            read_exact(f, data.data(), data.size(), "data chunk");
-            if (sz & 1) fseek(f, 1, SEEK_CUR);
-        } else {
-            fseek(f, sz + (sz & 1), SEEK_CUR);   // skip unknown chunk (chunks are word-aligned)
+            data_start = bytes + pos;
+            data_size = sz;
         }
+        // Chunks are word-aligned; unknown ones are skipped.
+        pos += sz + (sz & 1);
+        if (pos > size) break;
     }
+    const std::vector<uint8_t> data(data_start, data_start + data_size);
 
     if ((fmt != 1 && fmt != 3) || ch == 0 || rate == 0 || data.empty()) {
         throw std::runtime_error(path + ": unsupported or empty WAV (fmt=" + std::to_string(fmt) +
@@ -210,6 +211,25 @@ inline std::vector<float> read_wav_planar(const std::string& path, int& n_sample
         }
     }
     return planar;
+}
+
+// Read a PCM/float WAV file into planar f32 channels; see read_wav_planar_bytes.
+inline std::vector<float> read_wav_planar(const std::string& path, int& n_samples,
+                                          int& n_ch, int& sample_rate, bool clamp = true) {
+    using namespace wav_detail;
+
+#ifdef _WIN32
+    FileHandle fh{_wfopen(std::filesystem::u8path(path).c_str(), L"rb")};
+#else
+    FileHandle fh{fopen(path.c_str(), "rb")};
+#endif
+    FILE* f = fh.f;
+    if (!f) throw std::runtime_error("cannot open " + path);
+    std::vector<uint8_t> bytes;
+    uint8_t chunk[1 << 16];
+    size_t got;
+    while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) bytes.insert(bytes.end(), chunk, chunk + got);
+    return read_wav_planar_bytes(bytes.data(), bytes.size(), path, n_samples, n_ch, sample_rate, clamp);
 }
 
 } // namespace sa3

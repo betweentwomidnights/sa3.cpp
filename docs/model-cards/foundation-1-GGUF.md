@@ -66,6 +66,17 @@ or `--foundation-profile gary` to A/B the gary4local fallback sampler. Run
 Any omitted bars, BPM, key, or family value is randomized; explicitly supplied values
 act as locks. Without `--randomize`, pass `--prompt` as a manual descriptor override.
 
+## Audio-to-audio
+
+`stable-audio-open-oobleck-encoder-v1.0-F16.gguf` is the Oobleck **encoder**, which
+audio-to-audio uses to turn input audio into the latent that sampling starts from.
+Generation never loads it, so it is a separate file from the decoder bundle above and
+comes in one F16 tier for every bundle (149 MiB). Its 146 tensors are identical whether
+converted from Foundation-1, Stable Audio Open 1.0 or Stable Audio Open Small; the
+GGML encoder's latent means and scales match PyTorch's with cosine 1.0000. `sat-server`'s
+`POST /audio2audio` loads it when it is beside the other files; see
+[SAT_SERVER.md](../SAT_SERVER.md). The published bundles are otherwise unchanged.
+
 ## Sources and licensing
 
 - Foundation-1 source revision: `d3160956fa13a8f861d3f608ed24075d44e98554`.

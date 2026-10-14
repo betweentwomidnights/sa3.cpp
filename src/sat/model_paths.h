@@ -108,6 +108,14 @@ inline std::string sat_oobleck_relative_path(const std::string& encoding) {
     return "stable-audio-open-oobleck-v1.0-" + enc + ".gguf";
 }
 
+// The Oobleck encoder, published once at F16 beside the other SAO 1.0-topology
+// files: its weights are the same for every model that shares the Oobleck.
+// Only audio-to-audio needs it, so resolution fills PipelinePaths::encoder when
+// the file is present and otherwise leaves the model usable for generation.
+inline std::string sat_oobleck_encoder_relative_path() {
+    return "stable-audio-open-oobleck-encoder-v1.0-F16.gguf";
+}
+
 inline bool resolve_sat_large_model(const std::string& models_dir,
                                     const std::string& model,
                                     const std::string& dit_encoding,
@@ -134,6 +142,8 @@ inline bool resolve_sat_large_model(const std::string& models_dir,
             return false;
         }
     }
+    const std::filesystem::path encoder = root / sat_oobleck_encoder_relative_path();
+    paths->encoder = std::filesystem::is_regular_file(encoder) ? encoder.string() : std::string();
     return true;
 }
 

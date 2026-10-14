@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
-"""Convert a stable-audio-tools Oobleck decoder from safetensors to GGUF.
+"""Convert a stable-audio-tools Oobleck decoder or encoder from safetensors to GGUF.
 
 The source may be a complete Stable Audio checkpoint (the usual case) or a
 standalone autoencoder state dict. Conversion is lazy and never imports Torch.
 
 Weight normalization is fused as PyTorch applies it at inference. Transposed
 convolutions are additionally rearranged for the GEMM + ggml_col2im_1d graph in
-src/sat/oobleck.h. Unknown or missing decoder tensors are fatal: silently emitting
-a partial decoder produces plausible-looking GGUF files which fail much later.
+src/sat/oobleck.h. Unknown or missing tensors are fatal: silently emitting a
+partial network produces plausible-looking GGUF files which fail much later.
+
+The decoder and encoder are separate files. Generation needs only the decoder;
+audio-to-audio also loads the encoder, which carries `sat.ae.part = encoder`.
 
 Usage:
   .venv/Scripts/python.exe tools/convert_sat_oobleck.py \
       --src model.safetensors --config model_config.json \
       --out models/stable-audio-open-small-oobleck-decoder-F16.gguf
+  .venv/Scripts/python.exe tools/convert_sat_oobleck.py --part encoder \
+      --src model.safetensors --config model_config.json \
+      --out models/stable-audio-open-oobleck-encoder-v1.0-F16.gguf
 """
 
 import argparse
@@ -63,14 +69,14 @@ def conv_transpose_for_col2im(fused):
     return np.ascontiguousarray(fused.reshape(fused.shape[0], -1).T)
 
 
-def find_source_prefix(keys):
+def find_source_prefix(keys, part="decoder"):
     keyset = set(keys)
-    marker = "decoder.layers.0.weight_v"
+    marker = f"{part}.layers.0.weight_v"
     found = [p for p in PREFIX_CANDIDATES if p + marker in keyset]
     if len(found) != 1:
         where = ", ".join(repr(p) for p in found) if found else "none"
         raise ConversionError(
-            f"could not uniquely locate the Oobleck decoder (matching prefixes: {where})"
+            f"could not uniquely locate the Oobleck {part} (matching prefixes: {where})"
         )
     return found[0]
 
@@ -82,11 +88,22 @@ def read_oobleck_config(config_path):
         ae = pre["config"]
         dec_entry = ae["decoder"]
         dec = dec_entry["config"]
-        enc = ae["encoder"]["config"]
+        enc_entry = ae["encoder"]
+        enc = enc_entry["config"]
     except (KeyError, TypeError) as exc:
         raise ConversionError(f"{config_path}: not a Stable Audio autoencoder config") from exc
     if pre.get("type") != "autoencoder" or dec_entry.get("type") != "oobleck":
         raise ConversionError("pretransform decoder is not Oobleck")
+    # One spec describes both halves, so the encoder must mirror the decoder.
+    if enc_entry.get("type") != "oobleck" or (
+        [int(v) for v in enc["c_mults"]] != [int(v) for v in dec["c_mults"]]
+        or [int(v) for v in enc["strides"]] != [int(v) for v in dec["strides"]]
+        or int(enc["channels"]) != int(dec["channels"])
+        or bool(enc.get("use_snake", False)) != bool(dec.get("use_snake", False))
+    ):
+        raise ConversionError("pretransform encoder does not mirror the Oobleck decoder")
+    if pre["config"].get("bottleneck", {}).get("type") != "vae" or int(enc["latent_dim"]) != 2 * int(ae["latent_dim"]):
+        raise ConversionError("Oobleck encoder must feed a VAE bottleneck of twice the latent width")
 
     c_mults = [int(v) for v in dec["c_mults"]]
     strides = [int(v) for v in dec["strides"]]
@@ -117,12 +134,14 @@ def read_oobleck_config(config_path):
     }
 
 
-def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f16"):
+def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f16", part="decoder"):
     _, spec = read_oobleck_config(config)
     if not spec["use_snake"]:
         raise ConversionError("the current GGML Oobleck graph requires Snake activations")
     if weight_type not in ("f16", "f32"):
         raise ConversionError("weight_type must be f16 or f32")
+    if part not in ("decoder", "encoder"):
+        raise ConversionError("part must be decoder or encoder")
     weight_dtype = np.float16 if weight_type == "f16" else np.float32
 
     out = Path(out)
@@ -147,15 +166,17 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
     writer.add_bool("sat.ae.use_snake", spec["use_snake"])
     writer.add_bool("sat.ae.final_tanh", spec["final_tanh"])
     writer.add_string("sat.ae.weight_type", weight_type.upper())
+    if part == "encoder":
+        writer.add_string("sat.ae.part", "encoder")
 
     with safe_open(str(src), framework="numpy") as f:
         keys = list(f.keys())
-        prefix = find_source_prefix(keys)
+        prefix = find_source_prefix(keys, part)
 
         def source(name):
             key = prefix + name
             if key not in keys:
-                raise ConversionError(f"missing decoder tensor: {key}")
+                raise ConversionError(f"missing {part} tensor: {key}")
             consumed.add(key)
             return f.get_tensor(key)
 
@@ -184,44 +205,60 @@ def convert(src, config, out, model_id="stable-audio-open-small", weight_type="f
                 fused = conv_transpose_for_col2im(fused)
             emit(dst, fused, weights=True)
 
-        emit_weight_norm("decoder.layers.0", "ae.decoder.in.weight")
-        emit_bias("decoder.layers.0", "ae.decoder.in.bias")
-
         stages = len(spec["strides"])
-        for block in range(stages):
-            layer = block + 1
-            sp = f"decoder.layers.{layer}.layers."
-            dp = f"ae.decoder.blocks.{block}."
-            emit_snake(sp + "0", dp + "snake")
-            emit_weight_norm(sp + "1", dp + "up.weight_col2im", transpose=True)
-            emit_bias(sp + "1", dp + "up.bias")
-            for residual in range(3):
-                sr = sp + f"{residual + 2}.layers."
-                dr = dp + f"res.{residual}."
-                emit_snake(sr + "0", dr + "snake1")
-                emit_weight_norm(sr + "1", dr + "conv1.weight")
-                emit_bias(sr + "1", dr + "conv1.bias")
-                emit_snake(sr + "2", dr + "snake2")
-                emit_weight_norm(sr + "3", dr + "conv2.weight")
-                emit_bias(sr + "3", dr + "conv2.bias")
 
-        final_snake_layer = stages + 1
-        final_conv_layer = stages + 2
-        emit_snake(f"decoder.layers.{final_snake_layer}", "ae.decoder.out_snake")
-        emit_weight_norm(f"decoder.layers.{final_conv_layer}", "ae.decoder.out.weight")
+        def emit_residual(src_stem, dst_stem):
+            emit_snake(src_stem + "0", dst_stem + "snake1")
+            emit_weight_norm(src_stem + "1", dst_stem + "conv1.weight")
+            emit_bias(src_stem + "1", dst_stem + "conv1.bias")
+            emit_snake(src_stem + "2", dst_stem + "snake2")
+            emit_weight_norm(src_stem + "3", dst_stem + "conv2.weight")
+            emit_bias(src_stem + "3", dst_stem + "conv2.bias")
 
-        decoder_keys = {k for k in keys if k.startswith(prefix + "decoder.")}
-        unexpected = sorted(decoder_keys - consumed)
+        if part == "encoder":
+            # OobleckEncoder: conv in; per stage three residual units, a snake and
+            # a strided conv down; then a snake and a conv out to the VAE moments.
+            emit_weight_norm("encoder.layers.0", "ae.encoder.in.weight")
+            emit_bias("encoder.layers.0", "ae.encoder.in.bias")
+            for block in range(stages):
+                sp = f"encoder.layers.{block + 1}.layers."
+                dp = f"ae.encoder.blocks.{block}."
+                for residual in range(3):
+                    emit_residual(sp + f"{residual}.layers.", dp + f"res.{residual}.")
+                emit_snake(sp + "3", dp + "snake")
+                emit_weight_norm(sp + "4", dp + "down.weight")
+                emit_bias(sp + "4", dp + "down.bias")
+            emit_snake(f"encoder.layers.{stages + 1}", "ae.encoder.out_snake")
+            emit_weight_norm(f"encoder.layers.{stages + 2}", "ae.encoder.out.weight")
+            emit_bias(f"encoder.layers.{stages + 2}", "ae.encoder.out.bias")
+        else:
+            # OobleckDecoder: conv in; per stage a snake, a transposed conv up and
+            # three residual units; then a snake and a bias-free conv out.
+            emit_weight_norm("decoder.layers.0", "ae.decoder.in.weight")
+            emit_bias("decoder.layers.0", "ae.decoder.in.bias")
+            for block in range(stages):
+                sp = f"decoder.layers.{block + 1}.layers."
+                dp = f"ae.decoder.blocks.{block}."
+                emit_snake(sp + "0", dp + "snake")
+                emit_weight_norm(sp + "1", dp + "up.weight_col2im", transpose=True)
+                emit_bias(sp + "1", dp + "up.bias")
+                for residual in range(3):
+                    emit_residual(sp + f"{residual + 2}.layers.", dp + f"res.{residual}.")
+            emit_snake(f"decoder.layers.{stages + 1}", "ae.decoder.out_snake")
+            emit_weight_norm(f"decoder.layers.{stages + 2}", "ae.decoder.out.weight")
+
+        part_keys = {k for k in keys if k.startswith(prefix + part + ".")}
+        unexpected = sorted(part_keys - consumed)
         if unexpected:
             preview = ", ".join(unexpected[:5])
             suffix = f" (+{len(unexpected) - 5} more)" if len(unexpected) > 5 else ""
-            raise ConversionError(f"unrecognized decoder tensors: {preview}{suffix}")
+            raise ConversionError(f"unrecognized {part} tensors: {preview}{suffix}")
 
     writer.add_uint64("sat.ae.parameter_count", parameter_count)
     gguf_meta.add_general(
         writer,
-        basename=f"{model_id}-oobleck",
-        name=f"{model_id} Oobleck decoder",
+        basename=f"{model_id}-oobleck" + ("-encoder" if part == "encoder" else ""),
+        name=f"{model_id} Oobleck {part}",
         finetune=model_id,
         license_id="stabilityai-community",
     )
@@ -246,12 +283,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True, help="Stable Audio .safetensors checkpoint")
     ap.add_argument("--config", required=True, help="Stable Audio model_config.json")
-    ap.add_argument("--out", required=True, help="output decoder .gguf")
+    ap.add_argument("--out", required=True, help="output .gguf")
     ap.add_argument("--model-id", default="stable-audio-open-small")
     ap.add_argument("--out-type", default="f16", choices=("f16", "f32"))
+    ap.add_argument("--part", default="decoder", choices=("decoder", "encoder"),
+                    help="which half of the autoencoder to convert")
     args = ap.parse_args()
     try:
-        result = convert(args.src, args.config, args.out, args.model_id, args.out_type)
+        result = convert(args.src, args.config, args.out, args.model_id, args.out_type, args.part)
     except (ConversionError, OSError, KeyError, json.JSONDecodeError) as exc:
         sys.exit(f"error: {exc}")
     spec = result["spec"]

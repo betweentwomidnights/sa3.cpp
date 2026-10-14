@@ -55,6 +55,14 @@ Only these settings vary per model:
 - T5-base encoder GGUF
 - Oobleck GGUF
 
+and optionally a fourth, the Oobleck encoder GGUF (`PipelinePaths::encoder`), for
+audio-to-audio. With `GenerateParams::init_audio` set, the pipeline resamples the
+audio to 44.1 kHz, crops or zero-pads it to the latent canvas, encodes it, draws the
+latent from the VAE posterior, and starts sampling from it noised to
+`init_noise_level`, which replaces `sigma_max`: stable-audio-tools' variation path.
+`init_noise_level` must be above `sigma_min`; k-diffusion's SDE samplers return NaN on
+a schedule that rises instead.
+
 SAO 1.0 adds no new model execution entry point. Applications use the existing
 `GenerateParams` fields, with `seconds_start`, `sigma_min`, `sigma_max`,
 `sigma_rho`, and `sde_eta` populated for V-prediction. The runtime supports

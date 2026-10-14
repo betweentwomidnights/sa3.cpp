@@ -1,5 +1,7 @@
 """Exercise SAT HTTP request validation without downloading model weights."""
 
+import base64
+import io
 import json
 import socket
 import subprocess
@@ -7,6 +9,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import wave
 
 
 def free_port():
@@ -89,9 +92,28 @@ def check_randomize(port):
     assert status == 400 and "unknown Foundation family" in bad["error"], bad
 
 
+def tiny_wav():
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(bytes(4 * 4800))
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
 def main():
     binary = sys.argv[1]
+    wav = tiny_wav()
     check(binary, "foundation-1", [
+        ("/audio2audio", {"host_bpm": 120}, 400, "audio_data (base64 WAV) is required"),
+        ("/audio2audio", {"audio_data": wav, "prompt": "Synth"}, 400, "host_bpm is required"),
+        ("/audio2audio", {"audio_data": "not*base64", "host_bpm": 120, "prompt": "Synth"}, 400, "not valid base64"),
+        ("/audio2audio", {"audio_data": base64.b64encode(b"not a wav").decode(), "host_bpm": 120,
+                          "prompt": "Synth"}, 400, "RIFF/WAVE"),
+        ("/audio2audio", {"audio_data": wav, "host_bpm": 120, "prompt": "Synth", "init_noise_level": 0.3,
+                          "sigma_min": 0.5}, 400, "sigma_min must be below"),
+        ("/audio2audio", {"audio_data": wav, "host_bpm": 123, "prompt": "Synth"}, 503, "missing"),
         ("/generate", {"prompt": "Synth", "bars": 5, "bpm": 120}, 400, "4 or 8 bars"),
         ("/generate", {"prompt": "Synth", "bars": 4, "host_bpm": 1000}, 400, "between 20 and 999"),
         ("/generate", {"prompt": "Synth", "bars": 4, "host_bpm": 123}, 503, "missing"),
@@ -102,6 +124,7 @@ def main():
         ("/generate/loop", {"prompt": "drums", "bpm": 100, "bars": 8}, 400, "exceeds"),
         ("/generate", {"prompt": "drums", "seconds": 1}, 503, "missing"),
         ("/randomize", {}, 404, "Foundation-1 route"),
+        ("/audio2audio", {"prompt": "drums", "host_bpm": 120, "audio_data": wav}, 400, "Foundation-1 route"),
     ])
 
 

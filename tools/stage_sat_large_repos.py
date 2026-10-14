@@ -8,9 +8,11 @@ from pathlib import Path
 
 from model_artifacts import (
     SAOS_ENCODINGS,
+    SAT_LARGE_ENCODER_REPOS,
     SAT_LARGE_MODELS,
     SAT_LARGE_REPOS,
     sat_large_dit_filename,
+    sat_oobleck_encoder_filename,
     sat_oobleck_filename,
     sat_t5_128_filename,
 )
@@ -53,6 +55,10 @@ def component_source(models, model, component, encoding):
         if encoding == "F16":
             return models / "sao1-source" / "t5-base-encoder-128-f16.gguf"
         return models / "quantization" / "foundation" / f"t5-base-encoder-128-{encoding}.gguf"
+    if component == "encoder":
+        # Converted from the same SAOS checkpoint as the decoder:
+        # convert_sat_oobleck.py --part encoder --out-type f16
+        return models / "publication-v2" / sat_oobleck_encoder_filename()
     return (models / "publication-v2" /
             f"stable-audio-open-small-oobleck-v1.0-{encoding}.gguf")
 
@@ -108,6 +114,8 @@ def stage_model(model, args, hf_hub_download):
             ("t5", sat_t5_128_filename(encoding)),
             ("oobleck", sat_oobleck_filename(encoding)),
         )
+        if encoding == "F16" and model in SAT_LARGE_ENCODER_REPOS:
+            entries += (("encoder", sat_oobleck_encoder_filename()),)
         for component, relative in entries:
             source = component_source(args.models_dir, model, component, encoding)
             if not source.is_file():

@@ -88,17 +88,101 @@ def synthetic_state(prefix="pretransform.model."):
     return sd
 
 
+def synthetic_encoder_state(prefix="pretransform.model."):
+    """The tiny_config encoder: in 2 -> 2 channels, stages 2 -> 2 and 2 -> 4, out to 4 moments."""
+    sd = {}
+    add_wn(sd, prefix + "encoder.layers.0", 2, 2, 7)
+    sd[prefix + "encoder.layers.0.bias"] = np.arange(2, dtype=np.float32)
+    channels = [(2, 2, 2), (2, 4, 4)]  # in, out, stride
+    for block, (inc, outc, stride) in enumerate(channels):
+        p = prefix + f"encoder.layers.{block + 1}.layers."
+        for residual in range(3):
+            rp = p + f"{residual}.layers."
+            add_snake(sd, rp + "0", inc)
+            add_wn(sd, rp + "1", inc, inc, 7)
+            sd[rp + "1.bias"] = np.arange(inc, dtype=np.float32)
+            add_snake(sd, rp + "2", inc)
+            add_wn(sd, rp + "3", inc, inc, 1)
+            sd[rp + "3.bias"] = np.arange(inc, dtype=np.float32)
+        add_snake(sd, p + "3", inc)
+        add_wn(sd, p + "4", outc, inc, 2 * stride, scale=block + 1)
+        sd[p + "4.bias"] = np.arange(outc, dtype=np.float32)
+    add_snake(sd, prefix + "encoder.layers.3", 4)
+    add_wn(sd, prefix + "encoder.layers.4", 4, 4, 3)
+    sd[prefix + "encoder.layers.4.bias"] = np.arange(4, dtype=np.float32)
+    return sd
+
+
 @unittest.skipIf(DEPENDENCY_ERROR is not None,
                  f"converter dependencies unavailable: {DEPENDENCY_ERROR}")
 class SatOobleckConverterTest(unittest.TestCase):
-    def convert_fixture(self, sd, weight_type="f32"):
+    def convert_fixture(self, sd, weight_type="f32", part="decoder"):
         temp = tempfile.TemporaryDirectory()
         root = Path(temp.name)
         src, config, out = root / "model.safetensors", root / "model.json", root / "ae.gguf"
         save_file(sd, str(src))
         config.write_text(json.dumps(tiny_config()), encoding="utf-8")
-        result = convert(src, config, out, weight_type=weight_type)
+        result = convert(src, config, out, weight_type=weight_type, part=part)
         return temp, result, GGUFReader(str(out))
+
+    def test_encoder_is_a_separate_complete_file(self):
+        # A full checkpoint holds both halves; the encoder file takes only its own.
+        sd = {**synthetic_state(), **synthetic_encoder_state()}
+        temp, result, reader = self.convert_fixture(sd, part="encoder")
+        self.addCleanup(temp.cleanup)
+        tensors = {str(t.name): np.array(t.data) for t in reader.tensors}
+        self.assertEqual(set(tensors), {
+            "ae.encoder.in.weight", "ae.encoder.in.bias",
+            "ae.encoder.out_snake.alpha_exp", "ae.encoder.out_snake.beta_recip",
+            "ae.encoder.out.weight", "ae.encoder.out.bias",
+            *{
+                f"ae.encoder.blocks.{b}.{suffix}"
+                for b in range(2)
+                for suffix in (
+                    "snake.alpha_exp", "snake.beta_recip", "down.weight", "down.bias",
+                    *tuple(
+                        f"res.{r}.{leaf}"
+                        for r in range(3)
+                        for leaf in (
+                            "snake1.alpha_exp", "snake1.beta_recip", "conv1.weight", "conv1.bias",
+                            "snake2.alpha_exp", "snake2.beta_recip", "conv2.weight", "conv2.bias",
+                        )
+                    ),
+                )
+            },
+        })
+        self.assertEqual(result["tensor_count"], len(tensors))
+        field = reader.fields["sat.ae.part"]
+        self.assertEqual(bytes(field.parts[field.data[0]]).decode(), "encoder")
+        prefix = "pretransform.model.encoder.layers.2.layers."
+        np.testing.assert_allclose(
+            tensors["ae.encoder.blocks.1.down.weight"],
+            fuse_weight_norm(sd[prefix + "4.weight_g"], sd[prefix + "4.weight_v"]),
+        )
+        np.testing.assert_allclose(
+            tensors["ae.encoder.blocks.1.snake.beta_recip"], np.exp(-sd[prefix + "3.beta"]))
+
+    def test_decoder_file_has_no_part_tag(self):
+        temp, _, reader = self.convert_fixture({**synthetic_state(), **synthetic_encoder_state()})
+        self.addCleanup(temp.cleanup)
+        self.assertNotIn("sat.ae.part", reader.fields)
+        self.assertFalse(any(str(t.name).startswith("ae.encoder.") for t in reader.tensors))
+
+    def test_encoder_missing_or_unknown_tensor_is_fatal(self):
+        for change, message in (
+            (lambda sd: sd.pop("pretransform.model.encoder.layers.1.layers.4.bias"), "missing encoder tensor"),
+            (lambda sd: sd.__setitem__("pretransform.model.encoder.surprise", np.ones(1, np.float32)),
+             "unrecognized encoder tensors"),
+        ):
+            sd = synthetic_encoder_state()
+            change(sd)
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                src, config, out = root / "model.safetensors", root / "model.json", root / "ae.gguf"
+                save_file(sd, str(src))
+                config.write_text(json.dumps(tiny_config()), encoding="utf-8")
+                with self.assertRaisesRegex(ConversionError, message):
+                    convert(src, config, out, part="encoder")
 
     def test_complete_conversion_and_transforms(self):
         sd = synthetic_state()

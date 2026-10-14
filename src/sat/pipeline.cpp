@@ -92,6 +92,70 @@ std::vector<PromptEncoding> encode_t5_prompts(const UnigramTokenizer& tokenizer,
     return results;
 }
 
+double softplus(double x) {
+    return x > 20.0 ? x : std::log1p(std::exp(x));
+}
+
+// The latent stable-audio-tools' variation path starts from: the init audio at
+// the model's rate, cropped or zero-padded to the canvas, Oobleck-encoded, and
+// drawn from the VAE posterior (mean + N(0, 1) * (softplus(scale) + 1e-4)).
+// Returned frame-major [frame, channel], the sampler's layout.
+std::vector<float> encode_init_audio(const GgufModel& encoder, const GenerateParams& params,
+                                     int frames) {
+    if (!oobleck_is_encoder(encoder))
+        throw std::invalid_argument("the encoder path does not hold an Oobleck encoder GGUF");
+    const OobleckSpec c = oobleck_spec_from(encoder);
+    const int sample_rate = (int)encoder.u32("sat.sample_rate");
+    int samples = params.init_n_samp;
+    std::vector<float> resampled = resample_planar_linear(
+        params.init_audio, params.init_n_samp, params.init_n_ch,
+        params.init_sample_rate, sample_rate, samples);
+    const int canvas = frames * c.downsampling_ratio();
+    const int copied = std::min(samples, canvas);
+    std::vector<float> audio((size_t)canvas * c.audio_channels, 0.0f);
+    for (int channel = 0; channel < c.audio_channels; ++channel) {
+        const int source = std::min(channel, params.init_n_ch - 1);
+        std::copy_n(resampled.data() + (size_t)source * samples, copied,
+                    audio.data() + (size_t)channel * canvas);
+    }
+
+    GraphArena arena;
+    ggml_init_params ip = {(size_t)64 * 1024 * 1024, nullptr, true};
+    arena.ctx = ggml_init(ip);
+    if (!arena.ctx) throw std::runtime_error("failed to create encoder graph context");
+    ggml_tensor* input = ggml_new_tensor_2d(arena.ctx, GGML_TYPE_F32, canvas, c.audio_channels);
+    ggml_set_input(input);
+    ggml_tensor* moments = ggml_cont(arena.ctx, oobleck_encode(arena.ctx, encoder, input, c));
+    ggml_set_output(moments);
+    ggml_cgraph* graph = ggml_new_graph_custom(arena.ctx, 32768, false);
+    ggml_build_forward_expand(graph, moments);
+    arena.alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(encoder.backend));
+    if (!arena.alloc || !ggml_gallocr_alloc_graph(arena.alloc, graph))
+        throw std::runtime_error("failed to allocate Oobleck encoder graph");
+    ggml_backend_tensor_set(input, audio.data(), 0, audio.size() * sizeof(float));
+    std::string error;
+    if (!graph_compute_checked(encoder.backend, graph, "SAT Oobleck encode", error))
+        throw std::runtime_error(error);
+    if (moments->ne[0] != frames || moments->ne[1] != 2 * c.latent_channels)
+        throw std::runtime_error("Oobleck encoder output does not match the latent canvas");
+    std::vector<float> m((size_t)ggml_nelements(moments));
+    ggml_backend_tensor_get(moments, m.data(), 0, m.size() * sizeof(float));
+
+    // A stream of its own, so audio-to-audio leaves the sampler's noise untouched.
+    Rng rng(params.seed ^ UINT64_C(0x5ae7c0de0b1ec7a5));
+    std::vector<float> noise((size_t)frames * c.latent_channels);
+    rng.fill_normal(noise.data(), noise.size());
+    std::vector<float> latent((size_t)frames * c.latent_channels);
+    for (int frame = 0; frame < frames; ++frame)
+        for (int channel = 0; channel < c.latent_channels; ++channel) {
+            const float mean = m[(size_t)channel * frames + frame];
+            const float scale = m[(size_t)(channel + c.latent_channels) * frames + frame];
+            const size_t i = (size_t)frame * c.latent_channels + channel;
+            latent[i] = mean + noise[i] * (float)(softplus(scale) + 1e-4);
+        }
+    return latent;
+}
+
 Sampler default_sampler(const std::string& objective) {
     if (objective == "rf_denoiser") return Sampler::PingPong;
     if (objective == "v") return Sampler::Dpmpp3mSde;
@@ -127,6 +191,7 @@ struct Pipeline::ResidentModels {
     std::unique_ptr<GgufModel> t5;
     std::unique_ptr<GgufModel> dit;
     std::unique_ptr<GgufModel> ae;
+    std::unique_ptr<GgufModel> encoder;
 };
 
 Pipeline::Pipeline() = default;
@@ -173,6 +238,18 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
         throw std::invalid_argument("cross and global conditioning overrides must be supplied together");
     if (!conditioning_override && (paths_.t5.empty() || params.prompt.empty()))
         throw std::invalid_argument("native SAT conditioning requires T5 and a prompt");
+    const bool has_init = !params.init_audio.empty();
+    if (has_init) {
+        if (paths_.encoder.empty())
+            throw std::invalid_argument("audio-to-audio needs the Oobleck encoder GGUF");
+        if (params.init_n_samp < 1 || params.init_n_ch < 1 || params.init_sample_rate < 1 ||
+            params.init_audio.size() != (size_t)params.init_n_samp * params.init_n_ch)
+            throw std::invalid_argument("init audio does not match its declared shape");
+        if (!std::isfinite(params.init_noise_level) || !(params.init_noise_level > 0.0f))
+            throw std::invalid_argument("init_noise_level must be positive");
+        if (!params.initial_latent.empty())
+            throw std::invalid_argument("init audio and an initial latent are mutually exclusive");
+    }
 
     const auto check_cancel = [&]() {
         if (params.should_cancel && params.should_cancel()) throw GenerateCancelled();
@@ -220,6 +297,18 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
         result.max_prompt_tokens = encoded.front().max_tokens;
     }
 
+    // Encoded before the DiT loads, so the two never share memory unless resident.
+    std::vector<float> init_latent;
+    if (has_init) {
+        const double start = now_s();
+        load_model(models.encoder, paths_.encoder);
+        check_cancel();
+        notify(PipelineStage::Encoding);
+        init_latent = encode_init_audio(*models.encoder, params, params.frames);
+        if (!params.keep_models) models.encoder.reset();
+        result.timing.init_encode_s = now_s() - start;
+    }
+
     DitSpec dc;
     std::vector<float> x;
     {
@@ -241,13 +330,21 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
             throw std::invalid_argument("k-diffusion SDE samplers are not supported by the RF pipeline");
         if (v_prediction && !sde_sampler)
             throw std::invalid_argument("V-prediction currently requires dpmpp-2m-sde or dpmpp-3m-sde");
+        if (has_init && !v_prediction)
+            throw std::invalid_argument("audio-to-audio currently requires a V-prediction model");
+        if (has_init && init_latent.size() != (size_t)dc.io_channels * params.frames)
+            throw std::runtime_error("the Oobleck encoder and DiT latent widths differ");
         result.steps = params.steps > 0 ? params.steps
             : (result.objective == "rf_denoiser" ? 8 : (v_prediction ? 100 : 50));
         result.cfg_scale = params.cfg_scale >= 0.0f ? params.cfg_scale
             : (result.objective == "rf_denoiser" ? 1.0f : (v_prediction ? 7.0f : 4.0f));
         if (v_prediction) {
             result.sigma_min = params.sigma_min > 0.0f ? params.sigma_min : 0.3f;
-            result.sigma_max = params.sigma_max > 0.0f ? params.sigma_max : 500.0f;
+            // stable-audio-tools starts variations at the init noise level.
+            result.sigma_max = has_init ? params.init_noise_level
+                : params.sigma_max > 0.0f ? params.sigma_max : 500.0f;
+            if (has_init && result.sigma_min >= result.sigma_max)
+                throw std::invalid_argument("init_noise_level must be above sigma_min");
             result.sigma_rho = params.sigma_rho;
             result.sde_eta = params.sde_eta;
         }
@@ -346,6 +443,7 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
             : sampling::make_rf_logsnr_schedule(result.steps);
         if (v_prediction)
             for (float& value : x) value *= schedule.front();
+        for (size_t j = 0; j < init_latent.size(); ++j) x[j] += init_latent[j];
         sampling::RfDpmppState dpmpp;
         sampling::VPredictionDpmppState v_dpmpp;
         std::vector<double> step_ms;
