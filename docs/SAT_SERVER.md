@@ -45,6 +45,19 @@ second duration conditioning, and padded Oobleck frame count. The default
 is also available. `steps`, `guidance_scale`/`cfg_scale`, `sampler`,
 `sigma_min`, `sigma_max`, `sigma_rho`/`rho`, and `sde_eta` can override the profile.
 
+`POST /randomize` returns a whole preset from the same native prompt engine,
+split into the controls a plugin shows, without loading the model. It keeps
+gary4local's Python request and response contract: the request takes `seed`
+(`-1` or omitted draws one below 2^31), `mode` (`standard` or `mix`),
+`variant` (`auto`, `M1`, or `T1`, where `T1` means mix) and `family_hint`.
+The response carries `family` and `subfamily`; `descriptor_knob_a` to `_c`
+and `descriptors_extra` (timbre); `spatial_tags`, `band_tags`,
+`wave_tech_tags` and `style_tags`; `reverb_amount`, `delay_type`,
+`distortion_amount`, `phaser_amount` and `bitcrush_amount`, each with an
+`_enabled` flag; `speed`, `structure`, `rhythm`, `contour` and `density`
+(with `behavior_tags` holding all of them); `all_tags`; and the joined
+descriptor `prompt`. The same seed always gives the same preset.
+
 `host_bpm` accepts 20–999 BPM. When it falls between the model's trained tempos,
 the server selects the nearest model BPM and applies a pitch-preserving offline
 stretch to the final audio. An explicit `bpm` locks the model tempo. The response
@@ -53,6 +66,25 @@ has the exact host bar length. The stretch uses the MIT-licensed Signalsmith
 Stretch/Linear headers already built into `sat-server`; it adds no DLL to the
 runtime package. Large tempo ratios can audibly degrade the result, so musical
 quality should be checked in downstream host workflows.
+
+`POST /audio2audio` transforms input audio toward a Foundation prompt, keeping
+gary4local's Python contract. It takes the `/generate` body plus `audio_data` (a
+base64 WAV) and `host_bpm`, both required; `bars` defaults to 8 and `prompt` is
+accepted as the descriptor. `init_noise_level` (0.01–1, default 0.25) says how far
+to move from the input: it is the noise the input latent starts from and the
+schedule's `sigma_max`. The input is cropped or zero-padded to the bars at the host
+tempo, stretched to the model BPM, encoded, and the result is stretched back to the
+host tempo like any `/generate` output. The response and polling add `mode:
+"audio2audio"` and `init_noise_level`.
+
+The schedule has to descend from the init noise level. When the profile's
+`sigma_min` is at or above it (the `gary` profile's 0.5 sits above most of
+gary4juce's range), the request uses RoyalCities' 0.01 floor instead; Python's
+service ran the rising schedule, which returns NaN. An explicit `sigma_min` at or
+above the level is refused. Audio-to-audio needs
+`stable-audio-open-oobleck-encoder-v1.0-F16.gguf` beside the model files, from the
+Foundation-1 GGUF repository; without it the route answers `503` and generation is
+unaffected.
 
 ## SAOS and finetunes
 

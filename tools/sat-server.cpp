@@ -60,6 +60,8 @@ struct Job {
     double host_bpm = 0;
     double seconds = 0;
     uint64_t seed = 0;
+    std::string mode;              // "audio2audio", or empty for generation
+    double init_noise_level = 0;
     std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
 };
 
@@ -115,6 +117,33 @@ std::string b64_encode(const std::string& input) {
         output += alphabet[(n >> 18) & 63]; output += alphabet[(n >> 12) & 63];
         output += i + 1 < input.size() ? alphabet[(n >> 6) & 63] : '=';
         output += '=';
+    }
+    return output;
+}
+
+std::string b64_decode(const std::string& input) {
+    auto value = [](unsigned char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+' || c == '-') return 62;
+        if (c == '/' || c == '_') return 63;
+        return -1;
+    };
+    std::string output;
+    output.reserve(input.size() / 4 * 3);
+    unsigned buffer = 0;
+    int bits = 0;
+    for (unsigned char c : input) {
+        if (c == '=' || std::isspace(c)) continue;
+        const int v = value(c);
+        if (v < 0) throw std::invalid_argument("audio_data is not valid base64");
+        buffer = (buffer << 6) | (unsigned)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            output += (char)((buffer >> bits) & 0xff);
+        }
     }
     return output;
 }
@@ -252,6 +281,74 @@ std::string foundation_prompt_with_tags(std::string descriptor, int bars, int bp
     return descriptor;
 }
 
+std::string json_strings(const std::vector<std::string>& values) {
+    std::string out = "[";
+    for (const auto& value : values) {
+        if (out.size() > 1) out += ",";
+        out += "\"" + escape(value) + "\"";
+    }
+    return out + "]";
+}
+
+// POST /randomize: a whole Foundation preset from the native prompt engine,
+// split into the controls a plugin shows. The request and response keep
+// gary4local's Python /randomize contract, which gary4juce reads field by
+// field: seed (-1 or omitted for random), mode (standard or mix), variant
+// (auto, M1 or T1, where T1 means mix) and family_hint.
+std::string foundation_randomize_json(yyjson_val* root) {
+    // A drawn seed stays within 31 bits, as Python's did: gary4juce reads it
+    // back as an int to show in its seed box.
+    yyjson_val* given = yyjson_obj_get(root, "seed");
+    const bool drawn = !given || yyjson_is_null(given) ||
+                       (yyjson_is_sint(given) && yyjson_get_sint(given) == -1);
+    uint64_t seed = seed_field(root);
+    if (drawn) seed &= 0x7fffffffu;
+    const auto mode = sa3::sat::parse_foundation_prompt_mode(string_field(root, "mode", "standard"));
+    std::string variant = string_field(root, "variant", "auto");
+    if (variant != "auto" && variant != "M1" && variant != "T1")
+        throw std::invalid_argument("variant must be auto, M1 or T1");
+    const bool mix = mode == sa3::sat::FoundationPromptMode::Mix || variant == "T1";
+    if (variant == "auto") variant = mix ? "T1" : "M1";
+    const auto prompt = sa3::sat::randomize_foundation_prompt(
+        seed, mix ? sa3::sat::FoundationPromptMode::Mix : sa3::sat::FoundationPromptMode::Standard,
+        string_field(root, "family_hint"));
+    const auto parts = sa3::sat::decompose_foundation_prompt(prompt);
+
+    auto knob = [&](size_t i) { return i < parts.descriptors.size() ? parts.descriptors[i] : std::string(); };
+    const std::vector<std::string> extras(
+        parts.descriptors.begin() + (long)std::min<size_t>(3, parts.descriptors.size()), parts.descriptors.end());
+    auto fx = [](const char* name, const char* value_key, const std::string& value) {
+        return std::string(",\"") + name + "_enabled\":" + (value.empty() ? "false" : "true") +
+            ",\"" + value_key + "\":\"" + escape(value) + "\"";
+    };
+    return "{\"success\":true,\"seed\":" + std::to_string(seed) +
+        ",\"mode\":\"" + sa3::sat::foundation_prompt_mode_name(mode) +
+        "\",\"variant\":\"" + variant +
+        "\",\"family\":\"" + escape(prompt.family) +
+        "\",\"subfamily\":\"" + escape(prompt.subfamily) +
+        "\",\"descriptor_knob_a\":\"" + escape(knob(0)) +
+        "\",\"descriptor_knob_b\":\"" + escape(knob(1)) +
+        "\",\"descriptor_knob_c\":\"" + escape(knob(2)) +
+        "\",\"descriptors_extra\":" + json_strings(extras) +
+        fx("reverb", "reverb_amount", parts.reverb) +
+        fx("delay", "delay_type", parts.delay) +
+        fx("distortion", "distortion_amount", parts.distortion) +
+        fx("phaser", "phaser_amount", parts.phaser) +
+        fx("bitcrush", "bitcrush_amount", parts.bitcrush) +
+        ",\"behavior_tags\":" + json_strings(prompt.melody) +
+        ",\"speed\":\"" + escape(parts.speed) +
+        "\",\"structure\":\"" + escape(parts.structure) +
+        "\",\"rhythm\":" + json_strings(parts.rhythm) +
+        ",\"contour\":" + json_strings(parts.contour) +
+        ",\"density\":" + json_strings(parts.density) +
+        ",\"spatial_tags\":" + json_strings(parts.spatial) +
+        ",\"band_tags\":" + json_strings(parts.bands) +
+        ",\"wave_tech_tags\":" + json_strings(parts.wave_tech) +
+        ",\"style_tags\":" + json_strings(parts.styles) +
+        ",\"all_tags\":" + json_strings(prompt.tags) +
+        ",\"prompt\":\"" + escape(prompt.description) + "\"}";
+}
+
 struct Prepared {
     sa3::sat::GenerateParams params;
     int bars = 0;
@@ -259,15 +356,23 @@ struct Prepared {
     double host_bpm = 0;
     double seconds = 0;
     int stretched_samples = 0;
+    std::string mode;
 };
 
-Prepared prepare(const Config& config, yyjson_val* root, bool loop) {
+// Audio-to-audio keeps gary4local's Python /audio2audio contract: audio_data
+// (base64 WAV) and host_bpm are required, bars defaults to 8, and
+// init_noise_level (0.01-1, default 0.25) says how far from the input to go.
+// The input is stretched from host_bpm to the model BPM before encoding, and
+// the result back afterwards, as Python did.
+Prepared prepare(const Config& config, yyjson_val* root, bool loop, bool audio2audio = false) {
     Prepared out;
     auto& p = out.params;
     p.prompt = string_field(root, "prompt");
     p.negative_prompt = string_field(root, "negative_prompt");
     p.seed = seed_field(root);
     p.keep_models = true;
+    if (audio2audio && string_field(root, "audio_data").empty())
+        throw std::invalid_argument("audio_data (base64 WAV) is required");
 
     const std::string requested_model = string_field(root, "model", config.model);
     if (requested_model != config.model &&
@@ -281,7 +386,9 @@ Prepared prepare(const Config& config, yyjson_val* root, bool loop) {
         const bool randomize = bool_field(root, "randomize");
         const auto controls = randomize ? sa3::sat::randomize_foundation_controls(p.seed)
                                         : sa3::sat::FoundationRandomControls{};
-        int bars = int_field(root, "bars", randomize ? controls.bars : 4);
+        if (audio2audio && !has_field(root, "host_bpm"))
+            throw std::invalid_argument("host_bpm is required for audio2audio");
+        int bars = int_field(root, "bars", audio2audio ? 8 : randomize ? controls.bars : 4);
         double host_bpm = number_field(root, "host_bpm", 0);
         int bpm = int_field(root, "bpm", host_bpm > 0 ? nearest_foundation_bpm(host_bpm) :
                                       randomize ? controls.bpm : 120);
@@ -371,6 +478,53 @@ Prepared prepare(const Config& config, yyjson_val* root, bool loop) {
         (p.cfg_scale < 0 && p.cfg_scale != -1.0f) ||
         p.sigma_rho <= 0 || p.sde_eta < 0)
         throw std::invalid_argument("invalid SAT sampler settings");
+
+    if (audio2audio) {
+        if (config.family != Family::Foundation)
+            throw std::invalid_argument("audio2audio is a Foundation-1 route");
+        const std::string bytes = b64_decode(string_field(root, "audio_data"));
+        int samples = 0, channels = 0, rate = 0;
+        std::vector<float> audio = sa3::read_wav_planar_bytes(
+            (const uint8_t*)bytes.data(), bytes.size(), "audio_data", samples, channels, rate);
+        // Played at the model's tempo, host audio lasts host_bpm / bpm times as long.
+        const double ratio = out.host_bpm / out.bpm;
+        // Only the canvas is encoded, so stretch exactly what it needs (and a
+        // second spare): longer input is cropped, and shorter input is padded
+        // with the silence the canvas would have added anyway, which also keeps
+        // a one-bar recording long enough for the stretcher.
+        const int needed = (int)std::ceil((double)p.frames * 2048 / 44100.0 * rate / ratio) + rate;
+        if (samples != needed) {
+            std::vector<float> fitted((size_t)needed * channels, 0.0f);
+            for (int c = 0; c < channels; ++c)
+                std::copy_n(audio.data() + (size_t)c * samples, std::min(samples, needed),
+                            fitted.data() + (size_t)c * needed);
+            audio = std::move(fitted);
+            samples = needed;
+        }
+        if (std::abs(ratio - 1.0) >= 0.001) {
+            const int stretched = std::max(1, (int)std::llround(samples * ratio));
+            audio = sa3::sat::stretch_planar_exact(audio, channels, samples, stretched, rate);
+            samples = stretched;
+        }
+        p.init_audio = std::move(audio);
+        p.init_n_samp = samples;
+        p.init_n_ch = channels;
+        p.init_sample_rate = rate;
+        p.init_noise_level = (float)std::clamp(number_field(root, "init_noise_level", 0.25), 0.01, 1.0);
+        // Variations start at the init noise level and must descend from it.
+        // The gary profile's sigma_min of 0.5 sits above the lower half of
+        // gary4juce's transformation range, and k-diffusion's SDE samplers
+        // return NaN on the rising schedule that makes (gary4local's Python
+        // service did). Such requests use RoyalCities' 0.01 floor instead (or
+        // half the level, below that); an explicit sigma_min at or above the
+        // level is refused.
+        if (p.sigma_min >= p.init_noise_level) {
+            if (has_field(root, "sigma_min"))
+                throw std::invalid_argument("sigma_min must be below init_noise_level");
+            p.sigma_min = std::min(0.01f, p.init_noise_level / 2);
+        }
+        out.mode = "audio2audio";
+    }
     return out;
 }
 
@@ -401,7 +555,8 @@ void launch(const Config& config, const std::string& sid, Prepared prepared) {
             sa3::sat::PipelinePaths paths;
             std::string error;
             if (!resolve_paths(config, paths, error)) throw std::runtime_error(error);
-            if (!g_pipeline) {
+            // A newly downloaded encoder changes the paths; rebuild to pick it up.
+            if (!g_pipeline || g_pipeline->paths().encoder != paths.encoder) {
                 sa3::sat::PipelineOptions options;
                 options.device = config.device;
                 auto pipeline = std::make_unique<sa3::sat::Pipeline>(std::move(paths), options);
@@ -504,7 +659,8 @@ int main(int argc, char** argv) {
         }
         const Config config = parse_args(argc, argv);
         httplib::Server server;
-        server.set_payload_max_length(64 * 1024);
+        // audio2audio carries a base64 WAV; gary4juce sends up to 240 seconds.
+        server.set_payload_max_length((size_t)192 * 1024 * 1024);
         server.Get("/props", [](const httplib::Request&, httplib::Response& res) {
             res.set_content(sa3::runtime_props_json("sat"), "application/json");
         });
@@ -531,7 +687,8 @@ int main(int argc, char** argv) {
             res.set_content(std::string("{\"ready\":") + (ready ? "true}" : "false}"), "application/json");
             if (!ready) res.status = 503;
         });
-        auto generate = [config](const httplib::Request& req, httplib::Response& res, bool loop) {
+        auto generate = [config](const httplib::Request& req, httplib::Response& res, bool loop,
+                                 bool audio2audio) {
             yyjson_doc* doc = yyjson_read(req.body.data(), req.body.size(), 0);
             if (!doc || !yyjson_is_obj(yyjson_doc_get_root(doc))) {
                 if (doc) yyjson_doc_free(doc);
@@ -539,12 +696,17 @@ int main(int argc, char** argv) {
                 return;
             }
             try {
-                Prepared prepared = prepare(config, yyjson_doc_get_root(doc), loop);
+                Prepared prepared = prepare(config, yyjson_doc_get_root(doc), loop, audio2audio);
                 yyjson_doc_free(doc);
                 doc = nullptr;
                 sa3::sat::PipelinePaths paths;
                 std::string error;
                 if (!resolve_paths(config, paths, error)) { fail(res, 503, error); return; }
+                if (audio2audio && paths.encoder.empty()) {
+                    fail(res, 503, "audio2audio needs " + sa3::sat::sat_oobleck_encoder_relative_path() +
+                                   " in " + config.models_dir);
+                    return;
+                }
                 const std::string sid = session_id();
                 const uint64_t seed = prepared.params.seed;
                 const int bars = prepared.bars;
@@ -552,6 +714,9 @@ int main(int argc, char** argv) {
                 const double host_bpm = prepared.host_bpm;
                 const double seconds = prepared.seconds;
                 const std::string prompt = prepared.params.prompt;
+                const std::string mode = prepared.mode;
+                const double init_noise_level = prepared.params.init_noise_level;
+                const double sigma_min = prepared.params.sigma_min;
                 {
                     std::lock_guard<std::mutex> guard(g_mutex);
                     if (g_busy) { fail(res, 409, "generation already in progress"); return; }
@@ -565,6 +730,8 @@ int main(int argc, char** argv) {
                     job.bpm = bpm;
                     job.host_bpm = host_bpm;
                     job.seconds = seconds;
+                    job.mode = mode;
+                    if (audio2audio) job.init_noise_level = init_noise_level;
                     g_jobs.emplace(sid, std::move(job));
                 }
                 try { launch(config, sid, std::move(prepared)); }
@@ -581,17 +748,44 @@ int main(int argc, char** argv) {
                     ",\"foundation_bpm\":" + number(bpm) +
                     ",\"host_bpm\":" + number(host_bpm) +
                     ",\"stretch_ratio\":" + number(host_bpm > 0 ? host_bpm / bpm : 1) +
-                    ",\"gen_duration\":" + number(seconds) + "}", "application/json");
+                    ",\"gen_duration\":" + number(seconds) +
+                    (audio2audio ? ",\"mode\":\"audio2audio\",\"init_noise_level\":" +
+                                       number(init_noise_level) + ",\"sigma_min\":" + number(sigma_min) +
+                                       ",\"sigma_max\":" + number(init_noise_level) : std::string()) +
+                    "}", "application/json");
             } catch (const std::exception& e) {
                 if (doc) yyjson_doc_free(doc);
                 fail(res, 400, e.what());
             }
         };
         server.Post("/generate", [generate](const httplib::Request& req, httplib::Response& res) {
-            generate(req, res, false);
+            generate(req, res, false, false);
         });
         server.Post("/generate/loop", [generate](const httplib::Request& req, httplib::Response& res) {
-            generate(req, res, true);
+            generate(req, res, true, false);
+        });
+        server.Post("/audio2audio", [generate](const httplib::Request& req, httplib::Response& res) {
+            generate(req, res, false, true);
+        });
+        server.Post("/randomize", [config](const httplib::Request& req, httplib::Response& res) {
+            if (config.family != Family::Foundation) {
+                fail(res, 404, "randomize is a Foundation-1 route");
+                return;
+            }
+            // An empty body asks for a random preset.
+            const std::string body = req.body.empty() ? "{}" : req.body;
+            yyjson_doc* doc = yyjson_read(body.data(), body.size(), 0);
+            if (!doc || !yyjson_is_obj(yyjson_doc_get_root(doc))) {
+                if (doc) yyjson_doc_free(doc);
+                fail(res, 400, "JSON object required");
+                return;
+            }
+            try {
+                res.set_content(foundation_randomize_json(yyjson_doc_get_root(doc)), "application/json");
+            } catch (const std::exception& e) {
+                fail(res, 400, e.what());
+            }
+            yyjson_doc_free(doc);
         });
         server.Get(R"(/poll_status/([a-f0-9]+))", [](const httplib::Request& req, httplib::Response& res) {
             const std::string sid = req.matches[1];
@@ -621,7 +815,9 @@ int main(int argc, char** argv) {
                 "\",\"bars\":" + std::to_string(job.bars) + ",\"bpm\":" + number(job.bpm) +
                 ",\"foundation_bpm\":" + number(job.bpm) +
                 ",\"host_bpm\":" + number(job.host_bpm) +
-                ",\"final_duration\":" + number(job.seconds) + "}";
+                ",\"final_duration\":" + number(job.seconds) +
+                (job.mode.empty() ? std::string() : ",\"mode\":\"" + job.mode +
+                    "\",\"init_noise_level\":" + number(job.init_noise_level)) + "}";
             if (job.status == "completed") body += ",\"audio_data\":\"" + job.audio + "\"";
             if (job.status == "failed") body += ",\"error\":\"" + escape(job.error) + "\"";
             res.set_content(body + "}", "application/json");

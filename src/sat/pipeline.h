@@ -21,6 +21,9 @@ struct PipelinePaths {
     std::string dit;
     std::string autoencoder;
     std::string t5;
+    // Optional Oobleck encoder GGUF (a separate file from the decoder), needed
+    // only for audio-to-audio.
+    std::string encoder;
 };
 
 struct PipelineOptions {
@@ -59,6 +62,18 @@ struct GenerateParams {
     float sde_eta = 1.0f;
     uint64_t seed = 1234;
     Sampler sampler = Sampler::Auto;
+
+    // Audio-to-audio for V-prediction models, as stable-audio-tools' variations:
+    // init_audio (planar [init_n_ch][init_n_samp] at init_sample_rate; mono is
+    // used for both channels) is resampled to the model rate, cropped or
+    // zero-padded to the latent canvas and encoded with PipelinePaths::encoder.
+    // Sampling starts from that latent noised to init_noise_level, which also
+    // replaces sigma_max. Empty means text-to-audio.
+    std::vector<float> init_audio;
+    int init_n_samp = 0;
+    int init_n_ch = 0;
+    int init_sample_rate = 44100;
+    float init_noise_level = 1.0f;
     // Shared post-decode SA3 loudness controls. Latent fields are currently no-ops for SAT.
     LoudnessParams loudness;
 
@@ -71,8 +86,8 @@ struct GenerateParams {
     std::function<void(PipelineStage)> stage;
     // Polled before each stage and sampler step; true aborts with GenerateCancelled.
     std::function<bool()> should_cancel;
-    // Keep T5, DiT, and Oobleck weights loaded after this call so the next generate()
-    // skips loading. Pipeline::unload() releases them.
+    // Keep T5, DiT, and Oobleck (and encoder) weights loaded after this call so the next
+    // generate() skips loading. Pipeline::unload() releases them.
     bool keep_models = false;
 };
 
@@ -82,6 +97,7 @@ struct GenerateTiming {
     double dit_build_s = 0.0;
     double denoise_s = 0.0;
     double warm_step_median_ms = 0.0;
+    double init_encode_s = 0.0;
     double ae_load_s = 0.0;
     double ae_build_s = 0.0;
     double decode_s = 0.0;

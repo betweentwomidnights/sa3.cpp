@@ -1,4 +1,5 @@
-// sat/oobleck.h -- config-driven Oobleck decoder graph for classic Stable Audio.
+// sat/oobleck.h -- config-driven Oobleck decoder and encoder graphs for classic
+// Stable Audio.
 //
 // The convolution/col2im formulation comes from the working acestep.cpp Oobleck port,
 // but this version is stateless over sa3::GgufModel and derives every channel/stride from
@@ -48,6 +49,15 @@ inline OobleckSpec oobleck_spec_from(const GgufModel& m) {
 //   ae.decoder.blocks.I.res.R.{conv1,conv2}.{weight,bias}
 //   ae.decoder.out_snake.{alpha_exp,beta_recip}
 //   ae.decoder.out.weight
+//
+// The encoder is a separate GGUF tagged sat.ae.part = "encoder":
+//   ae.encoder.in.{weight,bias}
+//   ae.encoder.blocks.I.res.R.{snake1,snake2}.{alpha_exp,beta_recip}
+//   ae.encoder.blocks.I.res.R.{conv1,conv2}.{weight,bias}
+//   ae.encoder.blocks.I.snake.{alpha_exp,beta_recip}
+//   ae.encoder.blocks.I.down.{weight,bias}
+//   ae.encoder.out_snake.{alpha_exp,beta_recip}
+//   ae.encoder.out.{weight,bias}
 //
 // Regular Conv1d weight: [kernel, in_channels, out_channels].
 // ConvTranspose col2im weight: [in_channels, kernel * out_channels].
@@ -152,6 +162,49 @@ inline ggml_tensor* oobleck_decode(ggml_context* ctx,
                       W.get("ae.decoder.out_snake.beta_recip"));
     x = oobleck_conv1d(ctx, W.get("ae.decoder.out.weight"), nullptr, x, 1, 3, 1);
     return c.final_tanh ? ggml_tanh(ctx, x) : x;
+}
+
+inline bool oobleck_is_encoder(const GgufModel& m) {
+    return m.has("ae.encoder.in.weight");
+}
+
+// audio is time-major [samples, audio_channels], samples a multiple of the
+// downsampling ratio; returns the VAE moments [frames, encoder_out_channels],
+// means in the first half of the channels and scales in the second.
+inline ggml_tensor* oobleck_encode(ggml_context* ctx,
+                                   const GgufModel& W,
+                                   ggml_tensor* audio,
+                                   const OobleckSpec& c) {
+    constexpr int dilations[3] = {1, 3, 9};
+    const int stages = (int)c.channel_multipliers.size();
+    ggml_tensor* x = oobleck_conv1d(ctx,
+                                    W.get("ae.encoder.in.weight"),
+                                    W.get("ae.encoder.in.bias"),
+                                    audio, 1, 3, 1);
+    for (int block = 0; block < stages; ++block) {
+        const std::string p = "ae.encoder.blocks." + std::to_string(block) + ".";
+        for (int r = 0; r < 3; ++r) {
+            x = oobleck_residual_unit(ctx, W,
+                                      p + "res." + std::to_string(r) + ".",
+                                      x, dilations[r]);
+        }
+        x = oobleck_snake(ctx, x,
+                          W.get(p + "snake.alpha_exp"),
+                          W.get(p + "snake.beta_recip"));
+        // Kernel 2*stride with padding ceil(stride/2) divides the length exactly.
+        const int stride = c.encoder_strides[(size_t)block];
+        x = oobleck_conv1d(ctx,
+                           W.get(p + "down.weight"),
+                           W.get(p + "down.bias"),
+                           x, stride, (stride + 1) / 2, 1);
+    }
+    x = oobleck_snake(ctx, x,
+                      W.get("ae.encoder.out_snake.alpha_exp"),
+                      W.get("ae.encoder.out_snake.beta_recip"));
+    return oobleck_conv1d(ctx,
+                          W.get("ae.encoder.out.weight"),
+                          W.get("ae.encoder.out.bias"),
+                          x, 1, 1, 1);
 }
 
 } // namespace sa3::sat

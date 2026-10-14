@@ -257,6 +257,16 @@ def sat_oobleck_filename(encoding):
     return f"stable-audio-open-oobleck-{VERSION}-{enc}.gguf"
 
 
+def sat_oobleck_encoder_filename():
+    """The Oobleck encoder audio-to-audio needs: one F16 file, the same for every
+    model that shares the Oobleck, kept apart from the decoder bundle."""
+    return f"stable-audio-open-oobleck-encoder-{VERSION}-F16.gguf"
+
+
+# Repositories that publish the encoder beside their bundle.
+SAT_LARGE_ENCODER_REPOS = ("foundation-1",)
+
+
 def build_sat_large_download_plan(namespace, model, encoding=SAT_DEFAULT_ENCODING,
                                   text_encoding=None, ae_encoding=None):
     """Return one self-contained SAO 1.0 or Foundation-1 repository bundle."""
@@ -266,8 +276,8 @@ def build_sat_large_download_plan(namespace, model, encoding=SAT_DEFAULT_ENCODIN
     enc = encoding.upper()
     text_enc = (text_encoding or enc).upper()
     ae_enc = (ae_encoding or enc).upper()
-    return [(
-        f"{namespace}/{SAT_LARGE_REPOS[model]}",
-        [sat_large_dit_filename(model, enc), sat_t5_128_filename(text_enc),
-         sat_oobleck_filename(ae_enc)],
-    )]
+    files = [sat_large_dit_filename(model, enc), sat_t5_128_filename(text_enc),
+             sat_oobleck_filename(ae_enc)]
+    if model in SAT_LARGE_ENCODER_REPOS:
+        files.append(sat_oobleck_encoder_filename())
+    return [(f"{namespace}/{SAT_LARGE_REPOS[model]}", files)]
