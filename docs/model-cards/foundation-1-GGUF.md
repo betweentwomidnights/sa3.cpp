@@ -40,7 +40,7 @@ value, and the padded Oobleck latent canvas independently to match RoyalCities' 
 Unsupported model BPMs are intentionally rejected by this profile. The native
 `sat-server` accepts `host_bpm`, maps it to the nearest trained BPM, and
 pitch-preserves the output at the host tempo. That service-level stretch does
-not change the GGML model primitives; see [SAT_SERVER.md](../SAT_SERVER.md).
+not change the GGML model primitives; see [SAT_SERVER.md](https://github.com/betweentwomidnights/sa3.cpp/blob/main/docs/SAT_SERVER.md).
 
 RoyalCities' UI profile uses DPM++ 3M SDE, sigma 0.01–100, 100 steps, and CFG 7. The
 gary4local fallback profile uses DPM++ 2M SDE, sigma 0.5–50, 100 steps, and CFG 7.
@@ -75,7 +75,7 @@ comes in one F16 tier for every bundle (149 MiB). Its 146 tensors are identical 
 converted from Foundation-1, Stable Audio Open 1.0 or Stable Audio Open Small; the
 GGML encoder's latent means and scales match PyTorch's with cosine 1.0000. `sat-server`'s
 `POST /audio2audio` loads it when it is beside the other files; see
-[SAT_SERVER.md](../SAT_SERVER.md). The published bundles are otherwise unchanged.
+[SAT_SERVER.md](https://github.com/betweentwomidnights/sa3.cpp/blob/main/docs/SAT_SERVER.md). The published bundles are otherwise unchanged.
 
 ## Sources and licensing
 
