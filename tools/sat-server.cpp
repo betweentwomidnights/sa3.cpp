@@ -252,6 +252,74 @@ std::string foundation_prompt_with_tags(std::string descriptor, int bars, int bp
     return descriptor;
 }
 
+std::string json_strings(const std::vector<std::string>& values) {
+    std::string out = "[";
+    for (const auto& value : values) {
+        if (out.size() > 1) out += ",";
+        out += "\"" + escape(value) + "\"";
+    }
+    return out + "]";
+}
+
+// POST /randomize: a whole Foundation preset from the native prompt engine,
+// split into the controls a plugin shows. The request and response keep
+// gary4local's Python /randomize contract, which gary4juce reads field by
+// field: seed (-1 or omitted for random), mode (standard or mix), variant
+// (auto, M1 or T1, where T1 means mix) and family_hint.
+std::string foundation_randomize_json(yyjson_val* root) {
+    // A drawn seed stays within 31 bits, as Python's did: gary4juce reads it
+    // back as an int to show in its seed box.
+    yyjson_val* given = yyjson_obj_get(root, "seed");
+    const bool drawn = !given || yyjson_is_null(given) ||
+                       (yyjson_is_sint(given) && yyjson_get_sint(given) == -1);
+    uint64_t seed = seed_field(root);
+    if (drawn) seed &= 0x7fffffffu;
+    const auto mode = sa3::sat::parse_foundation_prompt_mode(string_field(root, "mode", "standard"));
+    std::string variant = string_field(root, "variant", "auto");
+    if (variant != "auto" && variant != "M1" && variant != "T1")
+        throw std::invalid_argument("variant must be auto, M1 or T1");
+    const bool mix = mode == sa3::sat::FoundationPromptMode::Mix || variant == "T1";
+    if (variant == "auto") variant = mix ? "T1" : "M1";
+    const auto prompt = sa3::sat::randomize_foundation_prompt(
+        seed, mix ? sa3::sat::FoundationPromptMode::Mix : sa3::sat::FoundationPromptMode::Standard,
+        string_field(root, "family_hint"));
+    const auto parts = sa3::sat::decompose_foundation_prompt(prompt);
+
+    auto knob = [&](size_t i) { return i < parts.descriptors.size() ? parts.descriptors[i] : std::string(); };
+    const std::vector<std::string> extras(
+        parts.descriptors.begin() + (long)std::min<size_t>(3, parts.descriptors.size()), parts.descriptors.end());
+    auto fx = [](const char* name, const char* value_key, const std::string& value) {
+        return std::string(",\"") + name + "_enabled\":" + (value.empty() ? "false" : "true") +
+            ",\"" + value_key + "\":\"" + escape(value) + "\"";
+    };
+    return "{\"success\":true,\"seed\":" + std::to_string(seed) +
+        ",\"mode\":\"" + sa3::sat::foundation_prompt_mode_name(mode) +
+        "\",\"variant\":\"" + variant +
+        "\",\"family\":\"" + escape(prompt.family) +
+        "\",\"subfamily\":\"" + escape(prompt.subfamily) +
+        "\",\"descriptor_knob_a\":\"" + escape(knob(0)) +
+        "\",\"descriptor_knob_b\":\"" + escape(knob(1)) +
+        "\",\"descriptor_knob_c\":\"" + escape(knob(2)) +
+        "\",\"descriptors_extra\":" + json_strings(extras) +
+        fx("reverb", "reverb_amount", parts.reverb) +
+        fx("delay", "delay_type", parts.delay) +
+        fx("distortion", "distortion_amount", parts.distortion) +
+        fx("phaser", "phaser_amount", parts.phaser) +
+        fx("bitcrush", "bitcrush_amount", parts.bitcrush) +
+        ",\"behavior_tags\":" + json_strings(prompt.melody) +
+        ",\"speed\":\"" + escape(parts.speed) +
+        "\",\"structure\":\"" + escape(parts.structure) +
+        "\",\"rhythm\":" + json_strings(parts.rhythm) +
+        ",\"contour\":" + json_strings(parts.contour) +
+        ",\"density\":" + json_strings(parts.density) +
+        ",\"spatial_tags\":" + json_strings(parts.spatial) +
+        ",\"band_tags\":" + json_strings(parts.bands) +
+        ",\"wave_tech_tags\":" + json_strings(parts.wave_tech) +
+        ",\"style_tags\":" + json_strings(parts.styles) +
+        ",\"all_tags\":" + json_strings(prompt.tags) +
+        ",\"prompt\":\"" + escape(prompt.description) + "\"}";
+}
+
 struct Prepared {
     sa3::sat::GenerateParams params;
     int bars = 0;
@@ -592,6 +660,26 @@ int main(int argc, char** argv) {
         });
         server.Post("/generate/loop", [generate](const httplib::Request& req, httplib::Response& res) {
             generate(req, res, true);
+        });
+        server.Post("/randomize", [config](const httplib::Request& req, httplib::Response& res) {
+            if (config.family != Family::Foundation) {
+                fail(res, 404, "randomize is a Foundation-1 route");
+                return;
+            }
+            // An empty body asks for a random preset.
+            const std::string body = req.body.empty() ? "{}" : req.body;
+            yyjson_doc* doc = yyjson_read(body.data(), body.size(), 0);
+            if (!doc || !yyjson_is_obj(yyjson_doc_get_root(doc))) {
+                if (doc) yyjson_doc_free(doc);
+                fail(res, 400, "JSON object required");
+                return;
+            }
+            try {
+                res.set_content(foundation_randomize_json(yyjson_doc_get_root(doc)), "application/json");
+            } catch (const std::exception& e) {
+                fail(res, 400, e.what());
+            }
+            yyjson_doc_free(doc);
         });
         server.Get(R"(/poll_status/([a-f0-9]+))", [](const httplib::Request& req, httplib::Response& res) {
             const std::string sid = req.matches[1];

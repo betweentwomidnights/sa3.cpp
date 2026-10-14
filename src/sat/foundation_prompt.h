@@ -26,6 +26,34 @@ struct FoundationRandomPrompt {
     std::string family;
     std::string subfamily;
     std::string variant;
+    // The pieces the description was joined from, in prompt order: descriptor
+    // tags, effects, and melody/behavior terms.
+    std::vector<std::string> tags;
+    std::vector<std::string> fx;
+    std::vector<std::string> melody;
+};
+
+// A randomized preset sorted into the controls a plugin shows, the way
+// gary4local's Python /randomize sorted RoyalCities' output: the first three
+// timbre descriptors fill knobs and the rest are extras, each effect lands in
+// its category (the last one wins), and melody terms split into speed,
+// structure, rhythm, contour and density.
+struct FoundationPromptParts {
+    std::vector<std::string> descriptors;
+    std::vector<std::string> spatial;
+    std::vector<std::string> bands;
+    std::vector<std::string> wave_tech;
+    std::vector<std::string> styles;
+    std::string reverb;
+    std::string delay;
+    std::string distortion;
+    std::string phaser;
+    std::string bitcrush;
+    std::string speed;
+    std::string structure;
+    std::vector<std::string> rhythm;
+    std::vector<std::string> contour;
+    std::vector<std::string> density;
 };
 
 struct FoundationRandomControls {
@@ -231,9 +259,34 @@ inline void append_unique(std::vector<std::string>& out, const std::string& valu
 }
 
 template <typename Rng>
-inline std::string random_item(Rng& rng, std::initializer_list<const char*> values) {
+inline std::string random_item(Rng& rng, const std::vector<const char*>& values) {
     const size_t i = std::uniform_int_distribution<size_t>(0, values.size() - 1)(rng);
-    return *(values.begin() + i);
+    return values[i];
+}
+
+// Melody vocabulary, shared by generation and by decompose_foundation_prompt.
+// "arp" is both a rhythm and a structure; decomposition files it as structure,
+// as RoyalCities' Python did.
+inline const std::vector<const char*>& speeds() {
+    static const std::vector<const char*> values = {"slow speed", "medium speed", "fast speed"};
+    return values;
+}
+inline const std::vector<const char*>& rhythms() {
+    static const std::vector<const char*> values = {"off beat", "alternating", "triplets", "strummed", "arp"};
+    return values;
+}
+inline const std::vector<const char*>& structures(bool bass) {
+    static const std::vector<const char*> generic = {"chord progression", "dance chord progression", "arp", "melody"};
+    static const std::vector<const char*> with_bassline = {"chord progression", "dance chord progression", "arp", "melody", "bassline"};
+    return bass ? with_bassline : generic;
+}
+inline const std::vector<const char*>& contours() {
+    static const std::vector<const char*> values = {"rising", "falling", "bounce", "rolling", "sustained", "choppy", "top"};
+    return values;
+}
+inline const std::vector<const char*>& densities() {
+    static const std::vector<const char*> values = {"simple", "repeating", "catchy", "complex", "epic"};
+    return values;
 }
 
 inline std::string canonical_family(const std::string& hint) {
@@ -294,21 +347,32 @@ inline std::vector<std::string> melody(Rng& rng, const std::string& family,
                                        FoundationPromptMode mode) {
     std::vector<std::string> out;
     if (std::bernoulli_distribution(mode == FoundationPromptMode::Mix ? 0.65 : 0.55)(rng))
-        append_unique(out, random_item(rng, {"slow speed", "medium speed", "fast speed"}));
-    const int rhythms = std::uniform_int_distribution<int>(0, 2)(rng);
-    for (int i = 0; i < rhythms; ++i)
-        append_unique(out, random_item(rng, {"off beat", "alternating", "triplets", "strummed", "arp"}));
-    if (family == "Bass")
-        append_unique(out, random_item(rng, {"chord progression", "dance chord progression", "arp", "melody", "bassline"}));
-    else
-        append_unique(out, random_item(rng, {"chord progression", "dance chord progression", "arp", "melody"}));
-    const int contours = std::uniform_int_distribution<int>(0, 2)(rng);
-    for (int i = 0; i < contours; ++i)
-        append_unique(out, random_item(rng, {"rising", "falling", "bounce", "rolling", "sustained", "choppy", "top"}));
-    const int densities = std::uniform_int_distribution<int>(0, 2)(rng);
-    for (int i = 0; i < densities; ++i)
-        append_unique(out, random_item(rng, {"simple", "repeating", "catchy", "complex", "epic"}));
+        append_unique(out, random_item(rng, speeds()));
+    const int rhythm_count = std::uniform_int_distribution<int>(0, 2)(rng);
+    for (int i = 0; i < rhythm_count; ++i)
+        append_unique(out, random_item(rng, rhythms()));
+    append_unique(out, random_item(rng, structures(family == "Bass")));
+    const int contour_count = std::uniform_int_distribution<int>(0, 2)(rng);
+    for (int i = 0; i < contour_count; ++i)
+        append_unique(out, random_item(rng, contours()));
+    const int density_count = std::uniform_int_distribution<int>(0, 2)(rng);
+    for (int i = 0; i < density_count; ++i)
+        append_unique(out, random_item(rng, densities()));
     return out;
+}
+
+inline bool in_category(const std::vector<Weighted>& values, const std::string& tag) {
+    const std::string wanted = lower(tag);
+    for (const auto& value : values)
+        if (lower(value.first) == wanted) return true;
+    return false;
+}
+
+inline bool in_category(const std::vector<const char*>& values, const std::string& tag) {
+    const std::string wanted = lower(tag);
+    for (const char* value : values)
+        if (lower(value) == wanted) return true;
+    return false;
 }
 
 inline std::string join(const std::vector<std::string>& values) {
@@ -400,7 +464,40 @@ inline FoundationRandomPrompt randomize_foundation_prompt(
     for (const auto& block : blocks)
         for (const auto& value : block) append_unique(tokens, value);
     result.description = join(tokens);
+    result.tags = std::move(tags);
+    result.fx = std::move(fx);
+    result.melody = std::move(melody_block);
     return result;
+}
+
+inline FoundationPromptParts decompose_foundation_prompt(const FoundationRandomPrompt& prompt) {
+    using namespace foundation_prompt_detail;
+    FoundationPromptParts parts;
+    for (const auto& tag : prompt.tags) {
+        // Timbre first, and anything uncategorized is a descriptor too.
+        if (in_category(timbre(), tag)) parts.descriptors.push_back(tag);
+        else if (in_category(spatial(), tag)) parts.spatial.push_back(tag);
+        else if (in_category(bands(), tag)) parts.bands.push_back(tag);
+        else if (in_category(wave_tech(), tag)) parts.wave_tech.push_back(tag);
+        else if (in_category(styles(), tag)) parts.styles.push_back(tag);
+        else parts.descriptors.push_back(tag);
+    }
+    for (const auto& effect : prompt.fx) {
+        const std::string name = lower(effect);
+        if (name.find("reverb") != std::string::npos) parts.reverb = effect;
+        else if (name.find("delay") != std::string::npos) parts.delay = effect;
+        else if (name.find("distortion") != std::string::npos) parts.distortion = effect;
+        else if (name.find("phaser") != std::string::npos) parts.phaser = effect;
+        else if (name.find("bitcrush") != std::string::npos) parts.bitcrush = effect;
+    }
+    for (const auto& term : prompt.melody) {
+        if (in_category(speeds(), term)) parts.speed = term;
+        else if (in_category(structures(true), term)) parts.structure = term;
+        else if (in_category(rhythms(), term)) parts.rhythm.push_back(term);
+        else if (in_category(contours(), term)) parts.contour.push_back(term);
+        else if (in_category(densities(), term)) parts.density.push_back(term);
+    }
+    return parts;
 }
 
 } // namespace sa3::sat

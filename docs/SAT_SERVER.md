@@ -45,6 +45,19 @@ second duration conditioning, and padded Oobleck frame count. The default
 is also available. `steps`, `guidance_scale`/`cfg_scale`, `sampler`,
 `sigma_min`, `sigma_max`, `sigma_rho`/`rho`, and `sde_eta` can override the profile.
 
+`POST /randomize` returns a whole preset from the same native prompt engine,
+split into the controls a plugin shows, without loading the model. It keeps
+gary4local's Python request and response contract: the request takes `seed`
+(`-1` or omitted draws one below 2^31), `mode` (`standard` or `mix`),
+`variant` (`auto`, `M1`, or `T1`, where `T1` means mix) and `family_hint`.
+The response carries `family` and `subfamily`; `descriptor_knob_a` to `_c`
+and `descriptors_extra` (timbre); `spatial_tags`, `band_tags`,
+`wave_tech_tags` and `style_tags`; `reverb_amount`, `delay_type`,
+`distortion_amount`, `phaser_amount` and `bitcrush_amount`, each with an
+`_enabled` flag; `speed`, `structure`, `rhythm`, `contour` and `density`
+(with `behavior_tags` holding all of them); `all_tags`; and the joined
+descriptor `prompt`. The same seed always gives the same preset.
+
 `host_bpm` accepts 20–999 BPM. When it falls between the model's trained tempos,
 the server selects the nearest model BPM and applies a pitch-preserving offline
 stretch to the final audio. An explicit `bpm` locks the model tempo. The response

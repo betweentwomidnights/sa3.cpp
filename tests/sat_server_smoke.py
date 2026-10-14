@@ -15,8 +15,8 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def request(port, path, body=None):
-    data = None if body is None else json.dumps(body).encode()
+def request(port, path, body=None, raw=None):
+    data = raw if raw is not None else None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}", data=data,
         headers={"Content-Type": "application/json"} if data is not None else {},
@@ -50,6 +50,8 @@ def check(executable, model, cases):
         for path, payload, expected, fragment in cases:
             status, body = request(port, path, payload)
             assert status == expected and fragment in body.get("error", ""), (status, body)
+        if model == "foundation-1":
+            check_randomize(port)
     finally:
         process.terminate()
         try:
@@ -58,6 +60,33 @@ def check(executable, model, cases):
             process.kill()
             process.wait(timeout=5)
         process.stderr.close()
+
+
+def check_randomize(port):
+    """/randomize keeps gary4local's Python contract and needs no model weights."""
+    status, body = request(port, "/randomize", {"seed": 42, "mode": "standard"})
+    assert status == 200 and body["success"], (status, body)
+    for key in ("family", "subfamily", "descriptor_knob_a", "descriptor_knob_b", "descriptor_knob_c",
+                "reverb_amount", "delay_type", "distortion_amount", "phaser_amount", "bitcrush_amount",
+                "speed", "structure", "prompt", "mode", "variant"):
+        assert isinstance(body[key], str), (key, body)
+    for key in ("descriptors_extra", "behavior_tags", "rhythm", "contour", "density", "spatial_tags",
+                "band_tags", "wave_tech_tags", "style_tags", "all_tags"):
+        assert isinstance(body[key], list), (key, body)
+    for fx in ("reverb", "delay", "distortion", "phaser", "bitcrush"):
+        assert isinstance(body[f"{fx}_enabled"], bool), (fx, body)
+    assert body["seed"] == 42 and body["variant"] == "M1" and body["family"] in body["prompt"], body
+    status, again = request(port, "/randomize", {"seed": 42, "mode": "standard"})
+    assert again == body, "the same seed must give the same preset"
+    status, mix = request(port, "/randomize", {"seed": 7, "variant": "T1", "family_hint": "synth"})
+    assert status == 200 and mix["variant"] == "T1" and mix["family"] == "Synth", mix
+    for _ in range(20):
+        status, drawn = request(port, "/randomize", {"seed": -1})
+        assert status == 200 and 0 <= drawn["seed"] < 2**31, drawn
+    status, empty = request(port, "/randomize", raw=b"")
+    assert status == 200 and empty["success"], empty
+    status, bad = request(port, "/randomize", {"family_hint": "Drums"})
+    assert status == 400 and "unknown Foundation family" in bad["error"], bad
 
 
 def main():
@@ -72,6 +101,7 @@ def main():
         ("/generate", {"prompt": "drums", "seconds": 12}, 400, "out of range"),
         ("/generate/loop", {"prompt": "drums", "bpm": 100, "bars": 8}, 400, "exceeds"),
         ("/generate", {"prompt": "drums", "seconds": 1}, 503, "missing"),
+        ("/randomize", {}, 404, "Foundation-1 route"),
     ])
 
 

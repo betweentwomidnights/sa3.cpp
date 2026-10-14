@@ -11,6 +11,7 @@
 #include "sat/t5.h"
 #include "wav.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
@@ -633,6 +634,38 @@ int main() {
             1, sa3::sat::FoundationPromptMode::Standard, "Drums");
     } catch (const std::invalid_argument&) { rejected_family = true; }
     fails += expect(rejected_family, "Foundation randomizer rejects unknown family locks");
+
+    // Decomposition places every term the prompt was built from exactly once,
+    // in the bucket gary4juce fills from it, and "arp" counts as structure.
+    bool decomposed = true;
+    for (uint64_t seed = 0; seed < 300 && decomposed; ++seed) {
+        for (auto mode : {sa3::sat::FoundationPromptMode::Standard, sa3::sat::FoundationPromptMode::Mix}) {
+            const auto prompt = sa3::sat::randomize_foundation_prompt(seed, mode);
+            const auto parts = sa3::sat::decompose_foundation_prompt(prompt);
+            const size_t tags = parts.descriptors.size() + parts.spatial.size() + parts.bands.size() +
+                                parts.wave_tech.size() + parts.styles.size();
+            size_t fx = 0;
+            for (const auto* value : {&parts.reverb, &parts.delay, &parts.distortion, &parts.phaser, &parts.bitcrush})
+                fx += value->empty() ? 0 : 1;
+            const size_t melody = (parts.speed.empty() ? 0 : 1) + (parts.structure.empty() ? 0 : 1) +
+                                  parts.rhythm.size() + parts.contour.size() + parts.density.size();
+            // Two effects of one category leave the last in its slot, as in Python.
+            bool fx_categorized = true;
+            for (const auto& effect : prompt.fx) {
+                const std::string& slot =
+                    effect.find("Reverb") != std::string::npos ? parts.reverb :
+                    effect.find("Delay") != std::string::npos ? parts.delay :
+                    effect.find("Distortion") != std::string::npos ? parts.distortion :
+                    effect.find("Phaser") != std::string::npos ? parts.phaser : parts.bitcrush;
+                fx_categorized = fx_categorized && !slot.empty();
+            }
+            decomposed = tags == prompt.tags.size() && fx <= prompt.fx.size() && fx_categorized &&
+                         melody <= prompt.melody.size() && !parts.structure.empty() &&
+                         std::find(parts.rhythm.begin(), parts.rhythm.end(), "arp") == parts.rhythm.end() &&
+                         prompt.description.find(prompt.family) != std::string::npos;
+        }
+    }
+    fails += expect(decomposed, "Foundation presets decompose into plugin controls");
 
     // A finetune may change inference defaults without changing any loadable tensor shape.
     sa3::sat::ModelSpec finetune = saos;
