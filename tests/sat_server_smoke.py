@@ -55,6 +55,8 @@ def check(executable, model, cases):
             assert status == expected and fragment in body.get("error", ""), (status, body)
         if model == "foundation-1":
             check_randomize(port)
+        if model == "saos":
+            check_saos_catalog(port)
     finally:
         process.terminate()
         try:
@@ -92,6 +94,14 @@ def check_randomize(port):
     assert status == 400 and "unknown Foundation family" in bad["error"], bad
 
 
+def check_saos_catalog(port):
+    """With nothing installed, SAOS lists no models and selects none."""
+    status, body = request(port, "/models/status")
+    assert status == 200 and body["model_details"] == {} and body["cache_status"]["usage_order"] == [], body
+    status, body = request(port, "/models/prompts")
+    assert status == 200 and body["success"] and body["prompts"] is None, body
+
+
 def tiny_wav():
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as w:
@@ -119,10 +129,24 @@ def main():
         ("/generate", {"prompt": "Synth", "bars": 4, "host_bpm": 123}, 503, "missing"),
         ("/generate", {"prompt": "Synth", "bars": 4, "bpm": 120}, 503, "missing"),
     ])
-    check(binary, "arc", [
-        ("/generate", {"prompt": "drums", "seconds": 12}, 400, "out of range"),
-        ("/generate/loop", {"prompt": "drums", "bpm": 100, "bars": 8}, 400, "exceeds"),
-        ("/generate", {"prompt": "drums", "seconds": 1}, 503, "missing"),
+    kickbass = {"model_type": "finetune", "finetune_repo": "S3Sound/kickbass",
+                "finetune_checkpoint": "kickbass_v1_saos_e257_s18870.ckpt"}
+    check(binary, "saos", [
+        ("/generate", {"prompt": "drums", "seconds_total": 0}, 400, "seconds_total must be >= 1"),
+        ("/generate", {"prompt": "drums", "steps": 0}, 400, "steps must be"),
+        ("/generate", {"prompt": "drums", "cfg_scale": 21}, 400, "cfg_scale must be"),
+        ("/generate", {"prompt": "drums", "sampler_type": "dpmpp-3m-sde"}, 400, "sampler_type must be"),
+        ("/generate", {"prompt": "drums", "return_format": "mp3"}, 400, "return_format"),
+        ("/generate", {"prompt": "drums", "model_type": "remix"}, 400, "model_type must be"),
+        ("/generate", {"prompt": "drums", "model_type": "finetune"}, 400, "finetune_repo and finetune_checkpoint"),
+        ("/generate", {"prompt": "drums", "model_type": "finetune", "finetune_repo": "thepatch/jerry_grunge",
+                       "finetune_checkpoint": "jerry_encoded_bs128_epoch=106-step=320.ckpt"}, 400,
+         "no native SAOS finetune"),
+        ("/generate/loop", {"prompt": "drums"}, 400, "BPM must be specified"),
+        ("/generate/loop", {"prompt": "drums 100bpm", "bars": 8}, 400, "exceeds"),
+        ("/generate/loop", {"prompt": "drums 120bpm", "loop_type": "vocals"}, 400, "loop_type must be"),
+        ("/generate", {"prompt": "drums", "seconds_total": 30, "model_type": "standard"}, 503, "missing"),
+        ("/generate/loop", dict(kickbass, prompt="kick 120bpm"), 503, "kickbass"),
         ("/randomize", {}, 404, "Foundation-1 route"),
         ("/audio2audio", {"prompt": "drums", "host_bpm": 120, "audio_data": wav}, 400, "Foundation-1 route"),
     ])
