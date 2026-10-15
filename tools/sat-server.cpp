@@ -1,5 +1,6 @@
 // A model-scoped HTTP service for Stable Audio Tools checkpoints. Run separate
-// instances for Foundation-1 and SAOS; both use the same packaged runtime.
+// instances for Foundation-1 and SAOS; both use the same packaged runtime. A
+// SAOS instance serves the base model and every installed finetune.
 #include "sat/foundation_prompt.h"
 #include "sat/model_paths.h"
 #include "sat/pipeline.h"
@@ -192,6 +193,12 @@ uint64_t seed_field(yyjson_val* root) {
     return yyjson_get_uint(value);
 }
 
+// The request leaves the seed to the server (omitted, null, or -1).
+bool seed_drawn(yyjson_val* root) {
+    yyjson_val* given = yyjson_obj_get(root, "seed");
+    return !given || yyjson_is_null(given) || (yyjson_is_sint(given) && yyjson_get_sint(given) == -1);
+}
+
 bool bool_field(yyjson_val* root, const char* key, bool fallback = false) {
     yyjson_val* value = yyjson_obj_get(root, key);
     if (!value || yyjson_is_null(value)) return fallback;
@@ -298,11 +305,8 @@ std::string json_strings(const std::vector<std::string>& values) {
 std::string foundation_randomize_json(yyjson_val* root) {
     // A drawn seed stays within 31 bits, as Python's did: gary4juce reads it
     // back as an int to show in its seed box.
-    yyjson_val* given = yyjson_obj_get(root, "seed");
-    const bool drawn = !given || yyjson_is_null(given) ||
-                       (yyjson_is_sint(given) && yyjson_get_sint(given) == -1);
     uint64_t seed = seed_field(root);
-    if (drawn) seed &= 0x7fffffffu;
+    if (seed_drawn(root)) seed &= 0x7fffffffu;
     const auto mode = sa3::sat::parse_foundation_prompt_mode(string_field(root, "mode", "standard"));
     std::string variant = string_field(root, "variant", "auto");
     if (variant != "auto" && variant != "M1" && variant != "T1")
@@ -380,7 +384,7 @@ Prepared prepare(const Config& config, yyjson_val* root, bool loop, bool audio2a
         sa3::sat::canonical_sat_large_model(requested_model) != config.model)
         throw std::invalid_argument("this server is fixed to model " + config.model);
     if (has_field(root, "finetune_repo") || has_field(root, "finetune_checkpoint"))
-        throw std::invalid_argument("start a server with --model kickbass or jerry-grunge for that finetune");
+        throw std::invalid_argument("finetunes are served by a SAOS server (--model saos)");
 
     if (config.family == Family::Foundation) {
         const bool randomize = bool_field(root, "randomize");
@@ -423,45 +427,15 @@ Prepared prepare(const Config& config, yyjson_val* root, bool loop, bool audio2a
         out.seconds = timing.output_seconds;
         out.stretched_samples = (int)std::llround(240.0 * bars * 44100.0 / host_bpm);
     } else {
-        if (loop && config.family != Family::Saos)
-            throw std::invalid_argument("loop generation is supported for SAOS and Foundation-1");
+        if (loop) throw std::invalid_argument("loop generation is supported for SAOS and Foundation-1");
         if (p.prompt.empty()) throw std::invalid_argument("prompt is required");
-        if (loop) {
-            const double bpm = number_field(root, "bpm", prompt_bpm(p.prompt));
-            if (bpm < 20 || bpm > 300) throw std::invalid_argument("loop BPM must be between 20 and 300");
-            int bars = int_field(root, "bars", 0);
-            if (!bars) {
-                for (int candidate : {8, 4, 2, 1})
-                    if (240.0 * candidate / bpm <= 11.0) { bars = candidate; break; }
-            }
-            if (bars != 1 && bars != 2 && bars != 4 && bars != 8)
-                throw std::invalid_argument("loop bars must be 1, 2, 4, or 8");
-            const double seconds = 240.0 * bars / bpm;
-            if (seconds > 11.0) throw std::invalid_argument("requested loop exceeds SAOS 11 second canvas");
-            if (!prompt_bpm(p.prompt)) p.prompt += ", " + number(bpm) + " bpm";
-            const std::string type = string_field(root, "loop_type", "auto");
-            if (type == "drums") {
-                if (p.prompt.find("drum") == std::string::npos) p.prompt += ", drum loop";
-                if (p.negative_prompt.empty()) p.negative_prompt = "melody, harmony, pitched instruments, vocals, singing";
-            } else if (type == "instruments") {
-                if (p.negative_prompt.empty()) p.negative_prompt = "drums, percussion, kick, snare, hi-hat";
-            } else if (type != "auto") throw std::invalid_argument("loop_type must be auto, drums, or instruments");
-            p.seconds = 11.0f;
-            p.seconds_total = 11.0f;
-            p.frames = 256;
-            p.output_samples = (int)std::llround(seconds * 44100);
-            out.bars = bars;
-            out.bpm = bpm;
-            out.seconds = seconds;
-        } else {
-            const double seconds = number_field(root, "seconds", 11.0);
-            if (seconds <= 0 || (config.family == Family::Saos && seconds > 11.0) || seconds > 47)
-                throw std::invalid_argument("seconds is out of range for this model");
-            p.seconds = (float)seconds;
-            p.frames = (int)std::ceil(seconds * 44100 / 2048.0);
-            p.output_samples = (int)std::llround(seconds * 44100);
-            out.seconds = seconds;
-        }
+        const double seconds = number_field(root, "seconds", 11.0);
+        if (seconds <= 0 || seconds > 47)
+            throw std::invalid_argument("seconds is out of range for this model");
+        p.seconds = (float)seconds;
+        p.frames = (int)std::ceil(seconds * 44100 / 2048.0);
+        p.output_samples = (int)std::llround(seconds * 44100);
+        out.seconds = seconds;
     }
 
     if (has_field(root, "steps")) p.steps = int_field(root, "steps", p.steps);
@@ -474,8 +448,7 @@ Prepared prepare(const Config& config, yyjson_val* root, bool loop, bool audio2a
     if (has_field(root, "sde_eta")) p.sde_eta = (float)number_field(root, "sde_eta", p.sde_eta);
     const std::string sampler = string_field(root, "sampler", string_field(root, "sampler_type"));
     if (!sampler.empty()) p.sampler = sa3::sat::parse_sampler(sampler);
-    if (p.steps < 0 || (config.family != Family::Saos && p.steps == 1) ||
-        (p.cfg_scale < 0 && p.cfg_scale != -1.0f) ||
+    if (p.steps < 0 || p.steps == 1 || (p.cfg_scale < 0 && p.cfg_scale != -1.0f) ||
         p.sigma_rho <= 0 || p.sde_eta < 0)
         throw std::invalid_argument("invalid SAT sampler settings");
 
@@ -605,6 +578,403 @@ void launch(const Config& config, const std::string& sid, Prepared prepared) {
     }).detach();
 }
 
+// ---- SAOS ----
+// A SAOS server keeps gary4local's Python stable-audio ("jerry") contract. It
+// serves every variant installed at its encoding (the base model and the
+// published finetunes, which share its T5 and autoencoder) and keeps one DiT
+// resident. A request picks a variant as clients picked a checkpoint before:
+// model_type "standard", or "finetune" with finetune_repo and
+// finetune_checkpoint. Generation is synchronous and answers
+// {success, audio_base64, metadata}, or the WAV itself for return_format "file".
+
+using sa3::sat::SaosVariant;
+
+constexpr int kSaosFrames = 256;
+constexpr int kSaosCanvasSamples = kSaosFrames * 2048;
+constexpr int kSaosSecondsMax = kSaosCanvasSamples / 44100;  // Python's default seconds_total
+
+std::mutex g_generate_mutex;           // one synchronous generation at a time
+std::vector<std::string> g_saos_used;  // variant names, most recently used last
+
+bool is_finetune(const SaosVariant& variant) { return variant.checkpoint[0] != '\0'; }
+
+// The cache key and source Python reported for this checkpoint; gary4juce
+// stores them as the selection.
+std::string saos_key(const SaosVariant& variant) {
+    if (!is_finetune(variant)) return "standard_saos";
+    auto flat = [](std::string text, bool dots) {
+        for (char& c : text) if (c == '/' || (dots && c == '.')) c = '_';
+        return text;
+    };
+    return "finetune_" + flat(variant.repo, false) + "_" + flat(variant.checkpoint, true);
+}
+
+std::string saos_source(const SaosVariant& variant) {
+    return is_finetune(variant) ? std::string(variant.repo) + "/" + variant.checkpoint : variant.repo;
+}
+
+std::string device_name(const Config& config) { return config.device.empty() ? "auto" : config.device; }
+
+bool resolve_saos(const Config& config, const SaosVariant& variant,
+                  sa3::sat::PipelinePaths& paths, std::string& error) {
+    return sa3::sat::resolve_saos_model(config.models_dir, variant.name, config.encoding,
+                                        config.t5_encoding, config.ae_encoding, &paths, &error);
+}
+
+std::vector<const SaosVariant*> installed_saos(const Config& config) {
+    std::vector<const SaosVariant*> installed;
+    for (const auto& variant : sa3::sat::kSaosVariants) {
+        sa3::sat::PipelinePaths paths;
+        std::string error;
+        if (resolve_saos(config, variant, paths, error)) installed.push_back(&variant);
+    }
+    return installed;
+}
+
+// Installed variants, least recently used first, as Python's usage_order: the
+// last is the active one (the server's --model until a request picks another).
+std::vector<const SaosVariant*> saos_usage_order(const Config& config,
+                                                 std::vector<const SaosVariant*> order) {
+    auto bump = [&](const std::string& name) {
+        auto it = std::find_if(order.begin(), order.end(),
+                               [&](const SaosVariant* variant) { return name == variant->name; });
+        if (it != order.end()) std::rotate(it, it + 1, order.end());
+    };
+    bump(config.model);
+    std::vector<std::string> used;
+    { std::lock_guard<std::mutex> guard(g_mutex); used = g_saos_used; }
+    for (const auto& name : used) bump(name);
+    return order;
+}
+
+const SaosVariant& requested_saos_variant(const Config& config, yyjson_val* root) {
+    const std::string type = string_field(root, "model_type");
+    const std::string repo = string_field(root, "finetune_repo");
+    const std::string checkpoint = string_field(root, "finetune_checkpoint");
+    if (type.empty() && repo.empty() && checkpoint.empty()) {
+        const std::string name = sa3::sat::canonical_saos_variant(string_field(root, "model", config.model));
+        for (const auto& variant : sa3::sat::kSaosVariants)
+            if (name == variant.name) return variant;
+        throw std::invalid_argument("unknown SAOS model " + name + " (arc, kickbass, or jerry-grunge)");
+    }
+    if (type == "standard") return sa3::sat::kSaosVariants[0];
+    if (!type.empty() && type != "finetune")
+        throw std::invalid_argument("model_type must be 'standard' or 'finetune'");
+    if (repo.empty() || checkpoint.empty())
+        throw std::invalid_argument("finetune_repo and finetune_checkpoint required for finetune models");
+    std::string published;
+    for (const auto& variant : sa3::sat::kSaosVariants) {
+        if (!is_finetune(variant)) continue;
+        if (repo == variant.repo && checkpoint == variant.checkpoint) return variant;
+        published += (published.empty() ? "" : ", ") + saos_source(variant);
+    }
+    throw std::invalid_argument("no native SAOS finetune for " + repo + "/" + checkpoint +
+                                " (published: " + published + ")");
+}
+
+struct SaosRequest {
+    const SaosVariant* variant = nullptr;
+    sa3::sat::GenerateParams params;
+    bool loop = false;
+    bool base64 = false;
+    std::string original_prompt;
+    std::string loop_type;
+    double bpm = 0;  // from the prompt's tag (or a bpm field); 0 when there is none
+    int bars = 0;
+    double seconds_per_bar = 0;
+    double calculated_seconds = 0;  // the bars at that BPM, before the canvas crop
+};
+
+// Python's request shape, defaults and validation. Steps and CFG default per
+// model objective, as Python's /generate did (8 and 1 for the base model, 50
+// and 4 for the rectified-flow finetunes); gary4juce always sends both.
+SaosRequest prepare_saos(const Config& config, yyjson_val* root, bool loop) {
+    SaosRequest out;
+    out.loop = loop;
+    out.variant = &requested_saos_variant(config, root);
+    auto& p = out.params;
+    p.prompt = string_field(root, "prompt");
+    if (p.prompt.empty()) throw std::invalid_argument("prompt is required");
+    out.original_prompt = p.prompt;
+    p.negative_prompt = string_field(root, "negative_prompt");
+    p.seed = seed_field(root);
+    if (seed_drawn(root)) p.seed &= 0xffffffffu;  // Python drew seeds below 2^32
+    const std::string format = string_field(root, "return_format", "file");
+    if (format != "file" && format != "base64")
+        throw std::invalid_argument("return_format must be 'file' or 'base64'");
+    out.base64 = format == "base64";
+    p.keep_models = true;
+    p.frames = kSaosFrames;
+    // Python scaled the decoded audio to a full-scale peak and clamped it.
+    p.loudness.peak_normalize_enabled = true;
+    p.loudness.peak_normalize_db = 0.0f;
+    p.loudness.limiter_enabled = false;
+    out.bpm = number_field(root, "bpm", prompt_bpm(p.prompt));
+
+    if (loop) {
+        if (out.bpm <= 0) throw std::invalid_argument("BPM must be specified in prompt (e.g., '120bpm')");
+        if (out.bpm < 20 || out.bpm > 300) throw std::invalid_argument("loop BPM must be between 20 and 300");
+        out.seconds_per_bar = 240.0 / out.bpm;
+        const double canvas_seconds = (double)kSaosCanvasSamples / 44100;
+        int bars = int_field(root, "bars", 0);
+        if (bars) {
+            if (bars != 1 && bars != 2 && bars != 4 && bars != 8)
+                throw std::invalid_argument("bars must be 1, 2, 4, or 8");
+            if (out.seconds_per_bar * bars > canvas_seconds)
+                throw std::invalid_argument("requested loop exceeds the SAOS canvas");
+        } else {
+            // The longest count leaving a second of the canvas spare, as Python
+            // chose; a single bar longer than the canvas is cropped to it.
+            bars = 1;
+            for (int candidate : {8, 4, 2, 1})
+                if (out.seconds_per_bar * candidate <= canvas_seconds - 1.0) { bars = candidate; break; }
+        }
+        out.bars = bars;
+        out.calculated_seconds = out.seconds_per_bar * bars;
+        if (!prompt_bpm(p.prompt)) p.prompt += ", " + number(out.bpm) + " bpm";
+        out.loop_type = string_field(root, "loop_type", "auto");
+        std::string lower = p.prompt;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+        if (out.loop_type == "drums") {
+            if (lower.find("drum") == std::string::npos) p.prompt += " drum loop";
+            p.negative_prompt = "melody, harmony, pitched instruments, vocals, singing";
+        } else if (out.loop_type == "instruments") {
+            for (const std::string word : {"drums", "drum"})
+                for (size_t at; (at = p.prompt.find(word)) != std::string::npos;) p.prompt.erase(at, word.size());
+            p.prompt.erase(0, p.prompt.find_first_not_of(" ,"));
+            p.prompt.erase(p.prompt.find_last_not_of(" ,") + 1);
+            p.negative_prompt = "drums, percussion, kick, snare, hi-hat";
+        } else if (out.loop_type != "auto") {
+            throw std::invalid_argument("loop_type must be auto, drums, or instruments");
+        }
+        p.seconds = p.seconds_total = (float)kSaosSecondsMax;
+        p.output_samples = std::min((int)std::floor(out.calculated_seconds * 44100), kSaosCanvasSamples);
+    } else {
+        // Whole seconds, clamped to the canvas, as Python's seconds_total.
+        const double requested = number_field(root, "seconds_total", kSaosSecondsMax);
+        if (requested < 1) throw std::invalid_argument("seconds_total must be >= 1");
+        const int seconds = std::min((int)std::floor(requested), kSaosSecondsMax);
+        p.seconds = p.seconds_total = (float)seconds;
+        p.output_samples = seconds * 44100;
+    }
+
+    if (has_field(root, "steps")) {
+        p.steps = int_field(root, "steps", 0);
+        if (p.steps < 1 || p.steps > 250) throw std::invalid_argument("steps must be integer between 1-250");
+    }
+    if (has_field(root, "cfg_scale")) {
+        p.cfg_scale = (float)number_field(root, "cfg_scale", 1.0);
+        if (p.cfg_scale < 0 || p.cfg_scale > 20) throw std::invalid_argument("cfg_scale must be number between 0-20");
+    }
+    // gary4juce sends pingpong for the base model, and euler or dpmpp for a finetune.
+    const std::string sampler = string_field(root, "sampler_type", string_field(root, "sampler"));
+    if (!sampler.empty()) {
+        if (sampler != "euler" && sampler != "dpmpp" && sampler != "pingpong")
+            throw std::invalid_argument("sampler_type must be euler, dpmpp, or pingpong");
+        p.sampler = sa3::sat::parse_sampler(sampler);
+    }
+    return out;
+}
+
+// Variants share the T5 and autoencoder, so switching between them swaps only
+// the DiT.
+sa3::sat::GenerateResult generate_saos(const Config& config, const SaosRequest& request,
+                                       sa3::sat::PipelinePaths paths) {
+    std::lock_guard<std::mutex> one_at_a_time(g_generate_mutex);
+    {
+        std::lock_guard<std::mutex> guard(g_mutex);
+        g_busy = true;
+        if (g_pipeline && g_pipeline->paths().t5 == paths.t5 &&
+            g_pipeline->paths().autoencoder == paths.autoencoder) {
+            g_pipeline->set_dit(paths.dit);
+        } else {
+            sa3::sat::PipelineOptions options;
+            options.device = config.device;
+            g_pipeline = std::make_unique<sa3::sat::Pipeline>(std::move(paths), options);
+        }
+    }
+    struct Idle {
+        ~Idle() { std::lock_guard<std::mutex> guard(g_mutex); g_busy = false; }
+    } idle;
+    auto result = g_pipeline->generate(request.params);
+    std::lock_guard<std::mutex> guard(g_mutex);
+    const std::string name = request.variant->name;
+    g_saos_used.erase(std::remove(g_saos_used.begin(), g_saos_used.end(), name), g_saos_used.end());
+    g_saos_used.push_back(name);
+    return result;
+}
+
+// Python's metadata for each route, plus the native variant, sampler and model key.
+std::string saos_metadata(const Config& config, const SaosRequest& request,
+                          const sa3::sat::GenerateResult& result, double generation_time) {
+    auto round2 = [](double value) { return number(std::round(value * 100) / 100); };
+    const double duration = (double)result.samples / result.sample_rate;
+    const auto& p = request.params;
+    std::string body = "{\"prompt\":\"" + escape(p.prompt) + "\"";
+    if (request.loop) {
+        body += ",\"original_prompt\":\"" + escape(request.original_prompt) +
+            "\",\"negative_prompt\":\"" + escape(p.negative_prompt) +
+            "\",\"loop_type\":\"" + escape(request.loop_type) +
+            "\",\"detected_bpm\":" + number(request.bpm) +
+            ",\"bars\":" + std::to_string(request.bars) +
+            ",\"loop_duration_seconds\":" + round2(duration) +
+            ",\"calculated_duration_seconds\":" + round2(request.calculated_seconds) +
+            ",\"available_audio_seconds\":" + round2((double)kSaosCanvasSamples / 44100) +
+            ",\"seconds_per_bar\":" + round2(request.seconds_per_bar) +
+            ",\"style_transfer\":false,\"style_strength\":null" +
+            ",\"model_type\":\"" + (is_finetune(*request.variant) ? "finetune" : "standard") + "\"";
+    } else {
+        body += ",\"negative_prompt\":" + (p.negative_prompt.empty() ? std::string("null")
+                                           : "\"" + escape(p.negative_prompt) + "\"") +
+            ",\"duration_seconds\":" + number(p.seconds_total) +
+            ",\"detected_bpm\":" + (request.bpm > 0 ? number(request.bpm) : std::string("null"));
+    }
+    return body + ",\"steps\":" + std::to_string(result.steps) +
+        ",\"cfg_scale\":" + number(result.cfg_scale) +
+        ",\"seed\":" + std::to_string(p.seed) +
+        ",\"sample_rate\":" + std::to_string(result.sample_rate) +
+        ",\"generation_time\":" + round2(generation_time) +
+        ",\"realtime_factor\":" + round2(duration / std::max(generation_time, 1e-6)) +
+        ",\"device\":\"" + escape(device_name(config)) +
+        "\",\"model\":\"" + request.variant->name +
+        "\",\"model_key\":\"" + escape(saos_key(*request.variant)) +
+        "\",\"sampler\":\"" + sa3::sat::sampler_name(result.sampler) + "\"}";
+}
+
+// GET /models/status: every installed variant, in Python's shape.
+std::string saos_status_json(const Config& config) {
+    const auto installed = installed_saos(config);
+    std::string loaded, usage, details;
+    for (const SaosVariant* variant : installed) {
+        const std::string key = "\"" + escape(saos_key(*variant)) + "\"";
+        loaded += (loaded.empty() ? "" : ",") + key;
+        details += (details.empty() ? "" : ",") + key + ":{\"type\":\"" +
+            (is_finetune(*variant) ? "finetune" : "standard") +
+            "\",\"source\":\"" + escape(saos_source(*variant)) +
+            "\",\"model\":\"" + variant->name +
+            "\",\"encoding\":\"" + escape(sa3::sat::normalize_encoding(config.encoding)) +
+            "\",\"device\":\"" + escape(device_name(config)) +
+            "\",\"sample_rate\":44100,\"sample_size\":" + std::to_string(kSaosCanvasSamples) + "}";
+    }
+    for (const SaosVariant* variant : saos_usage_order(config, installed))
+        usage += (usage.empty() ? "" : ",") + ("\"" + escape(saos_key(*variant)) + "\"");
+    const std::string count = std::to_string(installed.size());
+    return "{\"cache_status\":{\"loaded_models\":[" + loaded + "],\"usage_order\":[" + usage +
+        "],\"cache_utilization\":\"" + count + "/" + count + "\"},\"model_details\":{" + details +
+        "},\"max_models\":" + count + "}";
+}
+
+// A finetune's prompt bank as compact JSON, or Python's empty bank.
+std::string saos_prompt_bank(const Config& config, const SaosVariant& variant) {
+    static const std::string empty = R"({"version":1,"dice":{"generic":[],"drums":[],"instrumental":[]}})";
+    const std::string relative = sa3::sat::saos_prompts_relative_path(variant.name);
+    if (relative.empty()) return empty;
+    const std::filesystem::path path = std::filesystem::path(config.models_dir) / relative;
+    yyjson_read_err error{};
+    yyjson_doc* doc = yyjson_read_file(path.string().c_str(), 0, nullptr, &error);
+    if (!doc) {
+        if (std::filesystem::exists(path))
+            std::fprintf(stderr, "[sat-server] ignoring %s: %s\n", path.string().c_str(), error.msg);
+        return empty;
+    }
+    std::string bank = empty;
+    if (yyjson_is_obj(yyjson_doc_get_root(doc))) {
+        if (char* text = yyjson_write(doc, 0, nullptr)) { bank = text; std::free(text); }
+    }
+    yyjson_doc_free(doc);
+    return bank;
+}
+
+// GET /models/prompts: the bank for ?key=, or ?repo= (and ?checkpoint=), or
+// the active variant's, chosen as Python chose.
+std::string saos_prompts_json(const Config& config, const httplib::Request& req) {
+    const auto order = saos_usage_order(config, installed_saos(config));
+    const std::string key = req.get_param_value("key");
+    const std::string repo = req.get_param_value("repo");
+    const std::string checkpoint = req.get_param_value("checkpoint");
+    std::string prefer = req.has_param("prefer") ? req.get_param_value("prefer") : "active";
+    std::transform(prefer.begin(), prefer.end(), prefer.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    auto most_recent = [&](auto&& matches) -> const SaosVariant* {
+        for (auto it = order.rbegin(); it != order.rend(); ++it) if (matches(**it)) return *it;
+        return nullptr;
+    };
+    const SaosVariant* selected = nullptr;
+    if (!key.empty()) {
+        selected = most_recent([&](const SaosVariant& v) { return saos_key(v) == key; });
+    } else if (!repo.empty()) {
+        selected = most_recent([&](const SaosVariant& v) {
+            return is_finetune(v) && repo == v.repo && (checkpoint.empty() || checkpoint == v.checkpoint);
+        });
+    } else {
+        if (prefer == "finetune") selected = most_recent([](const SaosVariant& v) { return is_finetune(v); });
+        if (!selected && !order.empty()) selected = order.back();
+    }
+    if (!selected) return R"({"success":true,"prompts":null,"message":"no model selected"})";
+    const bool finetune = is_finetune(*selected);
+    return "{\"success\":true,\"model_key\":\"" + escape(saos_key(*selected)) +
+        "\",\"type\":\"" + (finetune ? "finetune" : "standard") +
+        "\",\"source\":\"" + escape(finetune ? selected->repo : saos_source(*selected)) +
+        "\",\"checkpoint\":" + (finetune ? "\"" + escape(selected->checkpoint) + "\"" : std::string("null")) +
+        ",\"model\":\"" + selected->name +
+        "\",\"prompts\":" + saos_prompt_bank(config, *selected) + "}";
+}
+
+void serve_saos(const Config& config, const httplib::Request& req, httplib::Response& res, bool loop) {
+    yyjson_doc* doc = yyjson_read(req.body.data(), req.body.size(), 0);
+    if (!doc || !yyjson_is_obj(yyjson_doc_get_root(doc))) {
+        if (doc) yyjson_doc_free(doc);
+        fail(res, 400, "JSON body required");
+        return;
+    }
+    SaosRequest request;
+    try {
+        request = prepare_saos(config, yyjson_doc_get_root(doc), loop);
+    } catch (const std::exception& e) {
+        yyjson_doc_free(doc);
+        fail(res, 400, e.what());
+        return;
+    }
+    yyjson_doc_free(doc);
+    sa3::sat::PipelinePaths paths;
+    std::string error;
+    if (!resolve_saos(config, *request.variant, paths, error)) { fail(res, 503, error); return; }
+    try {
+        const auto start = std::chrono::steady_clock::now();
+        const auto result = generate_saos(config, request, std::move(paths));
+        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        std::string wav = sa3::wav_planar_bytes(result.audio.data(), result.samples, result.channels,
+                                                result.sample_rate);
+        const std::string metadata = saos_metadata(config, request, result, elapsed);
+        std::fprintf(stderr, "[sat-server] %s %s in %.2fs\n", request.variant->name,
+                     loop ? "loop" : "generation", elapsed);
+        if (request.base64) {
+            res.set_content("{\"success\":true,\"audio_base64\":\"" + b64_encode(wav) +
+                            "\",\"metadata\":" + metadata + "}", "application/json");
+        } else {
+            const std::string seed = std::to_string(request.params.seed);
+            const std::string name = loop
+                ? "loop_" + request.loop_type + "_" + number(request.bpm) + "bpm_" +
+                  std::to_string(request.bars) + "bars_" + seed + ".wav"
+                : "stable_audio_" + seed + ".wav";
+            res.set_header("Content-Disposition", "attachment; filename=\"" + name + "\"");
+            res.set_content(std::move(wav), "audio/wav");
+        }
+    } catch (const std::invalid_argument& e) {
+        fail(res, 400, e.what());
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[sat-server] %s failed: %s\n", request.variant->name, e.what());
+        fail(res, 500, e.what());
+    }
+}
+
+// A SAOS server is ready with any installed variant; it reports what its
+// --model is missing when there are none.
+bool service_ready(const Config& config, std::string& error) {
+    if (config.family == Family::Saos && !installed_saos(config).empty()) return true;
+    sa3::sat::PipelinePaths paths;
+    return resolve_paths(config, paths, error);
+}
+
 Config parse_args(int argc, char** argv) {
     Config config;
     if (const char* value = std::getenv("SA3_MODELS_DIR")) config.models_dir = value;
@@ -616,7 +986,9 @@ Config parse_args(int argc, char** argv) {
             return argv[i];
         };
         if (arg == "--help") {
-            std::puts("sat-server --model foundation-1|arc|kickbass|jerry-grunge|sao1 [--port N] [--models-dir DIR] [--encoding TIER] [--t5-encoding TIER] [--ae-encoding TIER] [--device DEVICE]");
+            std::puts("sat-server --model foundation-1|saos|sao1 [--port N] [--models-dir DIR] [--encoding TIER] [--t5-encoding TIER] [--ae-encoding TIER] [--device DEVICE]\n"
+                      "  A SAOS server serves arc and the installed finetunes (kickbass, jerry-grunge);\n"
+                      "  --model arc|kickbass|jerry-grunge also starts one, active on that variant.");
             std::exit(0);
         } else if (arg == "--model") config.model = next();
         else if (arg == "--models-dir") config.models_dir = next();
@@ -665,9 +1037,8 @@ int main(int argc, char** argv) {
             res.set_content(sa3::runtime_props_json("sat"), "application/json");
         });
         server.Get("/health", [config](const httplib::Request&, httplib::Response& res) {
-            sa3::sat::PipelinePaths paths;
             std::string error;
-            const bool ready = resolve_paths(config, paths, error);
+            const bool ready = service_ready(config, error);
             bool loaded;
             { std::lock_guard<std::mutex> guard(g_mutex); loaded = (bool)g_pipeline; }
             const std::string family = config.family == Family::Foundation ? "foundation-1" :
@@ -676,14 +1047,18 @@ int main(int argc, char** argv) {
                 "\",\"ready\":" + (ready ? "true" : "false") +
                 ",\"model_loaded\":" + (loaded ? "true" : "false") +
                 ",\"model\":\"" + config.model + "\",\"family\":\"" + family + "\"";
+            if (config.family == Family::Saos) {
+                std::vector<std::string> names;
+                for (const SaosVariant* variant : installed_saos(config)) names.push_back(variant->name);
+                body += ",\"models\":" + json_strings(names);
+            }
             if (!ready) body += ",\"error\":\"" + escape(error) + "\"";
             res.set_content(body + "}", "application/json");
             if (!ready) res.status = 503;
         });
         server.Get("/ready", [config](const httplib::Request&, httplib::Response& res) {
-            sa3::sat::PipelinePaths paths;
             std::string error;
-            const bool ready = resolve_paths(config, paths, error);
+            const bool ready = service_ready(config, error);
             res.set_content(std::string("{\"ready\":") + (ready ? "true}" : "false}"), "application/json");
             if (!ready) res.status = 503;
         });
@@ -758,12 +1133,23 @@ int main(int argc, char** argv) {
                 fail(res, 400, e.what());
             }
         };
-        server.Post("/generate", [generate](const httplib::Request& req, httplib::Response& res) {
-            generate(req, res, false, false);
+        // SAOS answers synchronously, in the Python stable-audio contract.
+        server.Post("/generate", [config, generate](const httplib::Request& req, httplib::Response& res) {
+            if (config.family == Family::Saos) serve_saos(config, req, res, false);
+            else generate(req, res, false, false);
         });
-        server.Post("/generate/loop", [generate](const httplib::Request& req, httplib::Response& res) {
-            generate(req, res, true, false);
+        server.Post("/generate/loop", [config, generate](const httplib::Request& req, httplib::Response& res) {
+            if (config.family == Family::Saos) serve_saos(config, req, res, true);
+            else generate(req, res, true, false);
         });
+        if (config.family == Family::Saos) {
+            server.Get("/models/status", [config](const httplib::Request&, httplib::Response& res) {
+                res.set_content(saos_status_json(config), "application/json");
+            });
+            server.Get("/models/prompts", [config](const httplib::Request& req, httplib::Response& res) {
+                res.set_content(saos_prompts_json(config, req), "application/json");
+            });
+        }
         server.Post("/audio2audio", [generate](const httplib::Request& req, httplib::Response& res) {
             generate(req, res, false, true);
         });

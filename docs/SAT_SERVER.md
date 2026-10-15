@@ -1,15 +1,14 @@
 # SAT model HTTP service
 
 `sat-server` is the native HTTP entry point for Stable Audio Tools models. Start
-one process per model: Foundation-1 and SAOS finetunes keep their own model cache,
-port, and request contract, while all processes use the same `sa3.cpp` runtime
-directory and CPU/CUDA/Vulkan backend libraries. Model GGUFs are downloaded
-separately.
+one process per model family: Foundation-1 and SAOS (with its finetunes) keep
+their own model cache, port, and request contract, while all processes use the
+same `sa3.cpp` runtime directory and CPU/CUDA/Vulkan backend libraries. Model
+GGUFs are downloaded separately.
 
 ```powershell
 .\sat-server.exe --model foundation-1 --models-dir C:\models\foundation-1 --encoding Q4_K_M --port 8015
-.\sat-server.exe --model arc --models-dir C:\models\saos --encoding Q4_K_M --port 8018
-# For a published SAOS finetune, use --model kickbass or --model jerry-grunge
+.\sat-server.exe --model saos --models-dir C:\models\saos --encoding Q4_K_M --port 8005
 ```
 
 `--device` selects a ggml device; without it, the pipeline uses `SA3_DEVICE`
@@ -21,7 +20,8 @@ The default bind address is `127.0.0.1`. Each service resolves its
 three GGUF files from `--models-dir` and reports a missing set through
 `GET /health` (`503`, `status: model_missing`). It loads on the first generation
 and retains weights for subsequent requests. `POST /unload` releases them when
-the service is idle.
+the service is idle. Foundation-1 and SAO 1.0 generate
+[asynchronously](#asynchronous-response); SAOS answers each request directly.
 
 ## Foundation-1
 
@@ -88,27 +88,70 @@ unaffected.
 
 ## SAOS and finetunes
 
-Start a separate instance with `--model arc`, `kickbass`, or `jerry-grunge`.
-`POST /generate` accepts `prompt`, optional `seconds` (default 11, maximum 11),
-`seed`, and sampler overrides. `POST /generate/loop` accepts `prompt`, `bpm`,
-optional `bars` (1, 2, 4, or 8), and `loop_type` (`auto`, `drums`, or
-`instruments`). It generates on the model's 11-second canvas and crops the WAV
-to the exact number of samples for `bars × 4 × 60 / bpm`. If bars is omitted,
-the longest supported count fitting 11 seconds is chosen. BPM can also come
-from a `120 bpm` tag in the prompt. A selected BPM is added to the prompt if
-the tag is absent. An explicit overlong loop is rejected.
+One SAOS instance (`--model saos`) serves the ARC base model and every published
+finetune whose DiT is in `--models-dir` at the server's encoding, beside the
+shared T5 and Oobleck files: `finetunes/kickbass/` and `finetunes/jerry-grunge/`,
+as in the GGUF repository. `--model arc`, `kickbass`, or `jerry-grunge` starts
+the same server with that variant active. The variants share the T5 and
+autoencoder, so one DiT is resident at a time and switching swaps only the DiT.
+
+The routes keep gary4local's Python stable-audio contract, which gary4juce's
+jerry tab drives. A request names its model the way it named a checkpoint
+before: `model_type: "standard"` for ARC, or `"finetune"` with `finetune_repo`
+and `finetune_checkpoint` naming the checkpoint the GGUF was converted from:
+
+| variant | `finetune_repo` | `finetune_checkpoint` |
+|---|---|---|
+| `kickbass` | `S3Sound/kickbass` | `kickbass_v1_saos_e257_s18870.ckpt` |
+| `jerry-grunge` | `thepatch/jerry_grunge` | `jerry_encoded_bs64_epoch=374-step=3000.ckpt` |
+
+Generation is synchronous. With `return_format: "base64"` the response is
+`{success, audio_base64, metadata}`; the default, `"file"`, returns the 16-bit
+WAV. The audio is scaled to a full-scale peak, as Python's was. `steps` (1–250)
+and `cfg_scale` (0–20) default per model, to 8 and 1 for ARC and 50 and 4 for the
+rectified-flow finetunes. `sampler_type` is `pingpong` (ARC's default), `euler`
+(the finetunes' default) or `dpmpp`. A drawn seed stays below 2^32.
+
+`POST /generate` takes `prompt`, `negative_prompt` and `seconds_total` (whole
+seconds, default and maximum 11). Generation uses the whole canvas, conditions
+on `seconds_total`, and crops the output to it. The metadata carries `prompt`,
+`negative_prompt`, `steps`, `cfg_scale`, `seed`, `sample_rate`,
+`duration_seconds`, `generation_time`, `realtime_factor`, `detected_bpm` and
+`device`, plus `model`, `model_key` and `sampler`.
+
+`POST /generate/loop` needs a BPM, from a `120bpm` tag in the prompt (or a
+`bpm` field, which adds the tag). `bars` (1, 2, 4, or 8) defaults to the longest
+count that leaves a second of the 11.89-second canvas spare; an explicit count
+longer than the canvas is refused. `loop_type` is `auto`, `drums` (adds "drum
+loop" when the prompt names no drums, and a negative prompt against melody), or
+`instruments` (removes "drums" from the prompt, and adds a negative prompt
+against percussion). The WAV is cropped to exactly `bars × 4 × 60 / bpm`. The
+metadata adds `original_prompt`, `loop_type`, `bars`, `loop_duration_seconds`,
+`calculated_duration_seconds`, `seconds_per_bar` and `model_type`.
 
 ```json
-{"prompt":"tight funk drum break","bpm":120,"bars":4,"loop_type":"drums","seed":42}
+{"prompt":"tight funk drum break 120bpm","model_type":"standard","steps":8,"cfg_scale":1,"sampler_type":"pingpong","loop_type":"drums","return_format":"base64","seed":-1}
 ```
+
+`GET /models/status` lists the installed variants in `model_details`, keyed as
+Python keyed its model cache (`standard_saos`, or
+`finetune_<repo>_<checkpoint>` with `/` and `.` as `_`), each with its `type`
+and `source` (`stabilityai/stable-audio-open-small`, or
+`<repo>/<checkpoint>`). `cache_status.usage_order` lists them least recently
+used first, so the last is the active one. `GET /models/prompts` returns a
+finetune's dice prompt bank from `finetunes/<variant>/prompts.json`, chosen by
+`?key=`, by `?repo=` and `?checkpoint=`, or else the active variant (`?prefer=finetune`
+prefers the most recent finetune). A variant without a bank, or with an
+unreadable one, answers Python's empty bank.
 
 SAO 1.0 can run with `--model sao1` through `/generate`; the SAOS loop route is
 not offered for that model.
 
 ## Asynchronous response
 
-Both generation routes return `success`, `session_id`, resolved `seed`,
-`prompt`, `bars`, `bpm`, and `gen_duration` immediately. Poll
+For Foundation-1 and SAO 1.0, both generation routes return `success`,
+`session_id`, resolved `seed`, `prompt`, `bars`, `bpm`, and `gen_duration`
+immediately. Poll
 `GET /poll_status/<session_id>` for `status`, `progress`, `step`, and
 `total_steps`; completion includes `audio_data` as base64 PCM WAV and metadata.
 `?consume=1` returns and removes a completed result. One job runs per process;

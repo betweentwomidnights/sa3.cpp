@@ -140,6 +140,9 @@ public:
 
     void load(PipelinePaths paths, PipelineOptions options = {});
     const PipelinePaths& paths() const { return paths_; }
+    // Switch to another DiT that shares this T5 and autoencoder (a finetune of
+    // the same base); only the resident DiT is released.
+    void set_dit(std::string path);
     GenerateResult generate(const GenerateParams& params) const;
     // Release resident weights; the next generate() reloads what it needs.
     void unload() const;

@@ -52,6 +52,28 @@ inline std::string saos_dit_relative_path(const std::string& variant,
     return {};
 }
 
+// The published SAOS variants and the checkpoints they were converted from, so a
+// client can name a finetune by its Hugging Face repo and checkpoint as it did
+// with the PyTorch checkpoints.
+struct SaosVariant {
+    const char* name;        // canonical_saos_variant()
+    const char* repo;        // source Hugging Face repo
+    const char* checkpoint;  // source checkpoint; empty for the base model
+};
+
+inline constexpr SaosVariant kSaosVariants[] = {
+    {"arc", "stabilityai/stable-audio-open-small", ""},
+    {"kickbass", "S3Sound/kickbass", "kickbass_v1_saos_e257_s18870.ckpt"},
+    {"jerry-grunge", "thepatch/jerry_grunge", "jerry_encoded_bs64_epoch=374-step=3000.ckpt"},
+};
+
+// A finetune's prompt bank (its dice prompts), published beside its DiT.
+inline std::string saos_prompts_relative_path(const std::string& variant) {
+    const std::string name = canonical_saos_variant(variant);
+    if (name == "kickbass" || name == "jerry-grunge") return "finetunes/" + name + "/prompts.json";
+    return {};
+}
+
 inline std::string saos_t5_relative_path(const std::string& encoding) {
     const std::string enc = normalize_encoding(encoding);
     if (!is_saos_published_encoding(enc)) return {};

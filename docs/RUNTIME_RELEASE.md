@@ -37,9 +37,9 @@ Visual Studio is newest. The script also runs the staged
 runtime DLLs load from the package's own folder rather than System32.
 
 The same core and backend files can serve SA3, Foundation-1, and SAOS on
-separate ports. Each SAT model gets its own `sat-server` process, keeping its
-weight cache and model-specific API separate without installing a second CUDA
-runtime. See [SAT_SERVER.md](SAT_SERVER.md) for endpoints and host-tempo
+separate ports. Each SAT model family gets its own `sat-server` process (SAOS
+serves its finetunes from the same one), keeping its weight cache and
+model-specific API separate without installing a second CUDA runtime. See [SAT_SERVER.md](SAT_SERVER.md) for endpoints and host-tempo
 stretch behavior.
 
 To run both browser views from the unpacked directory with one command:

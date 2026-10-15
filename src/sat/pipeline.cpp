@@ -210,6 +210,13 @@ void Pipeline::load(PipelinePaths paths, PipelineOptions options) {
     options_ = std::move(options);
 }
 
+void Pipeline::set_dit(std::string path) {
+    if (path.empty()) throw std::invalid_argument("SAT pipeline requires a DiT GGUF path");
+    if (path == paths_.dit) return;
+    paths_.dit = std::move(path);
+    if (resident_) resident_->dit.reset();
+}
+
 void Pipeline::unload() const {
     resident_.reset();
 }
