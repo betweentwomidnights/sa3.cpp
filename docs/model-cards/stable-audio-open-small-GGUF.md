@@ -21,7 +21,8 @@ Oobleck decoder. Validated full-checkpoint finetunes are nested under `finetunes
 - `finetunes/kickbass/`: `S3Sound/kickbass`, checkpoint
   `kickbass_v1_saos_e257_s18870.ckpt`.
 - `finetunes/jerry-grunge/`: `thepatch/jerry_grunge`, preencoded checkpoint
-  `jerry_encoded_bs64_epoch=374-step=3000.ckpt`.
+  `jerry_encoded_bs64_epoch=374-step=3000.ckpt`, with the source repository's
+  `prompts.json` prompt bank, which `sat-server` serves to gary4juce's dice.
 
 ## Quantization choices
 
