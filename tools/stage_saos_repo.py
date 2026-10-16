@@ -50,7 +50,7 @@ def source_path(models, quant, component, variant, encoding):
             return models / "stable-audio-open-small-dit-f16.gguf"
         if variant == "kickbass":
             return models / "finetunes" / "kickbass" / "kickbass-v1-e257-dit-f16.gguf"
-        return models / "finetunes" / "jerry_grunge" / "jerry-grunge-bs64-step3000-dit-f16.gguf"
+        return models / "finetunes" / "jerry_grunge" / "jerry-grunge-bs128-step320-dit-f16.gguf"
     if component == "dit":
         prefix = {"arc": "stable-audio-open-small", "kickbass": "kickbass",
                   "jerry-grunge": "jerry-grunge"}[variant]

@@ -92,7 +92,7 @@ if [ "$SAT" -eq 1 ]; then
   case "$SAOS_VARIANT" in
     arc) SAOS_DIT="stable-audio-open-small-dit-0.3B-v1.0-$ENC.gguf" ;;
     kickbass) SAOS_DIT="finetunes/kickbass/kickbass-v1-e257-dit-0.3B-v1.0-$ENC.gguf" ;;
-    jerry-grunge) SAOS_DIT="finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-$ENC.gguf" ;;
+    jerry-grunge) SAOS_DIT="finetunes/jerry-grunge/jerry-grunge-bs128-step320-dit-0.3B-v1.0-$ENC.gguf" ;;
     *) echo "unknown SAOS variant '$SAOS_VARIANT'" >&2; exit 2 ;;
   esac
   SAOS_REPO="$NAMESPACE/stable-audio-open-small-GGUF"

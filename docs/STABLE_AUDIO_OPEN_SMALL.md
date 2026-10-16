@@ -152,11 +152,21 @@ native CUDA component with the shared SAOS T5 and Oobleck artifacts:
   750-tensor full checkpoint. RF DPM++ at 40 steps/CFG 4 generated 11 seconds in
   about 2.5 seconds total on an RTX 5070 Laptop GPU.
 - `thepatch/jerry_grunge`, checkpoint
-  `jerry_encoded_bs64_epoch=374-step=3000.ckpt`: a 5.77 GB preencoded Lightning
-  training snapshot. Conversion selected its 382-tensor EMA DiT, paired it with the
-  frozen duration conditioner, and omitted optimizer, loss, and autoencoder state.
-  RF DPM++ at 40 steps/CFG 4 likewise generated 11 seconds in about 2.5 seconds. The
-  validation prompt was `chillhop synth warm bass dusty drums sidechain 90 bpm`.
+  `jerry_encoded_bs128_epoch=106-step=320.ckpt`: a 5.77 GB preencoded Lightning
+  training snapshot. Conversion selected its 382-tensor EMA DiT (matching the
+  checkpoint's EMA copy to F16 rounding, not its raw training weights), paired it
+  with the frozen duration conditioner, and omitted optimizer, loss, and autoencoder
+  state. The validation prompt was
+  `chillhop synth warm bass dusty drums sidechain 90 bpm`.
+
+The first Jerry Grunge publication used `jerry_encoded_bs64_epoch=374-step=3000.ckpt`,
+which is overfit: different prompts converge on near-identical audio (0.82-0.95
+spectral similarity across a guitar, a piano and a trap hi-hat prompt at one seed,
+against -0.04-0.69 for step 320) and a negative prompt barely steers it. It had
+gone unnoticed because gary4local's Python service, which every comparison was
+made against, never loaded the finetune at all: its loader renamed the EMA keys to
+`diffusion.model.*` while the model names them `model.*`, so every Jerry checkpoint
+ran as the base model. Step 320 was chosen by ear once that loader was fixed.
 
 The objective-driven no-override path was also exercised on KickBass and resolved to
 Euler, 50 steps, and CFG 4 as intended.
@@ -177,9 +187,17 @@ small diffusion-trajectory and phase changes.
 | Tier | Complete bundle | ARC envelope / log-mag | Jerry envelope / log-mag |
 | --- | ---: | ---: | ---: |
 | F16 | 1,010 MiB | reference | reference |
-| Q8_0 | 569 MiB | 0.9995 / 0.9917 | 0.9999 / 0.9986 |
-| Q5_K_M | 416 MiB | 0.9937 / 0.9895 | 0.9992 / 0.9977 |
-| Q4_K_M | 379 MiB | 0.9383 / 0.9832 | 0.9973 / 0.9964 |
+| Q8_0 | 569 MiB | 0.9995 / 0.9917 | 0.9993 / 0.9944 |
+| Q5_K_M | 416 MiB | 0.9937 / 0.9895 | 0.9976 / 0.9861 |
+| Q4_K_M | 379 MiB | 0.9383 / 0.9832 | 0.8970 / 0.8828 |
+
+The Jerry column is step 320 at seed 4242 (RF DPM++, 40 steps, CFG 4). Being far
+more prompt-sensitive than step 3000, it is also more sensitive to the trajectory:
+Q8_0 stayed at 0.999 envelope across seeds 1, 77 and 4242, while Q5_K_M and Q4_K_M
+reached 0.98-0.998 at some seeds and took a different take at others (Q5_K_M 0.91
+and Q4_K_M 0.89 envelope at seed 77). The quantized tensors themselves all passed
+`sa3-quant-check`; a different take is not a damaged one, but Q8_0 is the tier to
+use when a quantized Jerry should match F16.
 
 The all-Q4 KickBass bundle measured 0.9952 envelope and 0.9855 log-magnitude
 cosine. DiT-only Q4 tests were stronger than the cumulative ARC result (0.9666

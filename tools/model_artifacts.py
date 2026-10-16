@@ -192,7 +192,7 @@ def saos_dit_filename(variant, encoding):
         return f"stable-audio-open-small-dit-0.3B-{VERSION}-{enc}.gguf"
     if variant == "kickbass":
         return f"finetunes/kickbass/kickbass-v1-e257-dit-0.3B-{VERSION}-{enc}.gguf"
-    return f"finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-{VERSION}-{enc}.gguf"
+    return f"finetunes/jerry-grunge/jerry-grunge-bs128-step320-dit-0.3B-{VERSION}-{enc}.gguf"
 
 
 def saos_t5_filename(encoding):

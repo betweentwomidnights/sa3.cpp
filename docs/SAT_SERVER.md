@@ -103,7 +103,7 @@ and `finetune_checkpoint` naming the checkpoint the GGUF was converted from:
 | variant | `finetune_repo` | `finetune_checkpoint` |
 |---|---|---|
 | `kickbass` | `S3Sound/kickbass` | `kickbass_v1_saos_e257_s18870.ckpt` |
-| `jerry-grunge` | `thepatch/jerry_grunge` | `jerry_encoded_bs64_epoch=374-step=3000.ckpt` |
+| `jerry-grunge` | `thepatch/jerry_grunge` | `jerry_encoded_bs128_epoch=106-step=320.ckpt` |
 
 Generation is synchronous. With `return_format: "base64"` the response is
 `{success, audio_base64, metadata}`; the default, `"file"`, returns the 16-bit

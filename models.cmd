@@ -140,7 +140,7 @@ if not defined AE_ENC ( echo unsupported SAOS Oobleck encoding "%AE_ENCODING%" 1
 if /I not "%SAT_MODEL%"=="saos" goto sat_large
 if /I "%SAOS_VARIANT%"=="arc" set "SAOS_DIT=stable-audio-open-small-dit-0.3B-v1.0-%ENC%.gguf"
 if /I "%SAOS_VARIANT%"=="kickbass" set "SAOS_DIT=finetunes/kickbass/kickbass-v1-e257-dit-0.3B-v1.0-%ENC%.gguf"
-if /I "%SAOS_VARIANT%"=="jerry-grunge" set "SAOS_DIT=finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-%ENC%.gguf"
+if /I "%SAOS_VARIANT%"=="jerry-grunge" set "SAOS_DIT=finetunes/jerry-grunge/jerry-grunge-bs128-step320-dit-0.3B-v1.0-%ENC%.gguf"
 if not defined SAOS_DIT ( echo unknown SAOS variant "%SAOS_VARIANT%" 1>&2 & exit /b 2 )
 set "SAOS_REPO=%NAMESPACE%/stable-audio-open-small-GGUF"
 if not exist "%OUT%" mkdir "%OUT%"

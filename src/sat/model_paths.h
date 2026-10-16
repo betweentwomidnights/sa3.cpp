@@ -48,7 +48,7 @@ inline std::string saos_dit_relative_path(const std::string& variant,
     if (name == "kickbass")
         return "finetunes/kickbass/kickbass-v1-e257-dit-0.3B-v1.0-" + enc + ".gguf";
     if (name == "jerry-grunge")
-        return "finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-" + enc + ".gguf";
+        return "finetunes/jerry-grunge/jerry-grunge-bs128-step320-dit-0.3B-v1.0-" + enc + ".gguf";
     return {};
 }
 
@@ -64,7 +64,7 @@ struct SaosVariant {
 inline constexpr SaosVariant kSaosVariants[] = {
     {"arc", "stabilityai/stable-audio-open-small", ""},
     {"kickbass", "S3Sound/kickbass", "kickbass_v1_saos_e257_s18870.ckpt"},
-    {"jerry-grunge", "thepatch/jerry_grunge", "jerry_encoded_bs64_epoch=374-step=3000.ckpt"},
+    {"jerry-grunge", "thepatch/jerry_grunge", "jerry_encoded_bs128_epoch=106-step=320.ckpt"},
 };
 
 // A finetune's prompt bank (its dice prompts), published beside its DiT.
