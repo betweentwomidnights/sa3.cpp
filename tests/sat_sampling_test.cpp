@@ -497,7 +497,7 @@ int main() {
                     "finetunes/kickbass/kickbass-v1-e257-dit-0.3B-v1.0-Q4_K_M.gguf",
                     "canonical nested KickBass filename");
     fails += expect(sa3::sat::saos_dit_relative_path("jerry_grunge", "F16") ==
-                    "finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-F16.gguf",
+                    "finetunes/jerry-grunge/jerry-grunge-bs128-step320-dit-0.3B-v1.0-F16.gguf",
                     "SAOS variant aliases normalize");
     fails += expect(sa3::sat::saos_t5_relative_path("q8_0") ==
                     "t5-base-encoder-0.1B-v1.0-Q8_0.gguf" &&

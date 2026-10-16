@@ -140,7 +140,7 @@ def main():
         ("/generate", {"prompt": "drums", "model_type": "remix"}, 400, "model_type must be"),
         ("/generate", {"prompt": "drums", "model_type": "finetune"}, 400, "finetune_repo and finetune_checkpoint"),
         ("/generate", {"prompt": "drums", "model_type": "finetune", "finetune_repo": "thepatch/jerry_grunge",
-                       "finetune_checkpoint": "jerry_encoded_bs128_epoch=106-step=320.ckpt"}, 400,
+                       "finetune_checkpoint": "jerry_encoded_bs64_epoch=374-step=3000.ckpt"}, 400,
          "no native SAOS finetune"),
         ("/generate/loop", {"prompt": "drums"}, 400, "BPM must be specified"),
         ("/generate/loop", {"prompt": "drums 100bpm", "bars": 8}, 400, "exceeds"),

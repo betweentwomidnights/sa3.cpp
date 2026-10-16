@@ -21,8 +21,10 @@ Oobleck decoder. Validated full-checkpoint finetunes are nested under `finetunes
 - `finetunes/kickbass/`: `S3Sound/kickbass`, checkpoint
   `kickbass_v1_saos_e257_s18870.ckpt`.
 - `finetunes/jerry-grunge/`: `thepatch/jerry_grunge`, preencoded checkpoint
-  `jerry_encoded_bs64_epoch=374-step=3000.ckpt`, with the source repository's
+  `jerry_encoded_bs128_epoch=106-step=320.ckpt`, with the source repository's
   `prompts.json` prompt bank, which `sat-server` serves to gary4juce's dice.
+  The `jerry-grunge-bs64-step3000-*` files beside it are an earlier, overfit conversion
+  of `jerry_encoded_bs64_epoch=374-step=3000.ckpt`, kept only for sa3.cpp v0.1.6 and earlier.
 
 ## Quantization choices
 
@@ -39,6 +41,10 @@ all three components unless you have a reason to mix them.
 Matched 11-second renders validated all four tiers on ARC, KickBass, and Jerry Grunge.
 F16 is the runtime and downloader default. Q5_K_M was consistently robust and is the
 recommended opt-in quantized tier; it is only 37 MiB larger than the all-Q4 bundle.
+
+Jerry Grunge is more prompt-sensitive than the other two, and at some seeds its Q5_K_M and
+Q4_K_M bundles take a different take on the prompt than F16; Q8_0 tracks F16 closely at
+every seed tested.
 
 ## Download and run
 

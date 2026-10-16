@@ -33,7 +33,7 @@ class ModelArtifactsTest(unittest.TestCase):
         )
         self.assertEqual(
             saos_dit_filename("jerry_grunge", "f16"),
-            "finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-F16.gguf",
+            "finetunes/jerry-grunge/jerry-grunge-bs128-step320-dit-0.3B-v1.0-F16.gguf",
         )
 
     def test_saos_f16_bundle_is_the_self_contained_default(self):
@@ -222,7 +222,7 @@ class ModelArtifactsTest(unittest.TestCase):
         self.assertEqual(output.count("[plan]"), 3)
         self.assertIn("thepatch/stable-audio-open-small-GGUF/resolve/main/", output)
         self.assertIn(
-            "finetunes/jerry-grunge/jerry-grunge-bs64-step3000-dit-0.3B-v1.0-F16.gguf",
+            "finetunes/jerry-grunge/jerry-grunge-bs128-step320-dit-0.3B-v1.0-F16.gguf",
             output,
         )
         self.assertIn("t5-base-encoder-0.1B-v1.0-F16.gguf", output)
