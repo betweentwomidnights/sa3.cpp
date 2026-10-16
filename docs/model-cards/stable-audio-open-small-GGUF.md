@@ -21,10 +21,10 @@ Oobleck decoder. Validated full-checkpoint finetunes are nested under `finetunes
 - `finetunes/kickbass/`: `S3Sound/kickbass`, checkpoint
   `kickbass_v1_saos_e257_s18870.ckpt`.
 - `finetunes/jerry-grunge/`: `thepatch/jerry_grunge`, preencoded checkpoint
-  `jerry_encoded_bs128_epoch=106-step=320.ckpt`, with the source repository's
-  `prompts.json` prompt bank, which `sat-server` serves to gary4juce's dice.
-  The `jerry-grunge-bs64-step3000-*` files beside it are an earlier, overfit conversion
-  of `jerry_encoded_bs64_epoch=374-step=3000.ckpt`, kept only for sa3.cpp v0.1.6 and earlier.
+  `jerry_encoded_bs128_epoch=106-step=320.ckpt`: step 320 of a batch-size 128,
+  learning-rate 1e-4 run, which turned out to be our favorite of that repository's
+  checkpoints. Its `prompts.json` prompt bank sits beside it; `sat-server` serves it
+  to gary4juce's dice.
 
 ## Quantization choices
 
