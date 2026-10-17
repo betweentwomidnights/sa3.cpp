@@ -22,7 +22,7 @@ function studioShell() {
   root.innerHTML = `<div class="studio-shell">
     <header class="studio-header">
       <h1><a href="https://github.com/betweentwomidnights/sa3.cpp" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">SA3.CPP</a> <small>studio</small></h1>
-      <nav aria-label="Studio views"><button type="button" data-studio-view="studio" aria-current="page">Studio</button><button type="button" data-studio-view="train">LoRA training</button><button type="button" data-studio-view="models">Models</button><button type="button" data-studio-view="settings">Settings</button></nav>
+      <nav aria-label="Studio views"><button type="button" data-studio-view="studio" aria-current="page">Studio</button><button type="button" data-studio-view="lanes">Automation</button><button type="button" data-studio-view="train">LoRA training</button><button type="button" data-studio-view="models">Models</button><button type="button" data-studio-view="settings">Settings</button></nav>
       <div class="status" id="studio-header-status"></div>
     </header>
     <main id="studio-view-studio" class="studio-view">
@@ -30,6 +30,7 @@ function studioShell() {
       <section class="studio-panel" aria-label="Current take"><div class="studio-panel-title"><h2>Current take</h2><span id="studio-take-info">No audio yet</span></div><div class="studio-wave-wrap" id="studio-wave-wrap"><canvas id="studio-waveform" aria-label="Audio waveform; click to seek"></canvas><div id="studio-wave-empty">Create audio or drop a WAV here.</div><div class="studio-wave-actions"><button id="studio-upload-wave" type="button" aria-label="Upload WAV" title="Upload WAV">${studioIcons.upload}</button><button id="studio-crop" type="button" aria-label="Select crop" title="Select crop" disabled>${studioIcons.crop}</button></div><div id="studio-drop-hint" hidden>Drop WAV to open it</div><input id="studio-import-file" type="file" accept="audio/wav,.wav" hidden></div><div class="studio-take-tools"><div id="studio-audio-slot"></div><button id="studio-play" type="button" aria-label="Play" title="Play" disabled>${studioIcons.play}</button><button id="studio-stop" type="button" aria-label="Stop" title="Stop" disabled>${studioIcons.stop}</button><span id="studio-time" class="studio-time">0:00 / 0:00</span><span id="studio-selection-label" hidden>No selection</span><button id="studio-download" type="button" disabled>Download WAV</button><button id="studio-clear" type="button" disabled>Clear take</button></div><div id="studio-meta-slot"></div><div id="studio-progress-slot"></div><div id="studio-error-slot"></div></section>
       <div class="studio-history-head"><h2>Past takes <span id="studio-history-count"></span></h2><div id="studio-history-actions"></div></div><div id="studio-history-slot"></div>
     </main>
+    <main id="studio-view-lanes" class="studio-view" hidden><iframe id="studio-lanes-frame" title="Automation lanes"></iframe></main>
     <main id="studio-view-train" class="studio-view" hidden><iframe id="studio-training-frame" title="LoRA training workspace"></iframe></main>
     <main id="studio-view-models" class="studio-view" hidden><div class="studio-hero"><div><div class="studio-eyebrow">Model library</div><h2>Get the sound you need.</h2><p>Model weights live beside the runtime in your configured models folder.</p></div></div><div id="studio-model-cards" class="studio-model-grid"></div><section class="studio-panel" style="margin-top:16px"><h2 style="font-size:1rem;margin:0 0 12px;border:0">Download a model set</h2><div class="param-grid"><div><label for="studio-download-variant">Variant</label><select id="studio-download-variant"><option value="medium">Medium</option><option value="small-music">Small music</option><option value="small-sfx">Small SFX</option></select></div><div><label for="studio-download-tier">DiT tier</label><select id="studio-download-tier"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · compact</option><option value="f32">F32</option><option value="q5_k_m">Q5_K_M</option><option value="q8_0">Q8_0</option></select></div></div><p class="small-note" style="margin:12px 0">The set includes an F32 autoencoder, F16 text encoder, conditioner, and tokenizer. <a href="https://huggingface.co/thepatch" target="_blank" rel="noopener" style="color:var(--accent)">Review model licenses and cards</a>.</p><button id="studio-download-model" type="button" class="primary">Download model set</button><p id="studio-download-status" class="small-note" role="status" style="margin:10px 0 0"></p></section><section class="studio-panel" style="margin-top:16px"><h2 style="font-size:1rem;margin:0 0 8px;border:0">Decoder corrections</h2><p class="small-note">A selected correction runs with every generation on its compatible model. Creative LoRAs stay in the render dialogs.</p><div id="studio-decoder-list"></div><button id="studio-download-decoder" type="button">Download SAME-L correction</button><p id="studio-decoder-status" class="small-note" role="status"></p></section></main>
     <main id="studio-view-settings" class="studio-view studio-settings" hidden><div class="studio-hero"><div><div class="studio-eyebrow">Studio settings</div><h2>Runtime and output.</h2><p>Keep the model loaded and tune output processing here.</p></div></div><div id="studio-session-settings"></div><details><summary>Audio processing</summary><div id="studio-audio-settings"></div></details></main>
@@ -66,13 +67,17 @@ function studioShell() {
 
 function studioShowView(name) {
   studio.view = name;
-  for (const view of ["studio", "train", "models", "settings"]) {
+  for (const view of ["studio", "lanes", "train", "models", "settings"]) {
     studioEl(`studio-view-${view}`).hidden = view !== name;
     document.querySelector(`[data-studio-view="${view}"]`).setAttribute("aria-current", view === name ? "page" : "false");
   }
   if (name === "train") {
     const frame = studioEl("studio-training-frame");
     if (!frame.src) frame.src = "/training/?embedded=1";
+  }
+  if (name === "lanes") {
+    const frame = studioEl("studio-lanes-frame");
+    if (!frame.src) frame.src = "/lanes?embedded=1";
   }
   if (name === "models") studioRefreshModels();
   if (name === "studio") loadLoras();
@@ -450,9 +455,9 @@ function studioWire() {
     if(!studioEl("studio-modal").hidden)studioCloseOperation();
     else if(studio.cropMode){studio.cropMode=false;studio.selection=[0,1];studioUpdateTakeControls();studioDrawWaveform();}
   });
-  window.addEventListener("hashchange",()=>{const view=location.hash.slice(1)||"studio";if(["studio","train","models","settings"].includes(view)&&view!==studio.view)studioShowView(view);});
+  window.addEventListener("hashchange",()=>{const view=location.hash.slice(1)||"studio";if(["studio","lanes","train","models","settings"].includes(view)&&view!==studio.view)studioShowView(view);});
   window.addEventListener("message",event=>{if(event.origin===location.origin&&event.data?.type==="sa3-lora-registered")loadLoras();});
-  const initial=location.hash.slice(1);if(["train","models","settings"].includes(initial))studioShowView(initial);
+  const initial=location.hash.slice(1);if(["lanes","train","models","settings"].includes(initial))studioShowView(initial);
 }
 
 function studioClearTake() { const audio=studioEl("result-audio");audio.pause();if(studio.frame)cancelAnimationFrame(studio.frame);studio.frame=0;studio.buffer=null;studio.peaks=null;studio.audioUrl="";studio.title="";studio.selection=[0,1];studio.cropMode=false;studioEl("result-section").style.display="none";audio.removeAttribute("src");audio.load();studioUpdateTakeControls();studioDrawWaveform(); }

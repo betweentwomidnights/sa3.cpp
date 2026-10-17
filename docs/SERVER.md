@@ -170,6 +170,57 @@ lora `name` resolves to `<adapters-dir>/lora-<name>-*.gguf`; a full `"path"` als
 `keep_models: true` to keep the model resident between requests (lower latency, more VRAM); the server
 reloads a clean DiT only when a request's adapter set changes, so strengths can vary per request either way.
 
+## LoRA automation lanes (`lora_lanes`, `lora_envelope`)
+
+Experimental. An envelope draws an adapter's strength over the output timeline, so one request
+replaces crop -> continue at another strength -> crop. Breakpoints are `[seconds, amount]`, linear
+between points and held flat past either end; `amount` multiplies the adapter's `strength`, so with
+strength 1.0 the curve is the strength. With continuation, time 0 is the start of the kept source.
+
+```json
+"lora_lanes": [
+  {"loras": [{"name": "kev"}],    "envelope": [[0, 1], [20, 0]]},
+  {"loras": [{"name": "keygen"}], "envelope": [[0, 0], [20, 1]], "prompt": "demoscene chiptune, fast arpeggios"}
+]
+```
+
+Each lane is its own DiT pass per step: the request's `loras` (shared by every pass) followed by
+the lane's adapters, built at the lane's peak and conditioned on the lane's `prompt` if it has one.
+A base pass runs the shared adapters alone on the request's prompt, and per latent frame (~93 ms)
+the step is `v_base + Σ amount_k(t)·(v_k − v_base)`. Every adapter must take the functional path
+('lora' / 'dora-rows'). Cost is one extra DiT pass per lane per step (CFG doubles it as usual).
+CLI: `--lane kev --lane-envelope 0:1,20:0 --lane keygen --lane-envelope 0:0,20:1 --lane-prompt "..."`.
+
+`"lora_envelope": [[sec, amount], ...]` with plain `loras` is the one-lane shorthand: every DiT
+adapter moves together on that curve (CLI: `--lora-envelope 0:0.2,10:1.3,20:0.2`).
+
+`"lora_envelope_mode"` picks how a single lane is applied. `"velocity"` (the default) is the
+separate-pass mixing above: within one step a frame is exactly the base or exactly the adapted
+prediction (measured 0.000 / 1.000 on either side of a hard 0 -> 1 edge). `"layer"` is one pass in
+which every adapted layer outputs `base + e(t)·(adapted − base)` per token (`sa3::DitEnv` in
+`src/dit.h`); it is cheaper, but self-attention carries the adapter across the timeline, so on the
+same edge the amount-0 side sat 0.62–0.80 of the way to the adapted prediction. Layer mode takes one
+lane, no lane prompt and no shared DiT adapters.
+
+Over a full generation the sides still influence each other: the whole canvas is denoised together,
+so neighbouring sections pull towards a common sound. `"lane_isolation": λ` (CLI `--lane-isolation`)
+counters that: while the step's sigma is above `"lane_isolation_until"` (default 0.9, the first 4 of
+8 default steps), self-attention between frames i and j is biased by `−λ·Σ_k |e_k(i) − e_k(j)|`, so
+frames mostly attend to frames in the same phase while the structure forms; the later steps attend
+fully and smooth the joins. On a base -> keygen step at 10 s (3 seeds, 8 steps), the keygen half
+reached 0.40 of the full adapter's timbre without isolation and 0.79-0.86 with λ ≥ 3; isolating only
+the first 1-3 steps did nothing. Default 0 (off).
+
+`"lane_average_until": σ` (CLI `--lane-average-until`) is the opposite trade: while the step's sigma
+is above it, every lane plays at its curve's average over the clip, so the take settles on one
+arrangement and the drawn curves only shape the later steps. Isolation is paused during those steps.
+Default 0 (off).
+
+The studio's **Automation** tab (`/#lanes`, or the bare editor at `/lanes`) draws lanes over the
+current take's spectrogram or waveform and keeps a list of takes to compare. Its BPM and key fields
+are appended to the base prompt and every lane prompt, it shares the decoder correction chosen in
+the Models tab, and the blending options above sit under Advanced.
+
 ## loudness safety
 
 the server defaults to the same output safety chain used in gary4local: decoded audio is peak-normalized

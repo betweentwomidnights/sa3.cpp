@@ -11,6 +11,7 @@
 #include "nn.h"
 
 #include <cmath>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -88,9 +89,26 @@ struct DitLoraParam {
 };
 using DitLora = std::map<std::string, DitLoraParam>;
 
+// LoRA strength automation: a per-token amount e in [0,1] for the adapter chain, so the adapter
+// strength can follow a curve over the timeline inside ONE sampling run instead of crop ->
+// continue at a new strength -> crop. The chain in DitLora is built at the curve's peak; every
+// adapted layer then outputs  y0 + e ⊙ (y1 - y0)  per token, where y0 is the base layer and y1
+// the adapted one. For a plain LoRA that is exactly the layer at strength e·peak (the residual is
+// linear in strength); for dora-rows it interpolates the row rescale, exact at e = 0 and e = 1.
+// Adapted layers that are not per-token (the time/global/gce embeds -> adaLN, cond_embed ->
+// cross-attn context) run twice, base and adapted, and the adaLN modulation and cross-attention
+// output are mixed per token the same way. At e ≡ 1 the graph reproduces the ordinary adapted run;
+// at e ≡ 0 the ordinary base run.
+struct DitEnv {
+    ggml_tensor* eS = nullptr;   // [1, mem+T] block tokens (memory tokens carry the curve's mean)
+    ggml_tensor* eT = nullptr;   // [1, T]     latent frames
+};
+
 // y = mul_mat(W,x) [+ functional adapter] [+ bias]. See DitLora above. `x` is [in, seq].
+// With `e` ([1, seq], see DitEnv) the adapter's contribution is scaled per token.
 inline ggml_tensor* dit_lin(ggml_context* ctx, const GgufModel& W, const std::string& name,
-                            ggml_tensor* x, ggml_tensor* bias, const DitLora* dl) {
+                            ggml_tensor* x, ggml_tensor* bias, const DitLora* dl,
+                            ggml_tensor* e = nullptr) {
     ggml_tensor* w = W.get(name);
     const DitLoraParam* p = nullptr;
     if (dl) {
@@ -105,6 +123,7 @@ inline ggml_tensor* dit_lin(ggml_context* ctx, const GgufModel& W, const std::st
     // past VRAM into driver sysmem paging (the 25x slowdown).
     ggml_tensor* wl = w;
     ggml_tensor* y = ggml_mul_mat(ctx, wl, x);                 // [out, seq]
+    ggml_tensor* const y0 = y;                                 // the base layer, for DitEnv
     if (p && !p->terms.empty()) {
         // Inference: a precomputed chain of N adapters. See DitLoraParam::terms — every dora
         // row scale is already folded into base_scale and into each B'_k, so composing adapters
@@ -144,36 +163,54 @@ inline ggml_tensor* dit_lin(ggml_context* ctx, const GgufModel& W, const std::st
             y = ggml_mul(ctx, y, scale_vec);                                          // broadcast over seq
         }
     }
+    if (e && y != y0) y = ggml_add(ctx, y0, ggml_mul(ctx, ggml_sub(ctx, y, y0), e));
     if (bias) y = ggml_add(ctx, y, bias);
     return y;
 }
 
 // dual-softmax differential attention; q,k,v,qd,kd already in [head_dim, S, n_head].
 inline ggml_tensor* dit_diff_attn(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_tensor* v,
-                                  ggml_tensor* qd, ggml_tensor* kd, int dim, float scale) {
-    ggml_tensor* o = ggml_sub(ctx, nn::sdpa(ctx, q, k, v, nullptr, scale),
-                                   nn::sdpa(ctx, qd, kd, v, nullptr, scale)); // [hd, Sq, nh]
+                                  ggml_tensor* qd, ggml_tensor* kd, int dim, float scale,
+                                  ggml_tensor* mask = nullptr) {
+    ggml_tensor* o = ggml_sub(ctx, nn::sdpa(ctx, q, k, v, mask, scale),
+                                   nn::sdpa(ctx, qd, kd, v, mask, scale)); // [hd, Sq, nh]
     o = ggml_cont(ctx, ggml_permute(ctx, o, 0, 2, 1, 3));                     // [hd, nh, Sq]
     return ggml_reshape_2d(ctx, o, dim, o->ne[2]);
 }
 
 // One DiT block. x:[dim,S]; context:[dim,Ctx]; gcond:[6*dim] adaLN signal; ones:[1]=1.0.
 // local_cond:[local_dim,T] (inpaint) or nullptr — projected per-block and added to the T real tokens.
+// self_mask: optional additive self-attention bias [S, S] (F16), e.g. the lane isolation bias.
 // autodiff_safe expands broadcasts and view operands for ggml backward; keep it false for inference
 // so generation retains the original, validated graph and its backend fusion/numerical behavior.
 inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::string& p,
                               ggml_tensor* x, ggml_tensor* context, ggml_tensor* gcond,
                               ggml_tensor* pos, ggml_tensor* ones, const DitConfig& c,
                               ggml_tensor* local_cond = nullptr, const DitLora* dl = nullptr,
-                              bool autodiff_safe = false) {
+                              bool autodiff_safe = false, const DitEnv* env = nullptr,
+                              ggml_tensor* gcond0 = nullptr, ggml_tensor* context0 = nullptr,
+                              ggml_tensor* self_mask = nullptr) {
     const int dim = c.dim, hd = c.head_dim, nh = c.heads;
-    const int64_t S = x->ne[1], Ctx = context->ne[1];
+    const int64_t S = x->ne[1];
     const float scale = 1.0f / sqrtf((float)hd);
+    // DitEnv: gcond/context are the ADAPTED conditioning, gcond0/context0 the base (see DitEnv).
+    ggml_tensor* eS = env ? env->eS : nullptr;
+    ggml_tensor* eT = env ? env->eT : nullptr;
 
     // adaLN-zero: (per-layer ssg) + gcond, split into 6 modulation vectors [dim]
     ggml_tensor* ssg = ggml_add(ctx, W.get(p+"ssg"), gcond);     // [6*dim]
     auto mod = [&](int i){ return ggml_view_1d(ctx, ssg, dim, (size_t)i*dim*sizeof(float)); };
-    ggml_tensor *sc_a=mod(0),*sh_a=mod(1),*g_a=mod(2),*sc_f=mod(3),*sh_f=mod(4),*g_f=mod(5);
+    std::function<ggml_tensor*(int)> modv = mod;
+    if (env) {
+        // per-token modulation [6*dim, S]: base + e ⊙ (adapted - base)
+        ggml_tensor* d  = ggml_reshape_2d(ctx, ggml_sub(ctx, gcond, gcond0), 6*dim, 1);
+        ggml_tensor* dS = ggml_mul(ctx, ggml_repeat(ctx, d, ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 6*dim, S)), eS);
+        ssg = ggml_add(ctx, dS, ggml_add(ctx, W.get(p+"ssg"), gcond0));            // [6*dim, S]
+        modv = [&, ssg](int i){
+            return ggml_cont(ctx, ggml_view_2d(ctx, ssg, dim, S, ssg->nb[1], (size_t)i*dim*sizeof(float)));
+        };
+    }
+    ggml_tensor *sc_a=modv(0),*sh_a=modv(1),*g_a=modv(2),*sc_f=modv(3),*sh_f=modv(4),*g_f=modv(5);
     auto modulate = [&](ggml_tensor* h, ggml_tensor* sc, ggml_tensor* sh){
         if (!autodiff_safe)
             return ggml_add(ctx, ggml_mul(ctx, h, ggml_add(ctx, sc, ones)), sh);
@@ -196,8 +233,8 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
     auto toAttn = [&](ggml_tensor* a){ return ggml_cont(ctx, ggml_permute(ctx, a, 0, 2, 1, 3)); };
 
     auto sl = [&](ggml_tensor* t, int i){ return ggml_view_2d(ctx, t, dim, t->ne[1], t->nb[1], (size_t)i*dim*sizeof(float)); };
-    auto single_attn = [&](ggml_tensor* qa, ggml_tensor* ka, ggml_tensor* va){  // q,k,v [hd,seq,nh]
-        ggml_tensor* o = nn::sdpa(ctx, qa, ka, va, nullptr, scale);
+    auto single_attn = [&](ggml_tensor* qa, ggml_tensor* ka, ggml_tensor* va, ggml_tensor* mask){  // q,k,v [hd,seq,nh]
+        ggml_tensor* o = nn::sdpa(ctx, qa, ka, va, mask, scale);
         o = ggml_cont(ctx, ggml_permute(ctx, o, 0, 2, 1, 3));
         return ggml_reshape_2d(ctx, o, dim, o->ne[2]);
     };
@@ -205,7 +242,7 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
     // --- self-attention with adaLN + partial RoPE (differential or standard) ---
     ggml_tensor* res = x;
     ggml_tensor* h = modulate(nn::rms_norm(ctx, x, W.get(p+"pre_norm.gamma"), c.norm_eps), sc_a, sh_a);
-    ggml_tensor* qkv = dit_lin(ctx, W, p+"self.qkv.weight", h, nullptr, dl); // [3 or 5 *dim, S]
+    ggml_tensor* qkv = dit_lin(ctx, W, p+"self.qkv.weight", h, nullptr, dl, eS); // [3 or 5 *dim, S]
     ggml_tensor* q = qknorm(heads(sl(qkv,0),S), p+"self.q_norm.gamma");
     ggml_tensor* k = qknorm(heads(sl(qkv,1),S), p+"self.k_norm.gamma");
     ggml_tensor* v = heads(sl(qkv,2),S);
@@ -215,17 +252,19 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
         ggml_tensor* qd = qknorm(heads(sl(qkv,3),S), p+"self.q_norm.gamma");
         ggml_tensor* kd = qknorm(heads(sl(qkv,4),S), p+"self.k_norm.gamma");
         qd = nn::rope_neox(ctx,qd,pos,c.rot,c.rope_base); kd = nn::rope_neox(ctx,kd,pos,c.rot,c.rope_base);
-        o = dit_diff_attn(ctx, toAttn(q),toAttn(k),toAttn(v),toAttn(qd),toAttn(kd), dim, scale);
+        o = dit_diff_attn(ctx, toAttn(q),toAttn(k),toAttn(v),toAttn(qd),toAttn(kd), dim, scale, self_mask);
     } else {
-        o = single_attn(toAttn(q), toAttn(k), toAttn(v));
+        o = single_attn(toAttn(q), toAttn(k), toAttn(v), self_mask);
     }
-    o = dit_lin(ctx, W, p+"self.out.weight", o, nullptr, dl);
+    o = dit_lin(ctx, W, p+"self.out.weight", o, nullptr, dl, eS);
     x = ggml_add(ctx, autodiff_safe ? ggml_cont(ctx, res) : res, gate(o, g_a));
 
     // --- cross-attention (no adaLN, no RoPE), kv from context ---
     ggml_tensor* hc = nn::rms_norm(ctx, x, W.get(p+"cross_norm.gamma"), c.norm_eps);
-    ggml_tensor* qf = dit_lin(ctx, W, p+"cross.q.weight", hc, nullptr, dl);   // [1 or 2 *dim, S]
-    ggml_tensor* kv = dit_lin(ctx, W, p+"cross.kv.weight", context, nullptr, dl);// [2 or 3 *dim, Ctx]
+    auto cross_attn = [&](ggml_tensor* cx, const DitLora* cdl) {
+    const int64_t Ctx = cx->ne[1];
+    ggml_tensor* qf = dit_lin(ctx, W, p+"cross.q.weight", hc, nullptr, cdl);  // [1 or 2 *dim, S]
+    ggml_tensor* kv = dit_lin(ctx, W, p+"cross.kv.weight", cx, nullptr, cdl); // [2 or 3 *dim, Ctx]
     ggml_tensor* cq = qknorm(heads(sl(qf,0),S), p+"cross.q_norm.gamma");
     ggml_tensor* ck = qknorm(heads(sl(kv,0),Ctx), p+"cross.k_norm.gamma");
     ggml_tensor* oc;
@@ -236,17 +275,23 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
         oc = dit_diff_attn(ctx, toAttn(cq),toAttn(ck),toAttn(cv),toAttn(cqd),toAttn(ckd), dim, scale);
     } else {
         ggml_tensor* cv = heads(sl(kv,1),Ctx);
-        oc = single_attn(toAttn(cq), toAttn(ck), toAttn(cv));
+        oc = single_attn(toAttn(cq), toAttn(ck), toAttn(cv), nullptr);
     }
-    oc = dit_lin(ctx, W, p+"cross.out.weight", oc, nullptr, dl);
+    return dit_lin(ctx, W, p+"cross.out.weight", oc, nullptr, cdl);
+    };
+    ggml_tensor* oc = cross_attn(context, dl);
+    if (env) {   // attention is not linear in the adapter: run base and adapted, mix per token
+        ggml_tensor* oc0 = cross_attn(context0, nullptr);
+        oc = ggml_add(ctx, oc0, ggml_mul(ctx, ggml_sub(ctx, oc, oc0), eS));
+    }
     x = ggml_add(ctx, autodiff_safe ? ggml_cont(ctx, x) : x, oc);
 
     // --- inpaint local conditioning (per block, after cross-attn): add to the T real tokens only ---
     // le = Linear(local_dim->dim) -> SiLU -> Linear(dim->dim); memory tokens (first mem_tokens) get +0.
     if (local_cond) {
-        ggml_tensor* le = dit_lin(ctx, W, p+"local.0.weight", local_cond, W.get(p+"local.0.bias"), dl); // [dim,T]
+        ggml_tensor* le = dit_lin(ctx, W, p+"local.0.weight", local_cond, W.get(p+"local.0.bias"), dl, eT); // [dim,T]
         le = ggml_silu(ctx, le);
-        le = dit_lin(ctx, W, p+"local.2.weight", le, W.get(p+"local.2.bias"), dl);                      // [dim,T]
+        le = dit_lin(ctx, W, p+"local.2.weight", le, W.get(p+"local.2.bias"), dl, eT);                      // [dim,T]
         const int64_t Tt = local_cond->ne[1];
         ggml_tensor* xm = ggml_cont(ctx, ggml_view_2d(ctx, x, dim, c.mem_tokens, x->nb[1], 0));                    // [dim,mem]
         ggml_tensor* xt = ggml_cont(ctx, ggml_view_2d(ctx, x, dim, Tt, x->nb[1], (size_t)c.mem_tokens*x->nb[1]));  // [dim,T]
@@ -256,12 +301,12 @@ inline ggml_tensor* dit_block(ggml_context* ctx, const GgufModel& W, const std::
     // --- SwiGLU feed-forward with adaLN ---
     res = x;
     ggml_tensor* f = modulate(nn::rms_norm(ctx, x, W.get(p+"ff_norm.gamma"), c.norm_eps), sc_f, sh_f);
-    f = dit_lin(ctx, W, p+"ff.proj.weight", f, W.get(p+"ff.proj.bias"), dl); // [2*inner, S]
+    f = dit_lin(ctx, W, p+"ff.proj.weight", f, W.get(p+"ff.proj.bias"), dl, eS); // [2*inner, S]
     const int inner = f->ne[0] / 2;
     ggml_tensor* val  = ggml_view_2d(ctx, f, inner, S, f->nb[1], 0);
     ggml_tensor* glu  = ggml_view_2d(ctx, f, inner, S, f->nb[1], (size_t)inner*sizeof(float));
     f = ggml_mul(ctx, ggml_cont(ctx, val), ggml_silu(ctx, ggml_cont(ctx, glu)));
-    f = dit_lin(ctx, W, p+"ff.out.weight", f, W.get(p+"ff.out.bias"), dl);
+    f = dit_lin(ctx, W, p+"ff.out.weight", f, W.get(p+"ff.out.bias"), dl, eS);
     return ggml_add(ctx, autodiff_safe ? ggml_cont(ctx, res) : res, gate(f, g_f));
 }
 
@@ -281,23 +326,30 @@ struct DitHeadOut {
     ggml_tensor* x0 = nullptr;
     ggml_tensor* context = nullptr;
     ggml_tensor* gcond = nullptr;
+    ggml_tensor* context0 = nullptr;   // DitEnv only: the same two signals without the adapter
+    ggml_tensor* gcond0 = nullptr;
 };
 
 inline DitHeadOut dit_head(ggml_context* ctx, const GgufModel& W, ggml_tensor* x_in,
                            ggml_tensor* t_feat, ggml_tensor* cross, ggml_tensor* glob,
                            const DitConfig& c, const DitLora* dl = nullptr,
-                           bool autodiff_safe = false) {
+                           bool autodiff_safe = false, const DitEnv* env = nullptr) {
     DitHeadOut h;
     // conditioning signals
-    ggml_tensor* te = mlp_silu(ctx, W, "dit.time_embed.", t_feat, true, dl);      // [dim]
-    ggml_tensor* g  = mlp_silu(ctx, W, "dit.global_embed.", glob, false, dl);     // [dim]
-    g = ggml_add(ctx, g, te);
-    h.gcond = mlp_silu(ctx, W, "dit.gce.", g, true, dl);                          // [6*dim]
-    h.context = mlp_silu(ctx, W, "dit.cond_embed.", cross, false, dl);            // [dim, Ctx]
+    auto cond = [&](const DitLora* cdl, ggml_tensor*& gcond, ggml_tensor*& context) {
+        ggml_tensor* te = mlp_silu(ctx, W, "dit.time_embed.", t_feat, true, cdl);      // [dim]
+        ggml_tensor* g  = mlp_silu(ctx, W, "dit.global_embed.", glob, false, cdl);     // [dim]
+        g = ggml_add(ctx, g, te);
+        gcond = mlp_silu(ctx, W, "dit.gce.", g, true, cdl);                            // [6*dim]
+        context = mlp_silu(ctx, W, "dit.cond_embed.", cross, false, cdl);              // [dim, Ctx]
+    };
+    cond(dl, h.gcond, h.context);
+    if (env) cond(nullptr, h.gcond0, h.context0);
+    ggml_tensor* eT = env ? env->eT : nullptr;
 
     // x path: residual pre-conv, project in, prepend memory tokens
-    ggml_tensor* x = ggml_add(ctx, dit_lin(ctx, W, "dit.pre_conv.weight", x_in, nullptr, dl), x_in); // [io,T]
-    x = dit_lin(ctx, W, "dit.proj_in.weight", x, nullptr, dl);                    // [dim, T]
+    ggml_tensor* x = ggml_add(ctx, dit_lin(ctx, W, "dit.pre_conv.weight", x_in, nullptr, dl, eT), x_in); // [io,T]
+    x = dit_lin(ctx, W, "dit.proj_in.weight", x, nullptr, dl, eT);                // [dim, T]
     if (!autodiff_safe) {
         h.x0 = ggml_concat(ctx, W.get("dit.memory_tokens"), x, 1);
         return h;
@@ -313,11 +365,12 @@ inline DitHeadOut dit_head(ggml_context* ctx, const GgufModel& W, ggml_tensor* x
 // residual post-conv. x is the final block output [dim, mem+T]; returns velocity [io, T].
 inline ggml_tensor* dit_tail(ggml_context* ctx, const GgufModel& W, ggml_tensor* x,
                              const DitConfig& c, const DitLora* dl = nullptr,
-                             bool autodiff_safe = false) {
+                             bool autodiff_safe = false, const DitEnv* env = nullptr) {
     const int64_t T = x->ne[1] - c.mem_tokens;
+    ggml_tensor* eT = env ? env->eT : nullptr;
     x = ggml_cont(ctx, ggml_view_2d(ctx, x, c.dim, T, x->nb[1], (size_t)c.mem_tokens * x->nb[1])); // [dim,T]
-    x = dit_lin(ctx, W, "dit.proj_out.weight", x, nullptr, dl);                   // [io, T]
-    x = ggml_add(ctx, dit_lin(ctx, W, "dit.post_conv.weight", x, nullptr, dl),
+    x = dit_lin(ctx, W, "dit.proj_out.weight", x, nullptr, dl, eT);               // [io, T]
+    x = ggml_add(ctx, dit_lin(ctx, W, "dit.post_conv.weight", x, nullptr, dl, eT),
                  autodiff_safe ? ggml_cont(ctx, x) : x);
     return x;
 }
@@ -328,13 +381,15 @@ inline ggml_tensor* dit_forward(ggml_context* ctx, const GgufModel& W, ggml_tens
                                 ggml_tensor* t_feat, ggml_tensor* cross, ggml_tensor* glob,
                                 ggml_tensor* pos, ggml_tensor* ones, const DitConfig& c,
                                 ggml_tensor* local_cond = nullptr, const DitLora* dl = nullptr,
-                                bool autodiff_safe = false) {
-    DitHeadOut h = dit_head(ctx, W, x_in, t_feat, cross, glob, c, dl, autodiff_safe);
+                                bool autodiff_safe = false, const DitEnv* env = nullptr,
+                                ggml_tensor* self_mask = nullptr) {
+    if (!dl) env = nullptr;   // nothing to automate
+    DitHeadOut h = dit_head(ctx, W, x_in, t_feat, cross, glob, c, dl, autodiff_safe, env);
     ggml_tensor* x = h.x0;
     for (int l = 0; l < c.depth; l++)
         x = dit_block(ctx, W, "dit." + std::to_string(l) + ".", x, h.context, h.gcond, pos, ones, c,
-                      local_cond, dl, autodiff_safe);
-    return dit_tail(ctx, W, x, c, dl, autodiff_safe);
+                      local_cond, dl, autodiff_safe, env, h.gcond0, h.context0, self_mask);
+    return dit_tail(ctx, W, x, c, dl, autodiff_safe, env);
 }
 
 } // namespace sa3

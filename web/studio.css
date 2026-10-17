@@ -54,7 +54,7 @@ body { max-width:none; padding:0; margin:0; }
 .song-entry { flex-wrap:wrap; }
 .song-entry audio { min-width:150px; flex:1; }
 .studio-shell > .studio-credit { margin:24px 0 0; }
-#studio-training-frame { width:100%; height:calc(100vh - 145px); min-height:580px; border:1px solid var(--border); border-radius:12px; background:var(--bg); }
+#studio-training-frame, #studio-lanes-frame { width:100%; height:calc(100vh - 145px); min-height:580px; border:1px solid var(--border); border-radius:12px; background:var(--bg); }
 .prompt-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .prompt-heading label { margin:0; }
 #prompt-dice { width:34px; height:34px; display:grid; place-items:center; padding:6px; }

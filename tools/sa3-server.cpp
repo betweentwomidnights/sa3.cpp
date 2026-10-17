@@ -1,7 +1,10 @@
 // sa3-server: a small HTTP server over the shared sa3 Pipeline — a PROOF OF CONCEPT that mirrors
 // gary4local's async job model, so a gary4juce-style client can drive it as a drop-in (SA3 on :8006).
 //   POST /generate {prompt, duration, steps, seed, negative_prompt, cfg_*, dist_shift,
-//                   duration_padding_sec, loras[], init_path, keep_models}
+//                   duration_padding_sec, loras[], lora_envelope[[sec,amount]], lora_envelope_mode,
+//                   lora_lanes[{loras[], envelope[[sec,amount]], prompt}], lane_isolation(_until),
+//                   lane_average_until,
+//                   init_path, keep_models}
 //                 -> {success, session_id, seed}   (generation runs in the background)
 //   POST /generate/loop {prompt, duration, bpm?, bars?, ...}
 //                 -> {success, session_id, seed, bpm, bars, loop_duration, gen_duration}
@@ -1120,10 +1123,11 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
             if (yyjson_is_num(v)) *slots[k] = (float)yyjson_get_num(v);
     }
 
-    yyjson_val* loras = yyjson_obj_get(root, "loras");
-    if (loras && yyjson_is_arr(loras)) {
-        yyjson_val* it; yyjson_arr_iter ai; yyjson_arr_iter_init(loras, &ai);
-        while ((it = yyjson_arr_iter_next(&ai))) {
+    // [{name|path, strength}, ...] -> resolved (gguf path, strength)
+    auto parse_loras = [&](yyjson_val* arr, std::vector<std::pair<std::string, float>>& out) {
+        if (!arr || !yyjson_is_arr(arr)) return;
+        yyjson_val* it; yyjson_arr_iter ai; yyjson_arr_iter_init(arr, &ai);
+        while (perr.empty() && (it = yyjson_arr_iter_next(&ai))) {
             yyjson_val* nv = yyjson_obj_get(it, "name");
             if (!nv) nv = yyjson_obj_get(it, "path");
             std::string name = nv && yyjson_is_str(nv) ? yyjson_get_str(nv) : "";
@@ -1132,7 +1136,50 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
             if (name.empty()) continue;
             std::string p = resolve_lora_path(adir, name);
             if (p.empty()) { perr = "unknown lora '" + name + "'"; break; }
-            params.loras.push_back({p, strength});
+            out.push_back({p, strength});
+        }
+    };
+    // [[sec, amount], ...] or [{t, amount}, ...] -> breakpoints
+    auto parse_points = [&](yyjson_val* arr, std::vector<std::pair<float, float>>& out, const char* field) {
+        if (!arr || !yyjson_is_arr(arr)) return;
+        yyjson_val* it; yyjson_arr_iter ai; yyjson_arr_iter_init(arr, &ai);
+        while ((it = yyjson_arr_iter_next(&ai))) {
+            yyjson_val* tv = yyjson_is_arr(it) ? yyjson_arr_get(it, 0) : yyjson_obj_get(it, "t");
+            yyjson_val* av = yyjson_is_arr(it) ? yyjson_arr_get(it, 1) : yyjson_obj_get(it, "amount");
+            if (!tv || !av || !yyjson_is_num(tv) || !yyjson_is_num(av)) {
+                perr = std::string(field) + ": each point is [seconds, amount]"; return;
+            }
+            out.push_back({(float)yyjson_get_num(tv), (float)yyjson_get_num(av)});
+        }
+        if (out.size() > 256) perr = std::string(field) + ": at most 256 points";
+    };
+
+    parse_loras(yyjson_obj_get(root, "loras"), params.loras);
+
+    // "lora_envelope": [[sec, amount], ...] -- one automation curve for every DiT adapter in "loras"
+    if (perr.empty()) parse_points(yyjson_obj_get(root, "lora_envelope"), params.lora_envelope, "lora_envelope");
+    if (yyjson_val* mv = yyjson_obj_get(root, "lora_envelope_mode"); mv && yyjson_is_str(mv))
+        params.lora_envelope_mode = yyjson_get_str(mv);
+
+    // "lora_lanes": [{loras: [...], envelope: [[sec, amount], ...], prompt?}, ...] -- one DiT pass
+    // per lane, mixed per frame (GenParams::lora_lanes); "loras" above are shared by every pass
+    if (yyjson_val* v = yyjson_obj_get(root, "lane_isolation"); v && yyjson_is_num(v))
+        params.lane_isolation = (float)yyjson_get_num(v);
+    if (yyjson_val* v = yyjson_obj_get(root, "lane_isolation_until"); v && yyjson_is_num(v))
+        params.lane_isolation_until = (float)yyjson_get_num(v);
+    if (yyjson_val* v = yyjson_obj_get(root, "lane_average_until"); v && yyjson_is_num(v))
+        params.lane_average_until = (float)yyjson_get_num(v);
+    yyjson_val* lanes = yyjson_obj_get(root, "lora_lanes");
+    if (perr.empty() && lanes && yyjson_is_arr(lanes)) {
+        if (yyjson_arr_size(lanes) > 8) perr = "lora_lanes: at most 8 lanes";
+        yyjson_val* it; yyjson_arr_iter ai; yyjson_arr_iter_init(lanes, &ai);
+        while (perr.empty() && (it = yyjson_arr_iter_next(&ai))) {
+            sa3::GenParams::LoraLane ln;
+            parse_loras(yyjson_obj_get(it, "loras"), ln.loras);
+            if (perr.empty()) parse_points(yyjson_obj_get(it, "envelope"), ln.envelope, "lora_lanes envelope");
+            if (yyjson_val* pv = yyjson_obj_get(it, "prompt"); pv && yyjson_is_str(pv)) ln.prompt = yyjson_get_str(pv);
+            if (perr.empty() && ln.envelope.empty()) perr = "lora_lanes: each lane needs an envelope";
+            params.lora_lanes.push_back(std::move(ln));
         }
     }
 
@@ -1179,10 +1226,11 @@ std::string queue_generation(sa3::GenParams params, uint64_t seed_resolved, std:
     const std::string limiter_log = params.loudness.limiter_enabled
         ? json_num(params.loudness.limiter_ceiling_db) : "off";
     fprintf(stderr,
-            "[sa3-server] queued %s frames=%d (~%.2fs) target_samples=%d steps=%d keep_models=%s init_samples=%d init_ch=%d inpaint=%.2f..%.2f loras=%zu ae_chunks=enc%d/%d dec%d/%d peak_norm=%s limiter=%s\n",
+            "[sa3-server] queued %s frames=%d (~%.2fs) target_samples=%d steps=%d keep_models=%s init_samples=%d init_ch=%d inpaint=%.2f..%.2f loras=%zu lanes=%zu(%s) ae_chunks=enc%d/%d dec%d/%d peak_norm=%s limiter=%s\n",
             sid.c_str(), params.frames, (double)params.frames * 4096.0 / 44100.0, params.target_n_samp,
             params.steps, params.keep_models ? "true" : "false", params.init_n_samp, params.init_n_ch,
             params.inpaint_start, params.inpaint_end, params.loras.size(),
+            params.lora_lanes.size(), params.lora_envelope_mode.c_str(),
             params.encode_chunk_size, params.encode_overlap, params.decode_chunk_size, params.decode_overlap,
             peak_norm_log.c_str(), limiter_log.c_str());
     fflush(stderr);
@@ -1708,6 +1756,21 @@ int main(int argc, char** argv) {
     });
     svr.Get("/studio.css", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(embedded_web::studio_css, "text/css");
+    });
+    // Automation lanes: an experimental editor for lora_lanes (per-LoRA envelopes over a take)
+    svr.Get("/lanes", [](const httplib::Request&, httplib::Response& res) {
+        // under --web-dir, the page on disk, so it never pairs a stale embedded page with a fresh lanes.js
+        if (!g_web_dir.empty()) {
+            std::ifstream f(std::filesystem::path(g_web_dir) / "lanes.html", std::ios::binary);
+            if (f) {
+                res.set_content(std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()), "text/html");
+                return;
+            }
+        }
+        res.set_content(embedded_web::lanes_html, "text/html");
+    });
+    svr.Get("/lanes.js", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(embedded_web::lanes_js, "application/javascript");
     });
 
     svr.Get("/loras", [&adir, &sldir](const httplib::Request&, httplib::Response& res) {
