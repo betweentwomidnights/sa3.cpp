@@ -17,6 +17,7 @@ const state = {
 };
 let loras = [];          // DiT adapters from /loras
 let decoders = [];       // decoder adapters for this model's autoencoder
+let decoderKey = "";     // the studio's localStorage key for this model family's correction
 let takes = [];          // {id, url, peaks, dur, request, seed, secs, lanes}
 let current = null;      // the take on screen
 let nextLaneId = 1, nextTakeId = 1;
@@ -79,7 +80,13 @@ async function connect() {
     const famOf = (l) => { const s = `${l.base_model} ${l.name}`.toLowerCase();
       return s.includes("same-l") || s.includes("squeakfix") ? "same-l" : s.includes("same-s") || s.includes("declora") ? "same-s" : ""; };
     decoders = (r.loras || []).filter((l) => l.target === "decoder" && famOf(l) === fam);
-    if (state.decoder === "auto") state.decoder = (decoders.find((l) => /squeakfix/i.test(l.name)) || {}).name || "";
+    // The correction is the studio's (Models tab) setting under the same key, so both views agree;
+    // never chosen anywhere -> squeakfix here, without writing that default back to the studio.
+    decoderKey = fam ? `sa3-decoder-${fam}` : "";
+    let shared = null;
+    try { shared = decoderKey ? localStorage.getItem(decoderKey) : null; } catch { /* storage unavailable */ }
+    if (shared !== null) state.decoder = shared;
+    else if (state.decoder === "auto") state.decoder = (decoders.find((l) => /squeakfix/i.test(l.name)) || {}).name || "";
     $("#decoder").innerHTML = `<option value="">none</option>` +
       decoders.map((l) => `<option value="${esc(l.name)}">${esc(l.name)}</option>`).join("");
     $("#decoder").value = decoders.some((l) => l.name === state.decoder) ? state.decoder : "";
@@ -113,6 +120,9 @@ function readForm() {
   state.bpm = $("#bpm").value;
   state.avgUntil = Math.min(1, Math.max(0, +$("#avg-until").value || 0));
   state.key = $("#key").value;
+  if (state.decoder !== $("#decoder").value && decoderKey) {
+    try { localStorage.setItem(decoderKey, $("#decoder").value); } catch { /* storage unavailable */ }
+  }
   state.decoder = $("#decoder").value;
   state.isoUntil = Math.min(1, Math.max(0, +$("#iso-until").value || 0));
 }

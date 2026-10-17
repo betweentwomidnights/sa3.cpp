@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sa3.cpp studio — automation lanes</title>
+<script>if (window.top !== window || new URLSearchParams(location.search).has('embedded')) document.documentElement.classList.add('embedded');</script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -51,6 +52,8 @@
   .err { color: var(--red); font-size: 0.82rem; min-height: 1.2em; }
   .seedbox { display: flex; gap: 4px; align-items: center; }
   .seedbox input { width: 110px; }
+  .embedded body { max-width: none; padding: 4px 2px 40px; background: transparent; }
+  .embedded header { display: none; }
   details.adv { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
   details.adv summary { cursor: pointer; font-size: 0.82rem; font-weight: 600; }
   .adv-intro { margin: 6px 0 10px; line-height: 1.55; max-width: 980px; }
@@ -112,7 +115,7 @@
   <h1>Automation lanes <small>sa3.cpp · experimental</small></h1>
   <span id="status">connecting…</span>
   <span id="model" class="muted"></span>
-  <a href="/">← main studio</a>
+  <a href="/#lanes">open in the studio</a>
 </header>
 
 <div class="card">
@@ -130,7 +133,7 @@
       <input id="bpm" type="number" min="0" max="300" step="1" placeholder="none"></div>
     <div class="col"><label for="key" title="Added to every prompt, e.g. C# minor">Key</label>
       <input id="key" type="text" placeholder="none" style="width:96px"></div>
-    <div class="col"><label for="decoder" title="Decoder adapter for the whole take (e.g. squeakfix for SAME-L)">Decoder adapter</label>
+    <div class="col"><label for="decoder" title="The decoder correction for the whole take. Shared with the studio's Models tab.">Decoder correction</label>
       <select id="decoder"><option value="">none</option></select></div>
     <div class="col"><label for="steps">Steps</label><input id="steps" type="number" min="1" max="100" step="1" value="8"></div>
     <div class="col"><label for="cfg">CFG</label><input id="cfg" type="number" min="0" step="0.1" value="1"></div>
