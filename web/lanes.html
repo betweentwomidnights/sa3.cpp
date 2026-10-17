@@ -51,6 +51,14 @@
   .err { color: var(--red); font-size: 0.82rem; min-height: 1.2em; }
   .seedbox { display: flex; gap: 4px; align-items: center; }
   .seedbox input { width: 110px; }
+  details.adv { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+  details.adv summary { cursor: pointer; font-size: 0.82rem; font-weight: 600; }
+  .adv-intro { margin: 6px 0 10px; line-height: 1.55; max-width: 980px; }
+  .adv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-bottom: 8px; }
+  .adv-item { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+  .adv-item label { display: block; }
+  .adv-item p { font-size: 0.76rem; color: var(--muted); line-height: 1.5; margin-top: 6px; }
+  .adv-item p b { color: var(--text); font-weight: 600; }
   input[type=checkbox] { width: auto; accent-color: var(--accent); }
 
   /* transport + progress */
@@ -130,16 +138,55 @@
       <div class="seedbox"><input id="seed" type="number" min="0" step="1">
         <button class="icon" id="seed-dice" title="new random seed">🎲</button>
         <label class="muted" style="display:flex;gap:3px;align-items:center;margin:0"><input id="seed-lock" type="checkbox"> lock</label></div></div>
-    <div class="col"><label for="iso" title="Early-step self-attention bias between frames with different lane mixes. 0 = off.">Isolation λ</label>
-      <input id="iso" type="number" min="0" step="0.5" value="4"></div>
-    <div class="col"><label for="iso-until" title="Isolation applies while the step's sigma is above this (0.9 = the first 4 of 8 steps)">…until σ</label>
-      <input id="iso-until" type="number" min="0" max="1" step="0.05" value="0.9"></div>
-    <div class="col"><label for="avg-until" title="While sigma is above this, every lane plays at its average amount, so the arrangement forms from one consistent mix before the curves apply. Continuity over separation; isolation is off during those steps. 0 = off.">Shared structure σ</label>
-      <input id="avg-until" type="number" min="0" max="1" step="0.05" value="0"></div>
-    <div class="col"><label for="mode">Mixing</label>
-      <select id="mode"><option value="velocity">velocity (per-pass)</option><option value="layer">layer (one pass, 1 lane)</option></select></div>
     <div class="col" style="margin-left:auto"><button class="primary" id="gen">Generate</button></div>
   </div>
+  <details id="advanced" class="adv">
+    <summary>Advanced <span id="adv-state" class="muted"></span></summary>
+    <p class="muted adv-intro">How the lanes are blended. The defaults are a good place to start; these are
+      here to experiment with. Some background: the model writes the whole clip at once, starting
+      from pure noise and refining it over the steps (8 by default). The first few steps decide the
+      arrangement (groove, melody, where things happen); the last ones polish texture and detail.
+      "σ" is how noisy the clip still is: 1 = pure noise, 0 = finished.</p>
+    <div class="adv-grid">
+      <div class="adv-item">
+        <label for="mode">Mixing</label>
+        <select id="mode"><option value="velocity">velocity (per-pass)</option><option value="layer">layer (one pass, 1 lane)</option></select>
+        <p><b>Velocity</b> (default) runs every lane as its own complete pass, then blends them moment
+          by moment using your curves. It is precise: a lane drawn at 0 really is off there. Each
+          lane adds one pass, so more lanes take longer.<br>
+          <b>Layer</b> is the original single-pass method, kept for comparison. It is cheaper, but the
+          LoRA bleeds across the whole clip (a lane at 0 still measured 60-80% LoRA). One lane only, no
+          lane prompt.</p>
+      </div>
+      <div class="adv-item">
+        <label for="iso">Isolation strength (λ)</label>
+        <input id="iso" type="number" min="0" step="0.5" value="4">
+        <p>Every moment of the clip listens to every other moment, so sections tend to drift towards
+          one shared sound and a LoRA can get washed out. Isolation makes each moment listen mostly to
+          moments with a similar lane mix while the arrangement is being decided, so each phase keeps
+          its own identity. Higher = more separation, but also more of a "changing radio stations"
+          jump at transitions. 0 = off. Around 3 is already full strength; above that changes little.</p>
+      </div>
+      <div class="adv-item">
+        <label for="iso-until">Isolation until (σ)</label>
+        <input id="iso-until" type="number" min="0" max="1" step="0.05" value="0.9">
+        <p>When isolation lets go. After that, every moment listens to the whole clip again, which
+          smooths the joins. 0.9 = isolate the first 4 of 8 steps. Closer to 1 = shorter isolation
+          (in tests, fewer than the first 4 steps made no difference at all); lower = isolate longer,
+          leaving fewer steps to smooth the transitions.</p>
+      </div>
+      <div class="adv-item">
+        <label for="avg-until">Shared structure (σ)</label>
+        <input id="avg-until" type="number" min="0" max="1" step="0.05" value="0">
+        <p>The opposite trade to isolation. While σ is above this, every lane plays at its average
+          amount across the whole clip, so the take settles on one arrangement first; your curves
+          only take over afterwards, shaping sound and texture more than the song itself. In theory:
+          smoother, more "same song" transitions, possibly with less contrast between phases.
+          Isolation pauses while this is active. 0 = off; try 0.9 with isolation 0.</p>
+      </div>
+    </div>
+    <button class="tiny" id="adv-reset">reset to defaults</button>
+  </details>
   <div class="err" id="error"></div>
 </div>
 
@@ -175,21 +222,13 @@
     <b style="color:var(--text)">Editing a lane</b><br>
     click empty space: add a point · drag a point: move it<br>
     double-click / right-click a point: delete it<br>
-    <kbd>Shift</kbd>+drag: draw freehand · <kbd>Ctrl</kbd>: snap to 0.25 s / 0.05<br>
+    <kbd>Shift</kbd>+drag: draw freehand · <kbd>Ctrl</kbd>: snap to beats (with a BPM) or 0.25 s<br>
     <kbd>Space</kbd>: play/pause · <kbd>Ctrl</kbd>+<kbd>Enter</kbd>: generate · click the waveform to seek<br><br>
     <b style="color:var(--text)">What the lanes do</b><br>
     Each lane is its own DiT pass per step (its LoRA at the curve's peak, on its own prompt if set).
     The base pass runs on the base prompt; at each frame the step is
-    base + Σ amount × (lane − base). Amount is a strength multiplier: 1 = the LoRA at its strength.<br><br>
-    <b style="color:var(--text)">Isolation</b><br>
-    The whole clip is denoised together, so sections pull towards one sound. While σ is above
-    "until", isolation biases each frame's self-attention towards frames with a similar lane mix,
-    so each phase forms its own identity; the remaining steps attend fully and smooth the joins.
-    λ ≈ 3 already saturates; 0 turns it off.<br><br>
-    <b style="color:var(--text)">Shared structure</b><br>
-    The opposite trade: while σ is above this value every lane plays at its average amount, so the
-    whole clip shares one arrangement, and the drawn curves only shape the later steps. Try 0.9 with
-    isolation 0 for smoother, less "radio-dial" transitions.
+    base + Σ amount × (lane − base). Amount is a strength multiplier: 1 = the LoRA at its strength.
+    The blending options are under Advanced.
   </div>
 </div>
 

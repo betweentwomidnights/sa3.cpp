@@ -128,12 +128,19 @@ function writeForm() {
   $("#iso").value = state.iso ?? 4;
   $("#bpm").value = state.bpm ?? "";
   $("#avg-until").value = state.avgUntil ?? 0;
+  advState();
   $("#key").value = state.key ?? "";
   if (state.decoder !== "auto") $("#decoder").value = state.decoder;
   barsInfo();
   $("#iso-until").value = state.isoUntil ?? 0.9;
 }
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
+const ADV_DEFAULTS = { mode: "velocity", iso: 4, isoUntil: 0.9, avgUntil: 0 };
+function advState() {   // "custom" on the collapsed Advanced header when anything differs from the defaults
+  const custom = Object.entries(ADV_DEFAULTS).some(([k, v]) => state[k] !== v);
+  $("#adv-state").textContent = custom ? "· custom settings" : "· defaults";
+  if (custom) $("#advanced").open = true;
+}
 
 // ─── tempo / key ────────────────────────────────────────────────────────────
 
@@ -656,10 +663,11 @@ function init() {
   writeForm();
   for (const id of ["#prompt", "#negative", "#duration", "#steps", "#cfg", "#seed", "#seed-lock", "#mode", "#iso", "#iso-until",
                     "#bpm", "#key", "#decoder", "#avg-until"]) {
-    $(id).addEventListener("input", () => { readForm(); barsInfo(); drawAll(); save(); });
+    $(id).addEventListener("input", () => { readForm(); barsInfo(); advState(); drawAll(); save(); });
   }
   $("#gen").onclick = generate;
   $("#seed-dice").onclick = () => { state.seed = randomSeed(); writeForm(); save(); };
+  $("#adv-reset").onclick = () => { Object.assign(state, ADV_DEFAULTS); writeForm(); save(); };
   $("#fit-bars").onclick = () => {
     const bar = barSec(); if (!bar) return;
     state.duration = +(Math.max(1, Math.round(state.duration / bar)) * bar).toFixed(3);
