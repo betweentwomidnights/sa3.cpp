@@ -96,15 +96,13 @@
   .studio-nav a { color:var(--muted); text-decoration:none; padding:7px 14px; border:1px solid var(--border); border-radius:var(--radius); }
   .studio-nav a[aria-current="page"] { color:var(--text); border-color:var(--accent); background:#38171b; }
   .studio-nav a:hover { color:var(--text); border-color:var(--accent); }
-  .studio-credit { margin-top:24px; color:var(--muted); font-size:.78rem; }
-  .studio-credit a { color:var(--accent); }
   @media (max-width: 600px) {
     .row { flex-direction: column; }
     .col { min-width: 100%; }
     .param-grid { grid-template-columns: 1fr; }
   }
 </style>
-<link rel="stylesheet" href="studio.css?v=4">
+<link rel="stylesheet" href="studio.css?v=5">
 </head>
 <body>
 
@@ -335,10 +333,9 @@
 </h2>
 <div id="past-songs" class="card"></div>
 
-<p class="studio-credit">Inference and training web interfaces by <a href="https://github.com/pillopaus-project/sa3.cpp" target="_blank" rel="noopener">pillopaus-project</a>; integrated into sa3.cpp.</p>
 </div>
 <script>document.getElementById('training-link').href = location.protocol + '//' + location.hostname + ':8016/';</script>
-<script src="app.js?v=6"></script>
-<script src="studio.js?v=11"></script>
+<script src="app.js?v=7"></script>
+<script src="studio.js?v=13"></script>
 </body>
 </html>

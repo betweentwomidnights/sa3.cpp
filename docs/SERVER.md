@@ -29,6 +29,11 @@ dialogs. Create includes a loop toggle; Create and Continue offer **Ends here** 
 duration padding) and **Keeps going** (six seconds of padding). CFG and distribution
 shift controls live in each dialog's Advanced section. Transform strength and optional
 inpaint range live in Transform. Settings keeps model residency and audio processing.
+The browser remembers render controls, creative LoRAs and strengths, and Settings
+choices across dialog closes and page reloads on the same Studio URL. Create and
+Continue keep separate durations and ending choices; Continue initially adds 30
+seconds. Transform length follows the selected audio, and remembered inpaint ranges
+are clamped to fit it. Prompt and sampling controls remain shared between operations.
 The Models view lists installed Stable Audio 3 variants and DiT tiers, downloads
 published inference weight sets into `--models-dir`, and selects compatible decoder
 corrections. Decoder corrections apply to every render for their selected model family

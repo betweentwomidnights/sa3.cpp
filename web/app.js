@@ -140,6 +140,7 @@ async function checkHealth() {
         loadLoras();
         loadInitAudioList();
         applyLoudnessDefaults(h.loudness_defaults);
+        window.studioHealthReady?.();
     }
     catch {
         statusEl.textContent = "✗ Server unreachable";
@@ -193,6 +194,7 @@ async function randomPrompt() {
         const pool = dice[bucket]?.length ? dice[bucket] : Object.values(dice).flat();
         if (!pool.length) throw new Error("No prompts are available for this model.");
         setVal("#prompt", pool[Math.floor(Math.random() * pool.length)]);
+        window.studioSettingsChanged?.(["prompt"]);
         showError("");
     } catch (error) {
         showError(`Could not load prompts: ${error.message}`);
@@ -221,10 +223,12 @@ function addLora() {
     activeLoras.push({ name, strength: 1 });
     sel.value = "";
     renderActiveLoras();
+    window.studioSettingsChanged?.(["loras"]);
 }
 function removeLora(name) {
     activeLoras = activeLoras.filter((l) => l.name !== name);
     renderActiveLoras();
+    window.studioSettingsChanged?.(["loras"]);
 }
 function renderActiveLoras() {
     const container = $("#active-loras");
@@ -438,6 +442,7 @@ function loadParamsFromSnapshot(params) {
         activeLoras = loras.filter((l) => loraList.some((known) => known.name === l.name && known.target === "dit")).map((l) => ({ ...l }));
         renderActiveLoras();
     }
+    window.studioSettingsChanged?.();
 }
 function clearPastSongs() {
     pastSongs = [];
@@ -695,6 +700,7 @@ function applyConfig(cfg) {
     setVal("#loop-bars", cfg.loop_bars);
     activeLoras = cfg.loras.filter((l) => loraList.some((known) => known.name === l.name && known.target === "dit")).map((l) => ({ ...l }));
     renderActiveLoras();
+    window.studioSettingsChanged?.();
 }
 function saveConfig() {
     const suggested = currentConfigFilename || "sa3-config.json";
