@@ -90,6 +90,22 @@ def main():
                     ({"inpaint_padding_sec": 61}, "[0, 60]"),
                     ({"inpaint_padding_sec": "nan"}, "finite number"),
                     ({"seed": 1.5}, "integer"),
+                    # automation lanes: rejected before queueing, never a silent take
+                    ({"lora_lanes": [{"envelope": [[0, 1e100]]}]}, "finite number"),
+                    ({"lora_lanes": [{"envelope": [[1e100, 1]]}]}, "finite number"),
+                    ({"lora_lanes": [{"envelope": [[0, "nan"]]}]}, "finite number"),
+                    ({"lora_lanes": [{"envelope": [[0, -0.5]]}]}, "[0, 100]"),
+                    ({"lora_lanes": [{"envelope": [[0, 500]]}]}, "[0, 100]"),
+                    ({"lora_lanes": [{"envelope": [[0]]}]}, "[seconds, amount]"),
+                    ({"lora_lanes": [{"envelope": []}]}, "needs an envelope"),
+                    ({"lora_lanes": [{"envelope": [[0, 1]]}] * 9}, "at most 8 lanes"),
+                    ({"lora_lanes": [{"envelope": [[t, 1] for t in range(257)]}]}, "at most 256"),
+                    ({"lora_envelope": [[0, 1e100]]}, "finite number"),
+                    ({"loras": [{"name": "x", "strength": 1e100}]}, "finite number"),
+                    ({"lane_isolation": "inf"}, "finite number"),
+                    ({"lane_isolation": -1}, "lane_isolation"),
+                    ({"lane_average_until": "nan"}, "finite number"),
+                    ({"lora_envelope_mode": "bogus"}, "'velocity' or 'layer'"),
                 ]:
                     status, body = request(port, path, payload)
                     assert status == 400 and message in body["error"], (path, status, body)

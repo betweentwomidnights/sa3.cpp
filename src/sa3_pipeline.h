@@ -782,6 +782,38 @@ struct GenParams {
     std::function<bool()> should_cancel;
 };
 
+// Automation inputs that can be checked without a model: an empty string when the request is
+// usable, else the reason. Amounts above kMaxLaneAmount are rejected: a finite but huge amount
+// overflows the velocity mix exactly like an infinite one and decodes to silence.
+constexpr float kMaxLaneAmount = 100.0f;
+constexpr size_t kMaxLanes = 8, kMaxEnvelopePoints = 256;
+inline std::string lora_lanes_error(const GenParams& p) {
+    auto points_error = [](const std::vector<std::pair<float, float>>& env, const char* what) -> std::string {
+        if (env.size() > kMaxEnvelopePoints) return std::string(what) + ": at most 256 envelope points";
+        for (auto& bp : env)
+            if (!std::isfinite(bp.first) || !std::isfinite(bp.second) || bp.second < 0.0f || bp.second > kMaxLaneAmount)
+                return std::string(what) + ": each point needs a finite time and an amount in [0, 100]";
+        return "";
+    };
+    if (std::string e = points_error(p.lora_envelope, "lora envelope"); !e.empty()) return e;
+    if (p.lora_lanes.size() > kMaxLanes) return "lora lanes: at most 8 lanes";
+    for (auto& ln : p.lora_lanes) {
+        if (ln.envelope.empty()) return "lora lane: needs at least one envelope point";
+        if (std::string e = points_error(ln.envelope, "lora lane"); !e.empty()) return e;
+        for (auto& ls : ln.loras)
+            if (!std::isfinite(ls.second)) return "lora lane: adapter strengths must be finite";
+    }
+    for (auto& ls : p.loras)
+        if (!std::isfinite(ls.second)) return "lora: adapter strengths must be finite";
+    if (p.lora_envelope_mode != "velocity" && p.lora_envelope_mode != "layer")
+        return "lora envelope: mode must be 'velocity' or 'layer'";
+    if (!std::isfinite(p.lane_isolation) || p.lane_isolation < 0.0f)
+        return "lane_isolation must be a finite number >= 0";
+    if (!std::isfinite(p.lane_isolation_until) || !std::isfinite(p.lane_average_until))
+        return "lane_isolation_until and lane_average_until must be finite";
+    return "";
+}
+
 struct GenResult {
     std::vector<float> samples;        // planar [n_samp, n_ch]
     int n_samp = 0;
@@ -922,6 +954,8 @@ inline void Pipeline::load(const ModelPaths& paths, int cpu_threads, const char*
 }
 
 inline Pipeline::~Pipeline() {
+    free_dit_passes();                       // before the backend they were allocated on
+    dit_functional_.free(); dit_adapters_.clear();
     TE_.free(); DIT_.free(); AE_.free();
     if (CD_) CD_->free();
     if (backend_) ggml_backend_free(backend_);
@@ -934,6 +968,14 @@ inline Pipeline& Pipeline::operator=(Pipeline&& o) noexcept {
         paths_ = std::move(o.paths_); backend_ = o.backend_;
         tok_ = std::move(o.tok_); TE_ = std::move(o.TE_); DIT_ = std::move(o.DIT_); AE_ = std::move(o.AE_);
         CD_ = std::move(o.CD_); tc_ = o.tc_; dc_ = o.dc_; sc_ = o.sc_;
+        // adapter state: FunctionalLora is raw handles, so the source is reset rather than freed
+        free_dit_passes(); dit_functional_.free();
+        dit_loras_ = std::move(o.dit_loras_); dit_merged_ = o.dit_merged_;
+        dit_adapters_ = std::move(o.dit_adapters_);
+        dit_functional_ = o.dit_functional_; o.dit_functional_ = FunctionalLora{};
+        dit_passes_ = std::move(o.dit_passes_); o.dit_passes_.clear();
+        ae_loras_ = std::move(o.ae_loras_); ae_applied_ = std::move(o.ae_applied_);
+        o.dit_merged_ = false;
         o.backend_ = nullptr; o.loaded_ = false; o.nets_resident_ = false;
     }
     return *this;
@@ -990,7 +1032,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             DIT.free();
             AE.free();
             if (CD_) CD_->free();
-            dit_loras_.clear();
+            dit_loras_.clear(); dit_merged_ = false;
+            dit_functional_.free(); dit_adapters_.clear(); free_dit_passes();
             nets_resident_ = false;
         }
     };
@@ -1298,31 +1341,26 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         lanes.push_back({dit_loras_want, params.lora_envelope, ""});
         dit_loras_want.clear();
     }
+    if (std::string e = lora_lanes_error(params); !e.empty()) throw std::runtime_error(e);
     std::vector<float> lane_peak;
     for (auto& ln : lanes) {
-        if (ln.envelope.empty()) throw std::runtime_error("lora lane: needs at least one envelope point");
-        if (ln.envelope.size() > 256) throw std::runtime_error("lora lane: at most 256 envelope points");
         float peak = 0.0f;
-        for (auto& bp : ln.envelope) {
-            if (!(bp.second >= 0.0f) || !std::isfinite(bp.first))
-                throw std::runtime_error("lora lane: amounts must be >= 0 at finite times");
-            peak = std::max(peak, bp.second);
-        }
+        for (auto& bp : ln.envelope) peak = std::max(peak, bp.second);
         for (auto& ls : ln.loras)
             if (sa3::lora_target_of(ls.first.c_str()) != "dit")
                 throw std::runtime_error("lora lane: " + ls.first + " is not a DiT adapter");
         lane_peak.push_back(peak);
     }
-    // Lanes that can never contribute (all-zero curve or no adapters) are dropped up front.
+    // Lanes that can never differ from the base pass are dropped up front: an all-zero curve, or
+    // no adapters and no prompt of its own. A lane with only its own prompt automates the prompt.
     for (size_t k = lanes.size(); k-- > 0; )
-        if (lane_peak[k] <= 0.0f || lanes[k].loras.empty()) {
+        if (lane_peak[k] <= 0.0f ||
+            (lanes[k].loras.empty() && (lanes[k].prompt.empty() || lanes[k].prompt == prompt))) {
             lanes.erase(lanes.begin() + k); lane_peak.erase(lane_peak.begin() + k);
         }
     // Layer mode is the one-pass alternative and only exists for a single lane on the request's
     // prompt with nothing shared: it folds the lane into the ordinary chain and scales it per token.
     const bool layer_mode = !lanes.empty() && params.lora_envelope_mode == "layer";
-    if (!lanes.empty() && !layer_mode && params.lora_envelope_mode != "velocity")
-        throw std::runtime_error("lora envelope: mode must be 'velocity' or 'layer'");
     if (layer_mode && (lanes.size() != 1 || !lanes[0].prompt.empty() || !dit_loras_want.empty()))
         throw std::runtime_error("lora envelope: layer mode takes one lane, no lane prompt and no shared DiT adapters");
     const bool use_env = layer_mode;
@@ -1600,21 +1638,28 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         bool same = dit_passes_.size() == want.size();
         for (size_t i = 0; same && i < want.size(); i++) same = dit_passes_[i].chain == want[i];
         if (!same) {
+            // The old set goes first so both never sit in VRAM; the new one is published only once
+            // every pass has loaded, so a failure leaves an empty cache that the next request rebuilds
+            // instead of a key that matches a half-built set.
             free_dit_passes();
-            dit_passes_.resize(want.size());
-            for (size_t i = 0; i < want.size(); i++) {
-                DitPass& p = dit_passes_[i];
-                p.chain = want[i];
-                if (p.chain.empty()) continue;
-                for (auto& ls : p.chain) p.adapters.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
-                if (sa3::functional_lora_ok(p.adapters)) p.fl = sa3::build_functional_lora(DIT, p.adapters, paths_.dit);
-                if (!p.fl.active) {
-                    free_dit_passes();
-                    throw std::runtime_error("lora lanes: every lane adapter must be a 'lora' or 'dora-rows' "
-                                             "family (the functional path)");
+            std::vector<DitPass> fresh(want.size());
+            try {
+                for (size_t i = 0; i < want.size(); i++) {
+                    DitPass& p = fresh[i];
+                    for (auto& ls : want[i]) p.adapters.push_back(sa3::load_lora(ls.first.c_str(), ls.second, DIT.backend));
+                    if (!p.adapters.empty() && !sa3::functional_lora_ok(p.adapters))
+                        throw std::runtime_error("lora lanes: every lane adapter must be a 'lora' or 'dora-rows' "
+                                                 "family (the functional path)");
+                    // all-zero strengths build no terms: an identity pass that runs the base weights
+                    if (!p.adapters.empty()) p.fl = sa3::build_functional_lora(DIT, p.adapters, paths_.dit);
+                    p.chain = want[i];
                 }
+                throw_if_cancelled(params.should_cancel);
+            } catch (...) {
+                for (auto& p : fresh) p.fl.free();
+                throw;
             }
-            throw_if_cancelled(params.should_cancel);
+            dit_passes_ = std::move(fresh);
         }
         printf("lora lanes: %zu lane(s) over %s\n", lanes.size(),
                shared_dit.empty() ? "the base model" : "the shared adapters");

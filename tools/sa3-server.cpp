@@ -1131,8 +1131,8 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
             yyjson_val* nv = yyjson_obj_get(it, "name");
             if (!nv) nv = yyjson_obj_get(it, "path");
             std::string name = nv && yyjson_is_str(nv) ? yyjson_get_str(nv) : "";
-            yyjson_val* sv = yyjson_obj_get(it, "strength");
-            float strength = sv && yyjson_is_num(sv) ? (float)yyjson_get_num(sv) : 1.0f;
+            float strength = 1.0f;
+            if (!parse_json_float(yyjson_obj_get(it, "strength"), strength, "lora strength")) break;
             if (name.empty()) continue;
             std::string p = resolve_lora_path(adir, name);
             if (p.empty()) { perr = "unknown lora '" + name + "'"; break; }
@@ -1146,10 +1146,10 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
         while ((it = yyjson_arr_iter_next(&ai))) {
             yyjson_val* tv = yyjson_is_arr(it) ? yyjson_arr_get(it, 0) : yyjson_obj_get(it, "t");
             yyjson_val* av = yyjson_is_arr(it) ? yyjson_arr_get(it, 1) : yyjson_obj_get(it, "amount");
-            if (!tv || !av || !yyjson_is_num(tv) || !yyjson_is_num(av)) {
-                perr = std::string(field) + ": each point is [seconds, amount]"; return;
-            }
-            out.push_back({(float)yyjson_get_num(tv), (float)yyjson_get_num(av)});
+            if (!tv || !av) { perr = std::string(field) + ": each point is [seconds, amount]"; return; }
+            float t = 0.0f, a = 0.0f;   // a JSON number past float range (1e100) is rejected, not cast to inf
+            if (!parse_json_float(tv, t, field) || !parse_json_float(av, a, field)) return;
+            out.push_back({t, a});
         }
         if (out.size() > 256) perr = std::string(field) + ": at most 256 points";
     };
@@ -1163,15 +1163,12 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
 
     // "lora_lanes": [{loras: [...], envelope: [[sec, amount], ...], prompt?}, ...] -- one DiT pass
     // per lane, mixed per frame (GenParams::lora_lanes); "loras" above are shared by every pass
-    if (yyjson_val* v = yyjson_obj_get(root, "lane_isolation"); v && yyjson_is_num(v))
-        params.lane_isolation = (float)yyjson_get_num(v);
-    if (yyjson_val* v = yyjson_obj_get(root, "lane_isolation_until"); v && yyjson_is_num(v))
-        params.lane_isolation_until = (float)yyjson_get_num(v);
-    if (yyjson_val* v = yyjson_obj_get(root, "lane_average_until"); v && yyjson_is_num(v))
-        params.lane_average_until = (float)yyjson_get_num(v);
+    request_float("lane_isolation", params.lane_isolation);
+    request_float("lane_isolation_until", params.lane_isolation_until);
+    request_float("lane_average_until", params.lane_average_until);
     yyjson_val* lanes = yyjson_obj_get(root, "lora_lanes");
     if (perr.empty() && lanes && yyjson_is_arr(lanes)) {
-        if (yyjson_arr_size(lanes) > 8) perr = "lora_lanes: at most 8 lanes";
+        if (yyjson_arr_size(lanes) > sa3::kMaxLanes) perr = "lora lanes: at most 8 lanes";
         yyjson_val* it; yyjson_arr_iter ai; yyjson_arr_iter_init(lanes, &ai);
         while (perr.empty() && (it = yyjson_arr_iter_next(&ai))) {
             sa3::GenParams::LoraLane ln;
@@ -1183,6 +1180,7 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
         }
     }
 
+    if (perr.empty()) perr = sa3::lora_lanes_error(params);
     if (!perr.empty()) return false;
     if (!sa3::validate_loudness_params(params.loudness, perr)) return false;
     if (!sa3::validate_splice_params(params.splice, perr)) return false;
