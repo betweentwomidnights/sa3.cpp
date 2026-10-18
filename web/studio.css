@@ -10,6 +10,7 @@ body { max-width:none; padding:0; margin:0; }
 .studio-header nav { display:flex; flex-wrap:wrap; gap:4px; }
 .studio-header nav button { border:0; background:transparent; color:var(--muted); padding:8px 12px; }
 .studio-header nav button[aria-current="page"] { color:var(--text); background:#38171b; box-shadow:inset 0 -2px var(--accent); }
+.studio-beta { display:inline-block; margin-left:4px; padding:1px 5px; border:1px solid var(--accent); border-radius:4px; color:var(--accent); font-size:.6rem; font-weight:700; line-height:1.4; vertical-align:middle; }
 .studio-header .status { margin-left:auto; display:flex; gap:8px; color:var(--muted); font-size:.78rem; }
 .studio-view { margin-top:24px; }
 .studio-view[hidden], .studio-modal[hidden], .studio-conditional[hidden] { display:none!important; }

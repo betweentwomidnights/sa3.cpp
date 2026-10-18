@@ -116,7 +116,7 @@ inline const std::string index_html =
     .param-grid { grid-template-columns: 1fr; }
   }
 </style>
-<link rel="stylesheet" href="studio.css?v=3">
+<link rel="stylesheet" href="studio.css?v=4">
 </head>
 <body>
 
@@ -355,7 +355,7 @@ inline const std::string index_html =
 </div>
 <script>document.getElementById('training-link').href = location.protocol + '//' + location.hostname + ':8016/';</script>
 <script src="app.js?v=6"></script>
-<script src="studio.js?v=10"></script>
+<script src="studio.js?v=11"></script>
 </body>
 </html>
 )sa3web");
@@ -1200,13 +1200,13 @@ function studioShell() {
   root.innerHTML = `<div class="studio-shell">
     <header class="studio-header">
       <h1><a href="https://github.com/betweentwomidnights/sa3.cpp" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">SA3.CPP</a> <small>studio</small></h1>
-      <nav aria-label="Studio views"><button type="button" data-studio-view="studio" aria-current="page">Studio</button><button type="button" data-studio-view="lanes">Automation</button><button type="button" data-studio-view="train">LoRA training</button><button type="button" data-studio-view="models">Models</button><button type="button" data-studio-view="settings">Settings</button></nav>
+      <nav aria-label="Studio views"><button type="button" data-studio-view="studio" aria-current="page">Studio</button><button type="button" data-studio-view="lanes" title="Experimental LoRA automation">Automation <span class="studio-beta">beta</span></button><button type="button" data-studio-view="train">LoRA training</button><button type="button" data-studio-view="models">Models</button><button type="button" data-studio-view="settings">Settings</button></nav>
       <div class="status" id="studio-header-status"></div>
     </header>
     <main id="studio-view-studio" class="studio-view">
       <div class="studio-hero"><div class="studio-actions"><button type="button" class="primary" data-studio-operation="create">create</button><button type="button" data-studio-operation="continue" hidden disabled>continue</button><button type="button" data-studio-operation="transform" hidden disabled>transform</button></div></div>
-      <section class="studio-panel" aria-label="Current take"><div class="studio-panel-title"><h2>Current take</h2><span id="studio-take-info">No audio yet</span></div><div class="studio-wave-wrap" id="studio-wave-wrap"><canvas id="studio-waveform" aria-label="Audio waveform; click to seek"></canvas><div id="studio-wave-empty">Create audio or drop a WAV here.</div><div class="studio-wave-actions"><button id="studio-upload-wave" type="button" aria-label="Upload WAV" title="Upload WAV">${studioIcons.upload}</button><button id="studio-crop" type="button" aria-label="Select crop" title="Select crop" disabled>${studioIcons.crop}</button></div><div id="studio-drop-hint" hidden>Drop WAV to open it</div><input id="studio-import-file" type="file" accept="audio/wav,.wav" hidden></div><div class="studio-take-tools"><div id="studio-audio-slot"></div><button id="studio-play" type="button" aria-label="Play" title="Play" disabled>${studioIcons.play}</button><button id="studio-stop" type="button" aria-label="Stop" title="Stop" disabled>${studioIcons.stop}</button><span id="studio-time" class="studio-time">0:00 / 0:00</span><span id="studio-selection-label" hidden>No selection</span><button id="studio-download" type="button" disabled>Download WAV</button><button id="studio-clear" type="button" disabled>Clear take</button></div><div id="studio-meta-slot"></div><div id="studio-progress-slot"></d)sa3web") +
-    std::string(R"sa3web(iv><div id="studio-error-slot"></div></section>
+      <section class="studio-panel" aria-label="Current take"><div class="studio-panel-title"><h2>Current take</h2><span id="studio-take-info">No audio yet</span></div><div class="studio-wave-wrap" id="studio-wave-wrap"><canvas id="studio-waveform" aria-label="Audio waveform; click to seek"></canvas><div id="studio-wave-empty">Create audio or drop a WAV here.</div><div class="studio-wave-actions"><button id="studio-upload-wave" type="button" aria-label="Upload WAV" title="Upload WAV">${studioIcons.upload}</button><button id="studio-crop" type="button" aria-label="Select crop" title="Select crop" disabled>${studioIcons.crop}</button></div><div id="studio-drop-hint" hidden>Drop WAV to open it</div><input id="studio-import-file" type="file" accept="audio/wav,.wav" hidden></div><div class="studio-take-tools"><div id="studio-audio-slot"></div><button id="studio-play" type="button" aria-label="Play" title="Play" disabled>${studioIcons.play}</button><button id="studio-stop" type="button" aria-label="Stop" title="Stop" disabled>${studioIcons.stop}</button><span id="studio-time" class="studio-time">0:00 / 0:00</span><span id="studio-selection-label" hidden>No selection</span><button id="studio-download" type="button" disabled>Download WAV</button><button id="studio-clear" type="button" disabled>Clear take</butto)sa3web") +
+    std::string(R"sa3web(n></div><div id="studio-meta-slot"></div><div id="studio-progress-slot"></div><div id="studio-error-slot"></div></section>
       <div class="studio-history-head"><h2>Past takes <span id="studio-history-count"></span></h2><div id="studio-history-actions"></div></div><div id="studio-history-slot"></div>
     </main>
     <main id="studio-view-lanes" class="studio-view" hidden><iframe id="studio-lanes-frame" title="Automation lanes"></iframe></main>
@@ -1215,8 +1215,8 @@ function studioShell() {
     <main id="studio-view-settings" class="studio-view studio-settings" hidden><div class="studio-hero"><div><div class="studio-eyebrow">Studio settings</div><h2>Runtime and output.</h2><p>Keep the model loaded and tune output processing here.</p></div></div><div id="studio-session-settings"></div><details><summary>Audio processing</summary><div id="studio-audio-settings"></div></details></main>
     <div id="studio-footer"></div>
   </div>
-    <div id="studio-modal" class="studio-modal" hidden><div class="studio-dialog" role="dialog" aria-modal="true" aria-labelledby="studio-dialog-title"><div class="studio-dialog-head"><h2 id="studio-dialog-title">create</h2><button id="studio-dialog-close" type="button" aria-label="Close dialog">×</button></div><p id="studio-dialog-description" class="studio-dialog-description">Start a new take from a prompt.</p><div id="studio-dialog-prompt"></div><div id="studio-dialog-basic"></div><div class="studio-extra-controls"><div id="studio-tail-wrap"><span class="studio-field-label">Ending</span><div class="studio-segmented"><label><input type="radio" name="studio-tail" value="0"> Ends here</label><label><input type="radio" name="studio-tail" value="6"> Keeps going</label></div></div><div id="studio-loop-wrap"><label class="inline-label"><input id="studio-loop" type="checkbox"> Make a loop</label><div id="studio-loop-fields" class="studio-loop-options studio-conditional" hidden></div></div><div id="studio-noise-wrap" class="studio-conditional" hidden><label for="studio-noise">Tra)sa3web") +
-    std::string(R"sa3web(nsform strength <output id="studio-noise-value">0.85</output></label><input id="studio-noise" type="range" min="0" max="1" step="0.05" value="0.85"></div></div><div id="studio-dialog-loras"></div><details id="studio-advanced"><summary>Advanced</summary><div id="studio-dialog-cfg"></div><div id="studio-dialog-ds"></div><div id="studio-inpaint-wrap" hidden><label class="inline-label"><input id="studio-inpaint" type="checkbox"> Inpaint part of the selected audio</label><div class="param-grid studio-conditional" id="studio-inpaint-fields" hidden><div><label for="studio-inpaint-start">Start (seconds)</label><input id="studio-inpaint-start" type="number" min="0" step="0.01" value="0"></div><div><label for="studio-inpaint-end">End (seconds)</label><input id="studio-inpaint-end" type="number" min="0" step="0.01" value="0"></div></div></div></details><p id="studio-dialog-error" role="alert" hidden></p><div class="studio-dialog-actions"><button id="studio-dialog-cancel" type="button">Cancel</button><button id="studio-dialog-submit" type="button" class="primary">Create</button></div></div></div>`;
+    <div id="studio-modal" class="studio-modal" hidden><div class="studio-dialog" role="dialog" aria-modal="true" aria-labelledby="studio-dialog-title"><div class="studio-dialog-head"><h2 id="studio-dialog-title">create</h2><button id="studio-dialog-close" type="button" aria-label="Close dialog">×</button></div><p id="studio-dialog-description" class="studio-dialog-description">Start a new take from a prompt.</p><div id="studio-dialog-prompt"></div><div id="studio-dialog-basic"></div><div class="studio-extra-controls"><div id="studio-tail-wrap"><span class="studio-field-label">Ending</span><div class="studio-segmented"><label><input type="radio" name="studio-tail" value="0"> Ends here</label><label><input type="radio" name="studio-tail" value="6"> Keeps going</label></div></div><div id="studio-loop-wrap"><label class="inline-label"><input id="studio-loop" type="checkbox"> Make a loop</label><div id="studio-loop-fields" class="studio-loop-options studio-conditional" hidden></div></div><div id="studio-)sa3web") +
+    std::string(R"sa3web(noise-wrap" class="studio-conditional" hidden><label for="studio-noise">Transform strength <output id="studio-noise-value">0.85</output></label><input id="studio-noise" type="range" min="0" max="1" step="0.05" value="0.85"></div></div><div id="studio-dialog-loras"></div><details id="studio-advanced"><summary>Advanced</summary><div id="studio-dialog-cfg"></div><div id="studio-dialog-ds"></div><div id="studio-inpaint-wrap" hidden><label class="inline-label"><input id="studio-inpaint" type="checkbox"> Inpaint part of the selected audio</label><div class="param-grid studio-conditional" id="studio-inpaint-fields" hidden><div><label for="studio-inpaint-start">Start (seconds)</label><input id="studio-inpaint-start" type="number" min="0" step="0.01" value="0"></div><div><label for="studio-inpaint-end">End (seconds)</label><input id="studio-inpaint-end" type="number" min="0" step="0.01" value="0"></div></div></div></details><p id="studio-dialog-error" role="alert" hidden></p><div class="studio-dialog-actions"><button id="studio-dialog-cancel" type="button">Cancel</button><button id="studio-dialog-submit" type="button" class="primary">Create</button></div></div></div>`;
 
   const move = (selector, target) => { const node = document.querySelector(selector); if (node) studioEl(target).append(node); };
   move("#server-status", "studio-header-status"); move("#model-info", "studio-header-status");
@@ -1261,11 +1261,11 @@ function studioShowView(name) {
   }
   if (name === "models") studioRefreshModels();
   if (name === "studio") loadLoras();
-  location.hash = name === "studio" ? "" : name;
+  location)sa3web") +
+    std::string(R"sa3web(.hash = name === "studio" ? "" : name;
 }
 
-function studioDuration() { retur)sa3web") +
-    std::string(R"sa3web(n studio.buffer?.duration || 0; }
+function studioDuration() { return studio.buffer?.duration || 0; }
 function studioRange() { const d = studioDuration(); return [studio.selection[0]*d, studio.selection[1]*d]; }
 function studioTime(sec) { const s = Math.max(0, sec); return `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}.${String(Math.floor(s%1*100)).padStart(2,"0")}`; }
 function studioUpdateTakeControls() {
@@ -1330,12 +1330,12 @@ function studioDrawWaveform() {
   ctx.lineWidth=Math.max(1,scale);
   for(const [a,b,color] of [[0,played,"#85262b"],[played,w,"#e23b42"]]){
     ctx.strokeStyle=color;ctx.beginPath();
-    for(let x=a;x<b;x++){ctx.moveTo(x,h/2-peaks[x*2+1]*h*.44);ctx.lineTo(x,h/2-peaks[x*2]*h*.44);}
+    for(let x=a;x<b;x++){ctx.moveTo(x,h/2-peaks[x*2+1]*h*.44);ctx.line)sa3web") +
+    std::string(R"sa3web(To(x,h/2-peaks[x*2]*h*.44);}
     ctx.stroke();
   }
   if(studio.cropMode){
- )sa3web") +
-    std::string(R"sa3web(   const left=studio.selection[0]*w,right=studio.selection[1]*w;
+    const left=studio.selection[0]*w,right=studio.selection[1]*w;
     ctx.fillStyle="rgba(0,0,0,.48)";ctx.fillRect(0,0,left,h);ctx.fillRect(right,0,w-right,h);
     ctx.strokeStyle="#f4eded";ctx.lineWidth=2*scale;
     for(const x of [left,right]){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();ctx.fillStyle="#f4eded";ctx.fillRect(Math.max(0,x-4*scale),h/2-12*scale,8*scale,24*scale);}
@@ -1395,10 +1395,10 @@ async function studioUploadSelection() {
 }
 
 function studioOpenOperation(operation) {
-  if(studio.busy || (operation!=="create"&&!studio.buffer))return;
+  if(studio.busy || (operation!=="create"&&!studio.buf)sa3web") +
+    std::string(R"sa3web(fer))return;
   studio.operation=operation;
-  studioEl("studio-dialog-error")sa3web") +
-    std::string(R"sa3web().hidden=true;
+  studioEl("studio-dialog-error").hidden=true;
   studioEl("studio-dialog-title").textContent=operation;
   studioEl("studio-dialog-submit").textContent=operation[0].toUpperCase()+operation.slice(1);
   const descriptions={create:"Start a new take from a prompt.",continue:"Extend the selected audio with a new passage.",transform:"Reimagine the selected audio while keeping its length."};
@@ -1459,10 +1459,10 @@ async function studioSubmit() {
 
 function studioDialogError(message) { const error=studioEl("studio-dialog-error");error.textContent=message;error.hidden=false; }
 
-function studioSetBusy(busy) {
+functi)sa3web") +
+    std::string(R"sa3web(on studioSetBusy(busy) {
   studio.busy=busy;
-  document.querySelector('[dat)sa3web") +
-    std::string(R"sa3web(a-studio-operation="create"]').disabled=busy;
+  document.querySelector('[data-studio-operation="create"]').disabled=busy;
   studioUpdateTakeControls();
 }
 
@@ -1516,9 +1516,9 @@ function studioRenderDecoderLoras() {
   }
   const download=studioEl("studio-download-decoder");
   download.disabled=decoders.some(l=>studioDecoderLoraFamily(l)==="same-l"&&l.name.toLowerCase().includes("squeakfix"));
-  download.textContent=download.disabled?"SAME-L correction installed":"Download SAME-L correction";
-  studioEl("studio-decoder-status").textContent=family)sa3web") +
-    std::string(R"sa3web(?`Active model: ${studio.activeModel} (${family.toUpperCase()})`:"Select a model to enable a correction.";
+  download.textContent=download.disabled?"SAME-L correction installed":"Download)sa3web") +
+    std::string(R"sa3web( SAME-L correction";
+  studioEl("studio-decoder-status").textContent=family?`Active model: ${studio.activeModel} (${family.toUpperCase()})`:"Select a model to enable a correction.";
 }
 
 async function studioStartDecoderDownload() {
@@ -1576,9 +1576,9 @@ function studioWire() {
     if(!studio.buffer)return;
     if(!studio.cropMode){studio.cropMode=true;studio.selection=[0,1];}
     else {
-      if(studioRange()[1]-studioRange()[0]>=.05&&studio.selection[1]-studio.selection[0]<.995)
-        await stud)sa3web") +
-    std::string(R"sa3web(ioCrop();
+      if(studioRange()[1]-studioRange()sa3web") +
+    std::string(R"sa3web()[0]>=.05&&studio.selection[1]-studio.selection[0]<.995)
+        await studioCrop();
       studio.cropMode=false;studio.selection=[0,1];
     }
     studioUpdateTakeControls();studioDrawWaveform();
@@ -1636,10 +1636,10 @@ function studioWire() {
   audio.addEventListener("pause",()=>{if(studio.frame)cancelAnimationFrame(studio.frame);studio.frame=0;studioUpdateTakeControls();studioDrawWaveform();});
   audio.addEventListener("timeupdate",()=>{if(audio.paused){studioUpdateClock();studioDrawWaveform();}});
   new ResizeObserver(studioDrawWaveform).observe(canvas);
-  document.addEventListener("keydown",e=>{
+  document.addEv)sa3web") +
+    std::string(R"sa3web(entListener("keydown",e=>{
     if(e.key!=="Escape")return;
-    if(!studioEl)sa3web") +
-    std::string(R"sa3web(("studio-modal").hidden)studioCloseOperation();
+    if(!studioEl("studio-modal").hidden)studioCloseOperation();
     else if(studio.cropMode){studio.cropMode=false;studio.selection=[0,1];studioUpdateTakeControls();studioDrawWaveform();}
   });
   window.addEventListener("hashchange",()=>{const view=location.hash.slice(1)||"studio";if(["studio","lanes","train","models","settings"].includes(view)&&view!==studio.view)studioShowView(view);});
@@ -1671,6 +1671,7 @@ body { max-width:none; padding:0; margin:0; }
 .studio-header nav { display:flex; flex-wrap:wrap; gap:4px; }
 .studio-header nav button { border:0; background:transparent; color:var(--muted); padding:8px 12px; }
 .studio-header nav button[aria-current="page"] { color:var(--text); background:#38171b; box-shadow:inset 0 -2px var(--accent); }
+.studio-beta { display:inline-block; margin-left:4px; padding:1px 5px; border:1px solid var(--accent); border-radius:4px; color:var(--accent); font-size:.6rem; font-weight:700; line-height:1.4; vertical-align:middle; }
 .studio-header .status { margin-left:auto; display:flex; gap:8px; color:var(--muted); font-size:.78rem; }
 .studio-view { margin-top:24px; }
 .studio-view[hidden], .studio-modal[hidden], .studio-conditional[hidden] { display:none!important; }
@@ -1704,13 +1705,13 @@ body { max-width:none; padding:0; margin:0; }
 #studio-selection-label { margin-left:auto; color:var(--muted); font-size:.78rem; }
 #result-section { display:none; }
 #result-section #delete-current-btn { display:none; }
-#studio-meta-slot { color:var(--muted); font-size:.75rem; margin-top:10px; }
+#studio-meta-slot { color:var()sa3web") +
+    std::string(R"sa3web(--muted); font-size:.75rem; margin-top:10px; }
 #progress-wrap { margin-top:14px; }
 #progress-bar { height:5px; }
 #progress-label { margin-top:6px; }
 #error-msg { min-height:1em; }
-.studio-history-head { display:flex; ju)sa3web") +
-    std::string(R"sa3web(stify-content:space-between; align-items:center; margin:24px 0 9px; gap:8px; }
+.studio-history-head { display:flex; justify-content:space-between; align-items:center; margin:24px 0 9px; gap:8px; }
 .studio-history-head h2 { margin:0; border:0; padding:0; font-size:1rem; }
 #past-songs { max-height:none; padding:4px 16px; }
 .song-entry { flex-wrap:wrap; }
@@ -1755,11 +1756,11 @@ body { max-width:none; padding:0; margin:0; }
 .studio-dialog .card { border:0; background:transparent; margin:0; padding:0; }
 .studio-dialog .card + .card { margin-top:12px; }
 .studio-dialog .card .row.gapped { margin:0 0 10px; }
-.studio-dialog textarea { min-height:75px; }
+.studio-dialog textarea { min-height:75p)sa3web") +
+    std::string(R"sa3web(x; }
 .studio-dialog .param-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
 .studio-dialog #studio-dialog-basic input[type=range] { display:none; }
-.studio-dialog #studio-dialog-basic .range-row input[type=number)sa3web") +
-    std::string(R"sa3web(] { width:100%; }
+.studio-dialog #studio-dialog-basic .range-row input[type=number] { width:100%; }
 .studio-dialog #studio-dialog-basic .range-row { display:block; }
 .studio-dialog .collapse-body.collapsed { max-height:0; }
 .studio-dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
