@@ -570,6 +570,12 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
             e.xs   = functional_lora_is_xs(a.type);
             e.dora = a.type == "dora-rows" || a.type == "dora-rows-xs";
             if (!a.gguf.has(stem + (e.xs ? ".M_xs" : ".lora_A"))) continue;  // not targeted
+            // the rest of what the build reads, checked before anything below is allocated
+            for (const char* suf : {".lora_B", ".U", ".V", ".magnitude"}) {
+                const bool needed = std::strcmp(suf, ".magnitude") == 0 ? e.dora
+                                  : std::strcmp(suf, ".lora_B") == 0 ? !e.xs : e.xs;
+                if (needed && !a.gguf.has(stem + suf)) throw gguf_error("missing tensor: " + stem + suf);
+            }
             if (a.strength == 0.0f) continue;                                // identity, as in the merge path
             e.scale = (a.alpha / a.rank) * a.strength;
             pl.chain.push_back(e);
@@ -626,6 +632,10 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
         if (pl.any_dora) ntensors++;
         for (auto& e : pl.chain) ntensors += (size_t)e.scaled + (size_t)e.xs;
     }
+    // Scope guards: everything allocated from here on is released if a later step throws; the
+    // persistent constants survive only a successful build.
+    struct Guard { std::function<void()> f; ~Guard() { if (f) f(); } };
+    Guard fl_guard{[&] { fl.free(); }};
     ggml_init_params ip = { (ntensors + 8)*ggml_tensor_overhead(), nullptr, true };
     fl.ctx = ggml_init(ip);
     for (auto& pl : plans) {
@@ -640,6 +650,7 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
 
     // ---- scratch: upload nsq0 (dropped as soon as the row scales are computed) ----
     ggml_context* sctx = nullptr; ggml_backend_buffer_t sbuf = nullptr;
+    Guard scratch_guard{[&] { if (sbuf) ggml_backend_buffer_free(sbuf); if (sctx) ggml_free(sctx); }};
     if (need_norms) {
         ggml_init_params sp = { (plans.size() + 8)*ggml_tensor_overhead(), nullptr, true };
         sctx = ggml_init(sp);
@@ -671,6 +682,8 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
         ggml_init_params tp = { nn*ggml_tensor_overhead() + ggml_graph_overhead_custom(nn, false) + (1<<20),
                                 nullptr, true };
         ggml_context* c = ggml_init(tp);
+        ggml_gallocr_t alloc = nullptr;
+        Guard chunk_guard{[&] { if (alloc) ggml_gallocr_free(alloc); ggml_free(c); }};
         ggml_cgraph* gf = ggml_new_graph_custom(c, nn, false);
 
         for (size_t pi = p0; pi < p1; pi++) {
@@ -755,15 +768,10 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
             }
         }
 
-        ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(base.backend));
+        alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(base.backend));
         ggml_gallocr_alloc_graph(alloc, gf);
         ggml_backend_graph_compute(base.backend, gf);
-        ggml_gallocr_free(alloc);
-        ggml_free(c);
     }
-
-    if (sbuf) ggml_backend_buffer_free(sbuf);
-    if (sctx) ggml_free(sctx);
 
     // ---- publish the per-target term lists dit_lin will walk ----
     for (auto& pl : plans) {
@@ -781,6 +789,7 @@ inline FunctionalLora build_functional_lora(GgufModel& base, std::vector<LoraAda
         fl.map[pl.wname] = p;
     }
     fl.active = true;
+    fl_guard.f = nullptr;   // built: the caller owns the constants now
     return fl;
 }
 

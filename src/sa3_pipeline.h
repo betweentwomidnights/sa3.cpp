@@ -1604,10 +1604,15 @@ inline GenResult Pipeline::generate(const GenParams& params) {
             const bool quantized = dit_base_is_quantized(DIT);
             const char* fenv = getenv("SA3_FUNCTIONAL_LORA");
             const bool want_functional = quantized || env_needs_functional || (fenv && strcmp(fenv, "0") != 0);
-            if (want_functional && sa3::functional_lora_ok(dit_adapters_)) {
+            const bool family_ok = sa3::functional_lora_ok(dit_adapters_);
+            if (want_functional && family_ok) {
                 dit_functional_ = sa3::build_functional_lora(DIT, dit_adapters_, paths_.dit);
             }
-            if (!dit_functional_.active) {
+            // a supported set whose strengths are all zero builds no terms: the base weights, with
+            // nothing to merge, rather than a family the functional path cannot take
+            const bool identity = want_functional && family_ok && !dit_functional_.active;
+            if (identity) dit_adapters_.clear();
+            if (!dit_functional_.active && !identity) {
                 if (env_needs_functional)
                     throw std::runtime_error(
                         "lora envelope: needs the functional adapter path, which takes the 'lora' "
@@ -1622,7 +1627,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                 dit_adapters_.clear();       // merged into W; nothing to keep resident
             }
             printf("lora: applied %zu DiT adapter(s) [%s]:\n", dit_loras_want.size(),
-                   dit_functional_.active ? "functional" : "merged");
+                   dit_functional_.active ? "functional" : identity ? "identity" : "merged");
             for (size_t i = 0; i < dit_loras_want.size(); i++)
                 printf("  [%zu] %s  strength=%.2f\n", i, dit_loras_want[i].first.c_str(), dit_loras_want[i].second);
         }
