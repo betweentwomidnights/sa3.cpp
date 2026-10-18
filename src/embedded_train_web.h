@@ -71,8 +71,6 @@ inline const std::string index_html =
     .studio-nav a { color:var(--muted); text-decoration:none; padding:6px 12px; border:1px solid var(--border); border-radius:6px; }
     .studio-nav a[aria-current="page"] { color:var(--fg); border-color:var(--accent); background:#38171b; }
     .studio-nav a:hover { color:var(--fg); border-color:var(--accent); }
-    .studio-credit { margin:24px 0 0; color:var(--muted); font-size:12px; }
-    .studio-credit a { color:var(--accent); }
     .art { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); }
     .art a { color:var(--accent); text-decoration:none; font-weight:600; }
     .art .sz { color:var(--muted); font-size:12px; }
@@ -116,9 +114,9 @@ inline const std::string index_html =
         <div class="grid">
           <div><label for="f-name">Run / LoRA name</label><input id="f-name" maxlength="64" placeholder="my-style" autocomplete="off" /></div>
           <div><label for="f-dataset">Dataset dir</label><div class="dataset-field"><input id="f-dataset" placeholder="/path/to/dataset" /><button id="browse-dataset" type="button" aria-label="Choose dataset folder" title="Choose dataset folder"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button></div></div>
-          <div><label for="f-model">Model</label><select id="f-model"><option>medium</option><option>small-music</option><option>small-sfx</option>)sa3trainweb") +
-    std::string(R"sa3trainweb(</select></div>
-          <div><label for="f-device">Device</label><select id="f-device"><option value="">Auto (best available GPU)</option><option value="cpu">CPU</option></select></div>
+          <div><label for="f-model">Model</label><select id="f-model"><option>medium</option><option>small-music</option><option>small-sfx</option></select></div>
+          <div><label for="f-device">Device</label><select id="f-device"><option value="">Auto (best avail)sa3trainweb") +
+    std::string(R"sa3trainweb(able GPU)</option><option value="cpu">CPU</option></select></div>
           <div><label for="f-encoding">Base model tier</label><select id="f-encoding"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · compact</option><option value="f32">F32</option></select></div>
           <div><label for="f-adapter">Adapter type</label><select id="f-adapter"><option>dora-rows</option><option>lora</option><option>dora-cols</option><option>bora</option><option>lora-xs</option><option>dora-rows-xs</option><option>dora-cols-xs</option><option>bora-xs</option></select></div>
           <div><label for="f-rank">Rank</label><input id="f-rank" type="number" value="16" /></div>
@@ -157,10 +155,10 @@ inline const std::string index_html =
           <div class="stat"><div class="k">Step</div><div class="v" id="d-step">0</div></div>
           <div class="stat"><div class="k">Loss</div><div class="v" id="d-loss">—</div></div>
           <div class="stat"><div class="k">LR</div><div class="v" id="d-lr">—</div></div>
-          <div class="stat"><div class="k">Grad norm</div><div class)sa3trainweb") +
-    std::string(R"sa3trainweb(="v" id="d-gn">—</div></div>
+          <div class="stat"><div class="k">Grad norm</div><div class="v" id="d-gn">—</div></div>
         </div>
-        <div class="bar" style="height:6px;background:var(--border);border-radius:4px;overflow:hidden;margin-bottom:14px;">
+        <div class="bar" style="height:6px;background:var(--border);border-rad)sa3trainweb") +
+    std::string(R"sa3trainweb(ius:4px;overflow:hidden;margin-bottom:14px;">
           <i id="d-progress" style="display:block;height:100%;width:0;background:var(--accent);"></i>
         </div>
         <p id="registration-note" class="small-note" role="status"></p>
@@ -179,7 +177,6 @@ inline const std::string index_html =
         <h3>No run selected</h3>
         <p style="color:var(--muted);">Pick a run from the sidebar, or start a new training.</p>
       </section>
-      <p class="studio-credit">Inference and training web interfaces by <a href="https://github.com/pillopaus-project/sa3.cpp" target="_blank" rel="noopener">pillopaus-project</a>; integrated into sa3.cpp.</p>
     </main>
   </div>
   <script>

@@ -25,6 +25,19 @@
 
 // (expo_features / wall_time_s / profile_* / tensor_to_host / set_swa_bias moved to sa3_pipeline.h)
 
+// "sec:amount,sec:amount,..." -> breakpoints
+static bool parse_envelope(const std::string& spec, std::vector<std::pair<float,float>>& out, const char* flag) {
+    for (size_t at = 0; at < spec.size(); ) {
+        size_t comma = spec.find(',', at); if (comma == std::string::npos) comma = spec.size();
+        const std::string bp = spec.substr(at, comma - at);
+        const size_t colon = bp.find(':');
+        if (colon == std::string::npos) { fprintf(stderr, "%s: '%s' is not sec:amount\n", flag, bp.c_str()); return false; }
+        out.push_back({(float)atof(bp.substr(0, colon).c_str()), (float)atof(bp.substr(colon + 1).c_str())});
+        at = comma + 1;
+    }
+    return true;
+}
+
 int main(int argc, char** argv) {
     sa3::load_dotenv();   // ./.env -> SA3_* defaults (real env wins); must precede every getenv below
     const bool prof = sa3::profile_enabled();
@@ -41,6 +54,10 @@ int main(int argc, char** argv) {
     const char* adapters_dir = (env_ad && *env_ad) ? env_ad : nullptr; // --adapters-dir / SA3_ADAPTERS_DIR (else = models_dir)
     std::string prompt = "Upbeat funk groove with slap bass, bright horns, tight drums";
     const char* wav_p = "song.wav";
+    std::vector<std::pair<float,float>> lora_envelope;   // --lora-envelope: strength automation
+    std::string lora_envelope_mode = "velocity";         // --lora-envelope-mode velocity|layer
+    std::vector<sa3::GenParams::LoraLane> lanes;          // --lane ... (see usage)
+    float lane_isolation = 0.0f, lane_isolation_until = 0.9f, lane_average_until = 0.0f;
     const char* init_p = nullptr;            // audio2audio / inpaint: source WAV (encoded to z_init)
     float init_noise_level = 0.85f;          // sigma_max for audio2audio (1.0 == text2music)
     float inpaint_start = -1.0f, inpaint_end = -1.0f;   // inpaint: regenerate this [start,end] sec region
@@ -86,6 +103,31 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--inpaint-start") && i+1 < argc) inpaint_start = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--inpaint-end")   && i+1 < argc) inpaint_end   = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--lora")   && i+1 < argc) lora_specs.push_back({argv[++i], 1.0f});
+        else if (!strcmp(argv[i], "--lora-envelope-mode") && i+1 < argc) lora_envelope_mode = argv[++i];
+        else if (!strcmp(argv[i], "--lora-envelope") && i+1 < argc) {
+            if (!parse_envelope(argv[++i], lora_envelope, "--lora-envelope")) return 1;
+        }
+        else if (!strcmp(argv[i], "--lane-isolation") && i+1 < argc) lane_isolation = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--lane-isolation-until") && i+1 < argc) lane_isolation_until = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--lane-average-until") && i+1 < argc) lane_average_until = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--lane") && i+1 < argc) {             // "name[+name...]" starts a lane
+            sa3::GenParams::LoraLane ln;
+            const std::string spec = argv[++i];
+            for (size_t at = 0; at <= spec.size(); ) {
+                size_t plus = spec.find('+', at); if (plus == std::string::npos) plus = spec.size();
+                if (plus > at) ln.loras.push_back({spec.substr(at, plus - at), 1.0f});
+                at = plus + 1;
+            }
+            lanes.push_back(std::move(ln));
+        }
+        else if ((!strcmp(argv[i], "--lane-envelope") || !strcmp(argv[i], "--lane-prompt") ||
+                  !strcmp(argv[i], "--lane-strength")) && i+1 < argc) {
+            if (lanes.empty()) { fprintf(stderr, "%s must follow a --lane\n", argv[i]); return 1; }
+            const std::string flag = argv[i], val = argv[++i];
+            if (flag == "--lane-envelope") { if (!parse_envelope(val, lanes.back().envelope, "--lane-envelope")) return 1; }
+            else if (flag == "--lane-prompt") lanes.back().prompt = val;
+            else for (auto& ls : lanes.back().loras) ls.second = (float)atof(val.c_str());
+        }
         else if (!strcmp(argv[i], "--lora-strength") && i+1 < argc) {   // sets the most recent --lora
             if (lora_specs.empty()) { fprintf(stderr, "--lora-strength must follow a --lora\n"); return 1; }
             lora_specs.back().second = (float)atof(argv[++i]);
@@ -191,7 +233,11 @@ int main(int argc, char** argv) {
     // --lora <name|path>: a bare name resolves to <adapters-dir>/lora-<name>-*.gguf (adapters can live
     // anywhere via SA3_ADAPTERS_DIR/--adapters-dir; defaults to the models dir). A real path is used as-is.
     const char* adir = adapters_dir ? adapters_dir : models_dir;
-    for (auto& spec : lora_specs) {
+    std::vector<std::pair<std::string,float>*> to_resolve;
+    for (auto& spec : lora_specs) to_resolve.push_back(&spec);
+    for (auto& ln : lanes) for (auto& spec : ln.loras) to_resolve.push_back(&spec);
+    for (auto* specp : to_resolve) {
+        auto& spec = *specp;
         if (std::filesystem::exists(spec.first)) continue;
         std::string p = sa3::resolve_one(adir, "lora-" + spec.first + "-", ".gguf");
         if (p.empty()) {
@@ -208,7 +254,8 @@ int main(int argc, char** argv) {
                         "                     [--t5-encoding ENC  text encoder precision; default auto, prefers F16]\n"
                         "                     [--ae-encoding ENC  autoencoder precision; default auto, prefers F32]\n"
                         "                     | --tok <f> --t5 <f> --cond <f> --dit <f> --same <f>)\n"
-                        "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
+                        "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--lora-envelope SEC:AMT,SEC:AMT... [--lora-envelope-mode velocity|layer]]\n"
+                        "                     [--lane NAME[+NAME...] --lane-envelope SEC:AMT,... [--lane-strength S] [--lane-prompt \"...\"]]... [--lane-isolation B [--lane-isolation-until SIGMA]] [--lane-average-until SIGMA] [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
                         "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--legacy-schedule] [--duration-padding SEC]\n"
                         "                     [--cfg-scale S [--negative-prompt \"...\"] [--cfg-rescale R] [--cfg-interval min,max] [--apg-scale A] [--cfg-norm-threshold T]] [--out song.wav]\n"
                         "                     continuation splice (with --init + --inpaint-start): [--no-splice] [--mask-overlap SEC] [--splice-xfade SEC] [--no-splice-gain-match]\n");
@@ -295,6 +342,12 @@ int main(int argc, char** argv) {
     params.cfg_interval_min = cfg_interval_min; params.cfg_interval_max = cfg_interval_max;
     params.keep_models       = keep_models;   // no on_progress -> the pipeline prints the step lines itself
     for (auto& ls : lora_specs) params.loras.push_back(ls);
+    params.lora_envelope = lora_envelope;
+    params.lora_envelope_mode = lora_envelope_mode;
+    params.lora_lanes = lanes;
+    params.lane_isolation = lane_isolation;
+    params.lane_isolation_until = lane_isolation_until;
+    params.lane_average_until = lane_average_until;
 
     if (init_p) {   // audio2audio / inpaint source WAV -> raw planar samples + rate (pipeline resamples)
         int n_samp = 0, n_ch = 0, sr = 0;

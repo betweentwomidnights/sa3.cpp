@@ -1,6 +1,7 @@
 #pragma once
 // embedded_web.h — web UI assets embedded in the binary at build time.
-// AUTO-GENERATED from web/index.html, app.js, studio.js, and studio.css. Do not edit by hand.
+// AUTO-GENERATED from web/index.html, app.js, studio.js, studio.css, lanes.html and lanes.js.
+// Do not edit by hand.
 // Rebuild with: python3 tools/gen_embedded_web.py
 
 #include <string>
@@ -107,15 +108,13 @@ inline const std::string index_html =
   .studio-nav a { color:var(--muted); text-decoration:none; padding:7px 14px; border:1px solid var(--border); border-radius:var(--radius); }
   .studio-nav a[aria-current="page"] { color:var(--text); border-color:var(--accent); background:#38171b; }
   .studio-nav a:hover { color:var(--text); border-color:var(--accent); }
-  .studio-credit { margin-top:24px; color:var(--muted); font-size:.78rem; }
-  .studio-credit a { color:var(--accent); }
   @media (max-width: 600px) {
     .row { flex-direction: column; }
     .col { min-width: 100%; }
     .param-grid { grid-template-columns: 1fr; }
   }
 </style>
-<link rel="stylesheet" href="studio.css?v=2">
+<link rel="stylesheet" href="studio.css?v=5">
 </head>
 <body>
 
@@ -134,9 +133,9 @@ inline const std::string index_html =
   </div>
   <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
     <button id="save-config-btn" class="small" title="Save current config">Save preset</button>
-    <button id="load-config-btn" class="smal)sa3web") +
-    std::string(R"sa3web(l" title="Load config file">Load preset</button>
-    <span id="config-filename" style="font-size:0.78rem;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+    <button id="load-config-btn" class="small" title="Load config file">Load preset</button>
+    <span id="config-filename" style="font-size:0.78rem;color:var(--mut)sa3web") +
+    std::string(R"sa3web(ed);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
     <input id="load-config-input" type="file" accept=".json" style="display:none">
   </div>
 </div>
@@ -200,14 +199,14 @@ inline const std::string index_html =
       <div><label for="apg-scale">APG Scale</label><input id="apg-scale" type="number" step="0.05" min="0" max="1" value="1.0"></div>
       <div><label for="cfg-norm-threshold">CFG Norm Threshold</label><input id="cfg-norm-threshold" type="number" step="0.1" min="0" value="0.0"></div>
       <div><label for="cfg-interval-min">CFG Interval Min</label><input id="cfg-interval-min" type="number" step="0.05" min="0" max="1" value="0.0"></div>
-      <div><label for="cfg-interval-max">CFG Interval Max</label><input id="cfg-interval-max" type="number" step="0.05" min="0" max="1" value="1.0">)sa3web") +
-    std::string(R"sa3web(</div>
+      <div><label for="cfg-interval-max">CFG Interval Max</label><input id="cfg-interval-max" type="number" step="0.05" min="0" max="1" value="1.0"></div>
     </div>
   </div>
 </div>
 
 <div class="card">
-  <button class="collapse-toggle collapsed" data-target="ds-section" type="button">Distribution Shift</button>
+  <button class="collapse-toggle collapsed" data-target="ds-sectio)sa3web") +
+    std::string(R"sa3web(n" type="button">Distribution Shift</button>
   <div id="ds-section" class="collapse-body collapsed">
     <div class="row gapped" style="margin-top:10px">
       <div class="col" style="flex:0 0 140px">
@@ -264,10 +263,10 @@ inline const std::string index_html =
   <div class="param-grid">
     <div style="grid-column:1/-1">
       <div class="row" style="gap:6px;align-items:end">
-      )sa3web") +
-    std::string(R"sa3web(  <div style="flex:3">
+        <div style="flex:3">
           <label for="init-audio-select">Active init audio (audio-in/)</label>
-          <div class="row" style="gap:6px">
+          <div cla)sa3web") +
+    std::string(R"sa3web(ss="row" style="gap:6px">
             <select id="init-audio-select" style="flex:1">
               <option value="">-- none (text-to-music) --</option>
             </select>
@@ -349,12 +348,11 @@ inline const std::string index_html =
 </h2>
 <div id="past-songs" class="card"></div>
 
-<p class="studio-credit">Inference and training web interfaces by <a )sa3web") +
-    std::string(R"sa3web(href="https://github.com/pillopaus-project/sa3.cpp" target="_blank" rel="noopener">pillopaus-project</a>; integrated into sa3.cpp.</p>
 </div>
 <script>document.getElementById('training-link').href = location.protocol + '//' + location.hostname + ':8016/';</script>
-<script src="app.js?v=6"></script>
-<script src="studio.js?v=9"></script>
+<script src="app.js?v=7"></script>
+<script src="studio.js?v=)sa3web") +
+    std::string(R"sa3web(13"></script>
 </body>
 </html>
 )sa3web");
@@ -503,6 +501,7 @@ async function checkHealth() {
         loadLoras();
         loadInitAudioList();
         applyLoudnessDefaults(h.loudness_defaults);
+        window.studioHealthReady?.();
     }
     catch {
         statusEl.textContent = "✗ Server unreachable";
@@ -556,17 +555,18 @@ async function randomPrompt() {
         const pool = dice[bucket]?.length ? dice[bucket] : Object.values(dice).flat();
         if (!pool.length) throw new Error("No prompts are available for this model.");
         setVal("#prompt", pool[Math.floor(Math.random() * pool.length)]);
+        window.studioSettingsChanged?.(["prompt"]);
         showError("");
     } catch (error) {
         showError(`Could not load prompts: ${error.message}`);
     } finally {
-        button.disabled = false;
+        button.disabled = f)sa3web") +
+    std::string(R"sa3web(alse;
     }
 }
 function renderLoraDropdown() {
     const sel = $("#lora-select");
-    sel.i)sa3web") +
-    std::string(R"sa3web(nnerHTML = '<option value="">— select —</option>';
+    sel.innerHTML = '<option value="">— select —</option>';
     for (const l of loraList.filter((item) => item.target !== "decoder" && item.target !== "encoder")) {
         const opt = document.createElement("option");
         opt.value = l.name;
@@ -585,10 +585,12 @@ function addLora() {
     activeLoras.push({ name, strength: 1 });
     sel.value = "";
     renderActiveLoras();
+    window.studioSettingsChanged?.(["loras"]);
 }
 function removeLora(name) {
     activeLoras = activeLoras.filter((l) => l.name !== name);
     renderActiveLoras();
+    window.studioSettingsChanged?.(["loras"]);
 }
 function renderActiveLoras() {
     const container = $("#active-loras");
@@ -666,12 +668,12 @@ function onDistShiftChange() {
         const label = document.querySelector(`label[for="dsp${i + 1}"]`);
         if (label)
             label.textContent = labels[i];
-        // Only reset to defaults if the user hasn't manually edited this param
+        // Only re)sa3web") +
+    std::string(R"sa3web(set to defaults if the user hasn't manually edited this param
         if (input.dataset.userEdited === undefined) {
             input.value = String(defaults[i]);
         }
-        inp)sa3web") +
-    std::string(R"sa3web(ut.disabled = type === "None";
+        input.disabled = type === "None";
     }
 }
 // ─── Past Songs ────────────────────────────────────────────────────────────
@@ -758,11 +760,11 @@ function loadParamsFromSnapshot(params) {
     set("#cfg-scale", params.cfg_scale);
     set("#cfg-rescale", params.cfg_rescale);
     set("#apg-scale", params.apg_scale);
-    set("#cfg-norm-threshold", params.cfg_norm_threshold);
+    set("#cfg-norm-threshol)sa3web") +
+    std::string(R"sa3web(d", params.cfg_norm_threshold);
     set("#cfg-interval-min", params.cfg_interval_min);
     set("#cfg-interval-max", params.cfg_interval_max);
-    set("#dist-shift", params.dist_shift);)sa3web") +
-    std::string(R"sa3web(
+    set("#dist-shift", params.dist_shift);
     const dsp = params.dist_shift_params;
     if (dsp) {
         for (let i = 0; i < 4 && i < dsp.length; i++) {
@@ -804,6 +806,7 @@ function loadParamsFromSnapshot(params) {
         activeLoras = loras.filter((l) => loraList.some((known) => known.name === l.name && known.target === "dit")).map((l) => ({ ...l }));
         renderActiveLoras();
     }
+    window.studioSettingsChanged?.();
 }
 function clearPastSongs() {
     pastSongs = [];
@@ -877,15 +880,15 @@ async function generateLoop(overrides = {}) {
         startPolling(r.session_id);
     }
     catch (e) {
-        lastGenParams = null;
+        last)sa3web") +
+    std::string(R"sa3web(GenParams = null;
         showError(e instanceof Error ? e.message : "Request failed");
         btn.disabled = false;
         btn.textContent = "Generate Loop";
     }
 }
 function startPolling(sessionId) {
-    const progress)sa3web") +
-    std::string(R"sa3web(Bar = $("#progress-bar");
+    const progressBar = $("#progress-bar");
     const progressLabel = $("#progress-label");
     const resultAudio = $("#result-audio");
     const resultSection = $("#result-section");
@@ -982,14 +985,14 @@ function readFormAsConfig() {
         version: 1,
         prompt: val("#prompt"),
         negative_prompt: val("#negative-prompt").trim(),
-        duration: num("#duration"),
+        durati)sa3web") +
+    std::string(R"sa3web(on: num("#duration"),
         steps: int("#steps"),
         seed: int("#seed"),
         duration_padding_sec: num("#duration-padding"),
         cfg_scale: num("#cfg-scale"),
         cfg_rescale: num("#cfg-rescale"),
-      )sa3web") +
-    std::string(R"sa3web(  apg_scale: num("#apg-scale"),
+        apg_scale: num("#apg-scale"),
         cfg_norm_threshold: num("#cfg-norm-threshold"),
         cfg_interval_min: num("#cfg-interval-min"),
         cfg_interval_max: num("#cfg-interval-max"),
@@ -1063,17 +1066,18 @@ function applyConfig(cfg) {
     setVal("#loop-bars", cfg.loop_bars);
     activeLoras = cfg.loras.filter((l) => loraList.some((known) => known.name === l.name && known.target === "dit")).map((l) => ({ ...l }));
     renderActiveLoras();
+    window.studioSettingsChanged?.();
 }
 function saveConfig() {
     const suggested = currentConfigFilename || "sa3-config.json";
-    const name = prompt("Save config as:", suggested);
+    const name = prompt("Save confi)sa3web") +
+    std::string(R"sa3web(g as:", suggested);
     if (!name)
         return;
     const finalName = name.endsWith(CONFIG_EXT) ? name : name + CONFIG_EXT;
     currentConfigFilename = finalName;
     const cfg = readFormAsConfig();
-    const blob = new Blob([JSON.stringify(cfg, null, 2)], )sa3web") +
-    std::string(R"sa3web({ type: "application/json" });
+    const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -1169,7 +1173,8 @@ document.addEventListener("DOMContentLoaded", () => {
             generate();
         }
     });
-    // Auto-connect to server on page load
+    // Auto-connec)sa3web") +
+    std::string(R"sa3web(t to server on page load
     checkHealth();
 });
 )sa3web");
@@ -1183,6 +1188,7 @@ const studio = {
   view: "studio", operation: "create", buffer: null, audioUrl: "", title: "",
   selection: [0, 1], cropMode: false, pointer: null, busy: false, peaks: null, frame: 0,
   activeModel: "",
+  preferences: null, lorasRestored: false,
 };
 const studioEl = (id) => document.getElementById(id);
 const studioIcons = {
@@ -1199,22 +1205,22 @@ function studioShell() {
   root.innerHTML = `<div class="studio-shell">
     <header class="studio-header">
       <h1><a href="https://github.com/betweentwomidnights/sa3.cpp" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">SA3.CPP</a> <small>studio</small></h1>
-      <nav aria-label="Studio views"><button type="button" data-studio-view="studio" aria-current="page">Studio</button><button type="button" data-studio-view="train">LoRA training</button><button type="button" data-studio-view="models">Models</button><button type="button" data-studio-view="settings">Settings</button></nav>
+      <nav aria-label="Studio views"><button type="button" data-studio-view="studio" aria-current="page">Studio</button><button type="button" data-studio-view="lanes" title="Experimental LoRA automation">Automation <span class="studio-beta">beta</span></button><button type="button" data-studio-view="train">LoRA training</button><button type="button" data-studio-view="models">Models</button><button type="button" data-studio-view="settings">Settings</button></nav>
       <div class="status" id="studio-header-status"></div>
     </header>
     <main id="studio-view-studio" class="studio-view">
       <div class="studio-hero"><div class="studio-actions"><button type="button" class="primary" data-studio-operation="create">create</button><button type="button" data-studio-operation="continue" hidden disabled>continue</button><button type="button" data-studio-operation="transform" hidden disabled>transform</button></div></div>
-      <section class="studio-panel" aria-label="Current take"><div class="studio-panel-title"><h2>Current take</h2><span id="studio-take-info">No audio yet</span></div><div class="studio-wave-wrap" id="studio-wave-wrap"><canvas id="studio-waveform" aria-label="Audio waveform; click to seek"></canvas><div id="studio-wave-empty">Create audio or drop a WAV here.</div><div class="studio-wave-actions"><button id="studio-upload-wave" type="button" aria-label="Upload WAV" title="Upload WAV">${studioIcons.upload}</button><button id="studio-crop" type="button" aria-label="Select crop" title="Select crop" disabled>${studioIcons.crop}</button></div><div id="studio-drop-hint" hidden>Drop WAV to open it</div><input id="studio-import-file" type="file" accept="audio/wav,.wav" hidden></div><div class="studio-take-tools"><div id="studio-audio-slot"></div><button id="studio-play" type="button" aria-label="Play" title="Play" disabled>${studioIcons.play}</button><button id="studio-stop" type="button" aria-label="Stop" title="Stop" disabled>${studioIcons.stop}</button><span id="studio-time" class="studio-time">0:00 / 0:00</span><span id="studio-selection-label" hidden>No selection</span><button id="studio-download" type="button" disabled>Download WAV</button><button id="studio-clear" type="button" disabled>Clear take</button></div><div id="studio-meta-slot"></div><div id="studio-progress-slot"></div><div id="studio-error-slot"></div></section>
-      <div class=")sa3web") +
-    std::string(R"sa3web(studio-history-head"><h2>Past takes <span id="studio-history-count"></span></h2><div id="studio-history-actions"></div></div><div id="studio-history-slot"></div>
+      <section class="studio-panel" aria-label="Current take"><div class="studio-panel-title"><h2>Current take</h2><span id="studio-take-info">No audio yet</span></div><div class="studio-wave-wrap" id="studio-wave-wrap"><canvas id="studio-waveform" aria-label="Audio waveform; click to seek"></canvas><div id="studio-wave-empty">Create audio or drop a WAV here.</div><div class="studio-wave-actions"><button id="studio-upload-wave" type="button" aria-label="Upload WAV" title="Upload WAV">${studioIcons.upload}</button><button id="studio-crop" type="button" aria-label="Select crop" title="Select crop" disabled>${studioIcons.crop}</button></div><div id="studio-drop-hint" hidden>Drop WAV to open it</div><input id="studio-import-file" type="file" accept="audio/wav,.wav" hidden></div><div class="studio-take-tools"><div id="studio-audio-slot"></div><button id="studio-play" type="button" aria-label="Play" title="Play" disabled>${studioIcons.play}</button><button id="studio-stop" type="button" aria-label="Stop" title="Stop" disabled>${studioIcons.stop}</button><span id="studio-time" class="studio-time">0:00 / 0:00</span><span id="studio-selection-label" hidden>No selection</span><button id="studio-download" type="button" disabled>Download WAV</button><button id="studio-clea)sa3web") +
+    std::string(R"sa3web(r" type="button" disabled>Clear take</button></div><div id="studio-meta-slot"></div><div id="studio-progress-slot"></div><div id="studio-error-slot"></div></section>
+      <div class="studio-history-head"><h2>Past takes <span id="studio-history-count"></span></h2><div id="studio-history-actions"></div></div><div id="studio-history-slot"></div>
     </main>
+    <main id="studio-view-lanes" class="studio-view" hidden><iframe id="studio-lanes-frame" title="Automation lanes"></iframe></main>
     <main id="studio-view-train" class="studio-view" hidden><iframe id="studio-training-frame" title="LoRA training workspace"></iframe></main>
     <main id="studio-view-models" class="studio-view" hidden><div class="studio-hero"><div><div class="studio-eyebrow">Model library</div><h2>Get the sound you need.</h2><p>Model weights live beside the runtime in your configured models folder.</p></div></div><div id="studio-model-cards" class="studio-model-grid"></div><section class="studio-panel" style="margin-top:16px"><h2 style="font-size:1rem;margin:0 0 12px;border:0">Download a model set</h2><div class="param-grid"><div><label for="studio-download-variant">Variant</label><select id="studio-download-variant"><option value="medium">Medium</option><option value="small-music">Small music</option><option value="small-sfx">Small SFX</option></select></div><div><label for="studio-download-tier">DiT tier</label><select id="studio-download-tier"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · compact</option><option value="f32">F32</option><option value="q5_k_m">Q5_K_M</option><option value="q8_0">Q8_0</option></select></div></div><p class="small-note" style="margin:12px 0">The set includes an F32 autoencoder, F16 text encoder, conditioner, and tokenizer. <a href="https://huggingface.co/thepatch" target="_blank" rel="noopener" style="color:var(--accent)">Review model licenses and cards</a>.</p><button id="studio-download-model" type="button" class="primary">Download model set</button><p id="studio-download-status" class="small-note" role="status" style="margin:10px 0 0"></p></section><section class="studio-panel" style="margin-top:16px"><h2 style="font-size:1rem;margin:0 0 8px;border:0">Decoder corrections</h2><p class="small-note">A selected correction runs with every generation on its compatible model. Creative LoRAs stay in the render dialogs.</p><div id="studio-decoder-list"></div><button id="studio-download-decoder" type="button">Download SAME-L correction</button><p id="studio-decoder-status" class="small-note" role="status"></p></section></main>
     <main id="studio-view-settings" class="studio-view studio-settings" hidden><div class="studio-hero"><div><div class="studio-eyebrow">Studio settings</div><h2>Runtime and output.</h2><p>Keep the model loaded and tune output processing here.</p></div></div><div id="studio-session-settings"></div><details><summary>Audio processing</summary><div id="studio-audio-settings"></div></details></main>
-    <div id="studio-footer"></div>
   </div>
-    <div id="studio-modal" class="studio-modal" hidden><div class="studio-dialog" role="dialog" aria-modal="true" aria-labelledby="studio-dialog-title"><div class="studio-dialog-head"><h2 id="studio-dialog-title">create</h2><button id="studio-dialog-close" type="button" aria-label="Close dialog">×</button></div><p id="studio-dialog-description" class="studio-dialog-description">Start a new take from a prompt.</p><div id="studio-dialog-prompt"></div><div id="studio-dialog-basic"></div><div class="studio-extra-controls"><div id="studio-tail-wrap"><span class="studio-field-label">Ending</span><div class="studio-segmented"><label><input type="radio" name="studio-tail" value="0"> Ends here</label><label><input type="radio" name="studio-tail" value="6"> Keeps going</label></div></div><div id="studio-loop-wrap"><label class="inline-label"><input id="studio-loop" type="checkbox"> Make a loop</label><div id="studio-loop-fields" class="studio-loop-options studio-conditional" hidden></div></div><div id="studio-noise-wrap" class="studio-conditional" hidden><label for="studio-noise">Transform strength <output id="studio-noise-value">0.85</output></label><input id="studio-noise" type="range" min="0" max="1" step="0.05" value="0.85"></div></div><div id="studio-dialog-loras"></div><det)sa3web") +
-    std::string(R"sa3web(ails id="studio-advanced"><summary>Advanced</summary><div id="studio-dialog-cfg"></div><div id="studio-dialog-ds"></div><div id="studio-inpaint-wrap" hidden><label class="inline-label"><input id="studio-inpaint" type="checkbox"> Inpaint part of the selected audio</label><div class="param-grid studio-conditional" id="studio-inpaint-fields" hidden><div><label for="studio-inpaint-start">Start (seconds)</label><input id="studio-inpaint-start" type="number" min="0" step="0.01" value="0"></div><div><label for="studio-inpaint-end">End (seconds)</label><input id="studio-inpaint-end" type="number" min="0" step="0.01" value="0"></div></div></div></details><p id="studio-dialog-error" role="alert" hidden></p><div class="studio-dialog-actions"><button id="studio-dialog-cancel" type="button">Cancel</button><button id="studio-dialog-submit" type="button" class="primary">Create</button></div></div></div>`;
+    <div id="studio-modal" class="studio-modal" hidden><div class="studio-dialog" role="dialog" aria-modal="true" aria-labelledby="studio-dialog-title"><div class="studio-dialog-head"><h2 id="studio-dialog-title">create</h2><button id="studio-dialog-close" type="button" aria-label="Close dialog">×</button></div><p id="studio-dialog-description" class="studio-dialog-description">Start a new take from a prompt.</p><div id="studio-dialog-prompt"></div><div id="studio-dialog-basic"></div><div class="studio-extra-controls"><div id="studio-tail-wrap"><span class="studio-field-label">Ending</span><div class="studio-segmented"><label><input type="radio" name="studio-tail" value="0"> Ends here</label><label><input type="radio" name="studio-tail" value="6"> Keeps going</label></div></div><div id="studio-loop-wrap"><label class="inline-label"><input id="studio-loop" type="checkbox"> Make a loop</label><div id="studio-loop-fields" class="studio-loop-options studio-conditional" hidden></div></div><div id=)sa3web") +
+    std::string(R"sa3web("studio-noise-wrap" class="studio-conditional" hidden><label for="studio-noise">Transform strength <output id="studio-noise-value">0.85</output></label><input id="studio-noise" type="range" min="0" max="1" step="0.05" value="0.85"></div></div><div id="studio-dialog-loras"></div><details id="studio-advanced"><summary>Advanced</summary><div id="studio-dialog-cfg"></div><div id="studio-dialog-ds"></div><div id="studio-inpaint-wrap" hidden><label class="inline-label"><input id="studio-inpaint" type="checkbox"> Inpaint part of the selected audio</label><div class="param-grid studio-conditional" id="studio-inpaint-fields" hidden><div><label for="studio-inpaint-start">Start (seconds)</label><input id="studio-inpaint-start" type="number" min="0" step="0.01" value="0"></div><div><label for="studio-inpaint-end">End (seconds)</label><input id="studio-inpaint-end" type="number" min="0" step="0.01" value="0"></div></div></div></details><p id="studio-dialog-error" role="alert" hidden></p><div class="studio-dialog-actions"><button id="studio-dialog-cancel" type="button">Cancel</button><button id="studio-dialog-submit" type="button" class="primary">Create</button></div></div></div>`;
 
   const move = (selector, target) => { const node = document.querySelector(selector); if (node) studioEl(target).append(node); };
   move("#server-status", "studio-header-status"); move("#model-info", "studio-header-status");
@@ -1240,12 +1246,11 @@ function studioShell() {
   if (loopBars) studioEl("studio-loop-fields").append(loopBars);
   move("#progress-wrap", "studio-progress-slot"); move("#result-section", "studio-audio-slot"); move("#seed-info", "studio-meta-slot"); move("#error-msg", "studio-error-slot");
   move("#past-songs", "studio-history-slot"); move("#past-count", "studio-history-count"); move("#clear-all-btn", "studio-history-actions");
-  const credit = document.querySelector("#legacy-root .studio-credit"); if (credit) studioEl("studio-footer").append(credit);
 }
 
 function studioShowView(name) {
   studio.view = name;
-  for (const view of ["studio", "train", "models", "settings"]) {
+  for (const view of ["studio", "lanes", "train", "models", "settings"]) {
     studioEl(`studio-view-${view}`).hidden = view !== name;
     document.querySelector(`[data-studio-view="${view}"]`).setAttribute("aria-current", view === name ? "page" : "false");
   }
@@ -1253,16 +1258,20 @@ function studioShowView(name) {
     const frame = studioEl("studio-training-frame");
     if (!frame.src) frame.src = "/training/?embedded=1";
   }
+  if (name === "lanes") {
+    const frame = studioEl("studio-lanes-frame");
+    if (!frame.src) frame.src = "/lanes?embedded=1";
+  }
   if (name === "models") studioRefreshModels();
   if (name === "studio") loadLoras();
   location.hash = name === "studio" ? "" : name;
 }
 
 function studioDuration() { return studio.buffer?.duration || 0; }
-function studioRange() { const d = studioDuration(); return [studio.selection[0]*d, studio.selection[1]*d]; }
+function )sa3web") +
+    std::string(R"sa3web(studioRange() { const d = studioDuration(); return [studio.selection[0]*d, studio.selection[1]*d]; }
 function studioTime(sec) { const s = Math.max(0, sec); return `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}.${String(Math.floor(s%1*100)).padStart(2,"0")}`; }
-function studioUpdat)sa3web") +
-    std::string(R"sa3web(eTakeControls() {
+function studioUpdateTakeControls() {
   const has = !!studio.buffer;
   for (const op of ["continue", "transform"]) {
     const button=document.querySelector(`[data-studio-operation="${op}"]`);
@@ -1328,11 +1337,11 @@ function studioDrawWaveform() {
     ctx.stroke();
   }
   if(studio.cropMode){
-    const left=studio.selection[0]*w,right=studio.selection[1]*w;
+    const left=studio.selection[0]*w,right=s)sa3web") +
+    std::string(R"sa3web(tudio.selection[1]*w;
     ctx.fillStyle="rgba(0,0,0,.48)";ctx.fillRect(0,0,left,h);ctx.fillRect(right,0,w-right,h);
     ctx.strokeStyle="#f4eded";ctx.lineWidth=2*scale;
-    for(const x of [left,right]){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();ctx.fillStyle="#f4eded";ctx.fillRect)sa3web") +
-    std::string(R"sa3web((Math.max(0,x-4*scale),h/2-12*scale,8*scale,24*scale);}
+    for(const x of [left,right]){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();ctx.fillStyle="#f4eded";ctx.fillRect(Math.max(0,x-4*scale),h/2-12*scale,8*scale,24*scale);}
   }
   if(Number.isFinite(played)){ctx.strokeStyle="#ffffff";ctx.lineWidth=1.5*scale;ctx.beginPath();ctx.moveTo(played,0);ctx.lineTo(played,h);ctx.stroke();}
 }
@@ -1388,36 +1397,122 @@ async function studioUploadSelection() {
   return {path:body.path,duration:end-start};
 }
 
+// Remember editable controls, not source audio or the derived transform length. The shared
+// controls stay shared; Create and Continue each keep their own duration and ending.
+const studioPreferencesKey = "sa3-st)sa3web") +
+    std::string(R"sa3web(udio-preferences-v1";
+function studioPreferenceControls() {
+  return [...document.querySelectorAll("#studio-modal input[id], #studio-modal textarea[id], #studio-modal select[id], #studio-session-settings input[id], #studio-audio-settings input[id]")]
+    .filter(el => el.type !== "file" && !["duration", "duration-num", "duration-padding", "duration-padding-num", "lora-select"].includes(el.id));
+}
+function studioSavePreferences(ids) {
+  const prefs = studio.preferences;
+  if (!prefs) return;
+  for (const el of studioPreferenceControls()) {
+    if (ids && !ids.includes(el.id)) continue;
+    prefs.fields[el.id] = el.type === "checkbox" ? el.checked : el.value;
+    if (/^dsp[1-4]$/.test(el.id)) prefs.dsEdited[el.id] = el.dataset.userEdited === "true";
+  }
+  if ((!ids || ids.includes("duration") || ids.includes("duration-num")) && studio.operation !== "transform")
+    prefs.durations[studio.operation] = studioEl("duration-num").value;
+  if (studio.lorasRestored) prefs.loras = activeLoras.map(l => ({...l}));
+  if (!studioEl("studio-modal").hidden && studio.operation !== "transform")
+    prefs.endings[studio.operation] = document.querySelector('input[name="studio-tail"]:checked')?.value || "0";
+  try { localStorage.setItem(studioPreferencesKey, JSON.stringify(prefs)); } catch { /* Keep session memory when storage is unavailable. */ }
+}
+function studioApplyPreferences() {
+  if (!studio.preferences) return;
+  for (const el of studioPreferenceControls()) {
+    const value = studio.preferences.fields[el.id];
+    if (el.type === "checkbox") { if (typeof value === "boolean") el.checked = value; }
+    else if (typeof value === "string") el.value = value;
+    if (/^dsp[1-4]$/.test(el.id)) {
+      if (studio.preferences.dsEdited[el.id]) el.dataset.userEdited = "true";
+      else delete el.dataset.userEdited;
+    }
+  }
+  onDistShiftChange();
+  studioUpdateDialogOptions();
+}
+function studioUpdateDialogOptions() {
+  studioEl("studio-loop-fields").hidden = !studioEl("studio-loop").checked;
+  studioEl("studio-inpaint-fields").hidden = !studioEl("studio-inpaint").checked;
+  studioEl("studio-noise-value").textContent = Number(studioEl("studio-noise").value).toFixed(2);
+}
+function studioInitPreferences() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(studioPreferencesKey)) || {}; } catch { /* Missing, corrupt or blocked storage uses defaults. */ }
+  const object = value => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  studio.preferences = {
+    fields: object(saved.fields), dsEdited: object(saved.dsEdited),
+    durations: {create: "30", continue: "30", ...object(saved.durations)},
+    endings: {create: "0", continue: "6", ...object(saved.endings)},
+    loras: Array.isArray(saved.loras) ? saved.loras.filter(l => l && typeof l.name === "string" && Number.isFinite(l.strength)) : [],
+  };
+  for (const op of ["create", "continue"]) {
+    try {
+      if (!Object.hasOwn(object(saved.endings), op))
+        studio.preferences.endings[op] = localStorage.getItem(`sa3-tail-${op}`) || studio.preferences.endings[op];
+    } catch { /* Legacy ending preferences are optional. */ }
+  }
+  studioApplyPreferences();
+  const remember = event => {
+    const el = event.target;
+    if (!el.closest?.("#studio-modal, #studio-session-settings, #studio-audio-settings")) return;
+    const ids = [el.id];
+    if (el.id === "steps" || el.id === "steps-num") ids.push("steps", "steps-num");
+    if (el.id === "dist-shift") ids.push("dsp1", "dsp2", "dsp3", "dsp4");
+    studioSavePreferences(ids);
+  };
+  document.addEventListener("input", remember);
+  document.addEventListener("change", remember);
+  window.addEventListener("pagehide", () => {
+    if (!studioEl("studio-modal").hidden) studioSavePreferences(studioPreferenceControls().filter(el => el.closest("#studio-modal")).map(el => el.id).concat("duration-num"));
+  });
+}
+window.studioSettingsChanged = studioSavePreferences;
+// Health arrives asynchronously and supplies server defaults. )sa3web") +
+    std::string(R"sa3web(Saved choices take precedence.
+window.studioHealthReady = studioApplyPreferences;
+
 function studioOpenOperation(operation) {
   if(studio.busy || (operation!=="create"&&!studio.buffer))return;
+  if(!studioEl("studio-modal").hidden)studioCloseOperation();
   studio.operation=operation;
   studioEl("studio-dialog-error").hidden=true;
   studioEl("studio-dialog-title").textContent=operation;
   studioEl("studio-dialog-submit").textContent=operation[0].toUpperCase()+operation.slice(1);
-  const descriptions={create:"Start a new take from a prompt.",continue:"Extend the selected audio with a new passage.",transform:"Reimagine the selected audio while keeping it)sa3web") +
-    std::string(R"sa3web(s length."};
+  const descriptions={create:"Start a new take from a prompt.",continue:"Extend the selected audio with a new passage.",transform:"Reimagine the selected audio while keeping its length."};
   studioEl("studio-dialog-description").textContent=descriptions[operation];
   studioEl("studio-loop-wrap").hidden=operation!=="create";
   studioEl("studio-noise-wrap").hidden=operation!=="transform";
   studioEl("studio-tail-wrap").hidden=operation==="transform";
   studioEl("studio-inpaint-wrap").hidden=operation!=="transform";
-  studioEl("studio-inpaint").checked=false;studioEl("studio-inpaint-fields").hidden=true;
-  const tail=localStorage.getItem(`sa3-tail-${operation}`) || (operation==="continue"?"6":"0");
+  const tail=studio.preferences.endings[operation] || "0";
   const radio=document.querySelector(`input[name="studio-tail"][value="${tail}"]`);if(radio)radio.checked=true;
   studioEl("studio-advanced").open=false;
   const duration=studioEl("duration-num");
   const label=document.querySelector('label[for="duration"]');
   if(label)label.textContent=operation==="continue"?"Add seconds":operation==="transform"?"Selected length (seconds)":"Duration (seconds)";
   duration.readOnly=operation==="transform";
-  if(operation==="continue")duration.value="8";
+  studioEl("duration").disabled=operation==="transform";
+  duration.value=studio.preferences.durations[operation] || "30";
   if(operation==="transform"){
     const length=studioRange()[1]-studioRange()[0];duration.value=length.toFixed(2);
-    studioEl("studio-inpaint-start").value="0";studioEl("studio-inpaint-end").value=length.toFixed(2);
+    const start=Math.min(Math.max(0,Number(studioEl("studio-inpaint-start").value)||0),Math.max(0,length-.01));
+    const end=Math.min(Number(studioEl("studio-inpaint-end").value)||length,length);
+    studioEl("studio-inpaint-start").value=start.toFixed(2);
+    studioEl("studio-inpaint-end").value=(end>start?end:length).toFixed(2);
   }
+  studioEl("duration").value=duration.value;
+  studioUpdateDialogOptions();
   studioEl("studio-modal").hidden=false; studioEl("prompt").focus();
 }
 
-function studioCloseOperation() { studioEl("studio-modal").hidden=true; }
+function studioCloseOperation() {
+  studioSavePreferences(studioPreferenceControls().filter(el => el.closest("#studio-modal")).map(el => el.id).concat("duration-num"));
+  studioEl("studio-modal").hidden=true;
+}
 
 async function studioSubmit() {
   const button=studioEl("studio-dialog-submit"); button.disabled=true;
@@ -1428,7 +1523,7 @@ async function studioSubmit() {
     studioEl("steps").value=studioEl("steps-num").value;
     let overrides={duration:requested,init_path:"",inpaint_start:-1,inpaint_end:-1,
       duration_padding_sec:studio.operation==="transform"?0:Number(document.querySelector('input[name="studio-tail"]:checked')?.value||0)};
-    if(studio.operation!=="transform")localStorage.setItem(`sa3-tail-${studio.operation}`,String(overrides.duration_padding_sec));
+    studioSavePreferences(studioPreferenceControls().filter(el => el.closest("#studio-modal")).map(el => el.id).concat("duration-num"));
     if(studio.operation!=="create") {
       const source=await studioUploadSelection();
       overrides.init_path=source.path;
@@ -1438,7 +1533,8 @@ async function studioSubmit() {
         if(studioEl("studio-inpaint").checked){
           const start=Number(studioEl("studio-inpaint-start").value),end=Number(studioEl("studio-inpaint-end").value);
           if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<=start||end>source.duration+.01)throw new Error("Inpaint range must fit inside the selected audio.");
-          overrides.inpaint_start=start;overrides.inpaint_end=end;
+          overrides.inpaint_start=start;o)sa3web") +
+    std::string(R"sa3web(verrides.inpaint_end=end;
         }
       }
     }
@@ -1465,8 +1561,7 @@ async function studioRefreshModels() {
     const data=await apiGet("/models/catalog");
     studio.activeModel=data.models.find(model=>model.active)?.variant || "";
     container.innerHTML="";
-    for(const)sa3web") +
-    std::string(R"sa3web( model of data.models) {
+    for(const model of data.models) {
       const card=document.createElement("div");card.className="studio-model-card";
       const title=document.createElement("strong");title.textContent=model.name;
       const summary=document.createElement("p");summary.textContent=model.description;
@@ -1499,7 +1594,8 @@ function studioRenderDecoderLoras() {
     const radio=document.createElement("input");radio.type="radio";radio.name="studio-decoder";radio.value=name;radio.checked=selected===name;radio.disabled=disabled;
     radio.onchange=()=>{if(family)localStorage.setItem(key,name);};
     const title=document.createElement("span");title.textContent=label;
-    const note=document.createElement("small");note.textContent=detail;
+    const note=document.creat)sa3web") +
+    std::string(R"sa3web(eElement("small");note.textContent=detail;
     row.append(radio,title,note);list.append(row);
   };
   makeChoice("","Off","No correction");
@@ -1518,8 +1614,7 @@ async function studioStartDecoderDownload() {
   const status=studioEl("studio-decoder-status"),button=studioEl("studio-download-decoder");button.disabled=true;
   try{
     const job=await apiPost("/models/decoder/download",{});
-    s)sa3web") +
-    std::string(R"sa3web(tatus.textContent="Preparing decoder correction…";
+    status.textContent="Preparing decoder correction…";
     const poll=async()=>{
       try{
         const s=await apiGet(`/models/download/${job.id}`);
@@ -1536,7 +1631,14 @@ window.studioDecoderAdapter=()=>{
   const entry=loraList.find(l=>l.name===name&&l.target==="decoder"&&studioDecoderLoraFamily(l)===family);
   return entry?[{name:entry.name,strength:1}]:[];
 };
-window.studioLorasReady=studioRenderDecoderLoras;
+window.studioLorasReady=()=>{
+  if(studio.preferences&&!studio.lorasRestored){
+    activeLoras=studio.preferences.loras.filter(l=>loraList.some(known=>known.name===l.name&&known.target==="dit")).map(l=>({...l}));
+    studio.lorasRestored=true;
+    renderActiveLoras();
+  }
+  studioRenderDecoderLoras();
+};
 
 async function studioStartDownload() {
   const status=studioEl("studio-download-status"),button=studioEl("studio-download-model");button.disabled=true;
@@ -1556,7 +1658,8 @@ function studioWire() {
   studioEl("studio-modal").onclick=e=>{if(e.target===studioEl("studio-modal"))studioCloseOperation();};
   studioEl("studio-dialog-submit").onclick=studioSubmit;
   studioEl("studio-loop").onchange=()=>studioEl("studio-loop-fields").hidden=!studioEl("studio-loop").checked;
-  studioEl("studio-noise").oninput=()=>studioEl("studio-noise-value").textContent=Number(studioEl("studio-noise").value).toFixed(2);
+  studioEl("studio-noise").oninput=()=>studioEl("studio-noise-value").textContent=Number(studioEl("studio-noise").val)sa3web") +
+    std::string(R"sa3web(ue).toFixed(2);
   studioEl("studio-inpaint").onchange=()=>studioEl("studio-inpaint-fields").hidden=!studioEl("studio-inpaint").checked;
   studioEl("studio-play").onclick=async()=>{
     const audio=studioEl("result-audio");if(!studio.buffer)return;
@@ -1577,8 +1680,7 @@ function studioWire() {
     studioUpdateTakeControls();studioDrawWaveform();
   };
   studioEl("studio-download").onclick=()=>{if(!studio.audioUrl)return;const a=document.createElement("a");a.href=studio.audioUrl;a.download=`sa3-take-${Date.now()}.wav`;a.click();};
-  studioEl("studio-clear").onclick)sa3web") +
-    std::string(R"sa3web(=()=>{deleteCurrentSong();studioClearTake();};
+  studioEl("studio-clear").onclick=()=>{deleteCurrentSong();studioClearTake();};
   const importFile=async file=>{
     if(!file)return;
     if(!/\.wav$/i.test(file.name)){showError("Choose a WAV file.");return;}
@@ -1618,7 +1720,8 @@ function studioWire() {
     else studio.selection=[Math.min(pos,p.start),Math.max(pos,p.start)];
     studioUpdateTakeControls();studioDrawWaveform();
   };
-  canvas.onpointerup=e=>{
+  canvas.onpointeru)sa3web") +
+    std::string(R"sa3web(p=e=>{
     if(!studio.pointer)return;
     if(studio.pointer.mode==="seek"||!studio.pointer.moved){studioEl("result-audio").currentTime=fraction(e)*studioDuration();}
     else if(studio.selection[1]-studio.selection[0]<.002)studio.selection=[0,1];
@@ -1635,10 +1738,9 @@ function studioWire() {
     if(!studioEl("studio-modal").hidden)studioCloseOperation();
     else if(studio.cropMode){studio.cropMode=false;studio.selection=[0,1];studioUpdateTakeControls();studioDrawWaveform();}
   });
-  window.addEventListener("hashchange",()=>{const view=location.hash.slice(1)||"studio";if(["studio","train","models","settings"].includes(view)&&view!==studio.view)sa3web") +
-    std::string(R"sa3web()studioShowView(view);});
+  window.addEventListener("hashchange",()=>{const view=location.hash.slice(1)||"studio";if(["studio","lanes","train","models","settings"].includes(view)&&view!==studio.view)studioShowView(view);});
   window.addEventListener("message",event=>{if(event.origin===location.origin&&event.data?.type==="sa3-lora-registered")loadLoras();});
-  const initial=location.hash.slice(1);if(["train","models","settings"].includes(initial))studioShowView(initial);
+  const initial=location.hash.slice(1);if(["lanes","train","models","settings"].includes(initial))studioShowView(initial);
 }
 
 function studioClearTake() { const audio=studioEl("result-audio");audio.pause();if(studio.frame)cancelAnimationFrame(studio.frame);studio.frame=0;studio.buffer=null;studio.peaks=null;studio.audioUrl="";studio.title="";studio.selection=[0,1];studio.cropMode=false;studioEl("result-section").style.display="none";audio.removeAttribute("src");audio.load();studioUpdateTakeControls();studioDrawWaveform(); }
@@ -1647,7 +1749,7 @@ window.studioClearTake=studioClearTake;
 window.studioResultReady=entry=>studioLoadTake(entry).catch(e=>showError(`Cannot display waveform: ${e.message}`));
 window.studioSetBusy=studioSetBusy;
 document.addEventListener("DOMContentLoaded",()=>{
-  try { studioShell();studioWire();studioUpdateTakeControls();studioDrawWaveform();studioRefreshModels(); }
+  try { studioShell();studioInitPreferences();studioWire();studioUpdateTakeControls();studioDrawWaveform();studioRefreshModels(); }
   catch(error) { console.error("Studio initialization failed",error); studioEl("studio-header-status").textContent=`Studio initialization failed: ${error.message}`; }
 });
 )sa3web");
@@ -1665,6 +1767,7 @@ body { max-width:none; padding:0; margin:0; }
 .studio-header nav { display:flex; flex-wrap:wrap; gap:4px; }
 .studio-header nav button { border:0; background:transparent; color:var(--muted); padding:8px 12px; }
 .studio-header nav button[aria-current="page"] { color:var(--text); background:#38171b; box-shadow:inset 0 -2px var(--accent); }
+.studio-beta { display:inline-block; margin-left:4px; padding:1px 5px; border:1px solid var(--accent); border-radius:4px; color:var(--accent); font-size:.6rem; font-weight:700; line-height:1.4; vertical-align:middle; }
 .studio-header .status { margin-left:auto; display:flex; gap:8px; color:var(--muted); font-size:.78rem; }
 .studio-view { margin-top:24px; }
 .studio-view[hidden], .studio-modal[hidden], .studio-conditional[hidden] { display:none!important; }
@@ -1698,19 +1801,18 @@ body { max-width:none; padding:0; margin:0; }
 #studio-selection-label { margin-left:auto; color:var(--muted); font-size:.78rem; }
 #result-section { display:none; }
 #result-section #delete-current-btn { display:none; }
-#studio-meta-slot { color:var(--muted); font-size:.75rem; margin-top:10px; }
+#studio-meta-slot { color:var()sa3web") +
+    std::string(R"sa3web(--muted); font-size:.75rem; margin-top:10px; }
 #progress-wrap { margin-top:14px; }
 #progress-bar { height:5px; }
 #progress-label { margin-top:6px; }
 #error-msg { min-height:1em; }
-.studio-history-head { display:flex; ju)sa3web") +
-    std::string(R"sa3web(stify-content:space-between; align-items:center; margin:24px 0 9px; gap:8px; }
+.studio-history-head { display:flex; justify-content:space-between; align-items:center; margin:24px 0 9px; gap:8px; }
 .studio-history-head h2 { margin:0; border:0; padding:0; font-size:1rem; }
 #past-songs { max-height:none; padding:4px 16px; }
 .song-entry { flex-wrap:wrap; }
 .song-entry audio { min-width:150px; flex:1; }
-.studio-shell > .studio-credit { margin:24px 0 0; }
-#studio-training-frame { width:100%; height:calc(100vh - 145px); min-height:580px; border:1px solid var(--border); border-radius:12px; background:var(--bg); }
+#studio-training-frame, #studio-lanes-frame { width:100%; height:calc(100vh - 145px); min-height:580px; border:1px solid var(--border); border-radius:12px; background:var(--bg); }
 .prompt-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .prompt-heading label { margin:0; }
 #prompt-dice { width:34px; height:34px; display:grid; place-items:center; padding:6px; }
@@ -1750,11 +1852,11 @@ body { max-width:none; padding:0; margin:0; }
 .studio-dialog .card + .card { margin-top:12px; }
 .studio-dialog .card .row.gapped { margin:0 0 10px; }
 .studio-dialog textarea { min-height:75px; }
-.studio-dialog .param-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.studio-dialog .param-grid { grid-template-colu)sa3web") +
+    std::string(R"sa3web(mns:repeat(2,minmax(0,1fr)); }
 .studio-dialog #studio-dialog-basic input[type=range] { display:none; }
 .studio-dialog #studio-dialog-basic .range-row input[type=number] { width:100%; }
-.st)sa3web") +
-    std::string(R"sa3web(udio-dialog #studio-dialog-basic .range-row { display:block; }
+.studio-dialog #studio-dialog-basic .range-row { display:block; }
 .studio-dialog .collapse-body.collapsed { max-height:0; }
 .studio-dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
 .studio-dialog .studio-loop-options { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }
@@ -1791,6 +1893,973 @@ body { max-width:none; padding:0; margin:0; }
   .studio-dialog .param-grid, .studio-dialog .studio-extra-controls { grid-template-columns:1fr; }
   .song-entry audio { min-width:100%; }
 }
+)sa3web");
+
+inline const std::string lanes_html =
+    std::string(R"sa3web(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sa3.cpp studio — automation lanes</title>
+<script>if (window.top !== window || new URLSearchParams(location.search).has('embedded')) document.documentElement.classList.add('embedded');</script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #090909; --surface: #171313; --surface2: #100d0d; --border: #493030;
+    --text: #f4eded; --muted: #b6a5a5; --accent: #e23b42;
+    --green: #6cc58b; --red: #ed6268; --orange: #d9a36c;
+    --radius: 6px; --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    --head-w: 230px;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.5;
+    max-width: 1400px; margin: 0 auto; padding: 16px 16px 60px;
+  }
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 1.35rem; font-weight: 600; }
+  h1 small { font-weight: 400; font-size: 0.8rem; color: var(--muted); }
+  header a { color: var(--muted); font-size: 0.82rem; }
+  #status { font-size: 0.82rem; }
+  #status.ok { color: var(--green); } #status.err { color: var(--red); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+          padding: 12px; margin-bottom: 10px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .col { display: flex; flex-direction: column; min-width: 0; }
+  .grow { flex: 1; min-width: 220px; }
+  label { font-size: 0.74rem; color: var(--muted); margin-bottom: 2px; font-weight: 500; }
+  input, select, textarea {
+    font-family: inherit; font-size: 0.85rem; background: var(--surface2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 8px; outline: none;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 38px; font-family: var(--mono); font-size: 0.8rem; width: 100%; }
+  input[type=number] { font-family: var(--mono); font-size: 0.8rem; width: 78px; }
+  button {
+    font-family: inherit; font-size: 0.82rem; cursor: pointer; border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 5px 12px; background: #251a1a; color: var(--text); white-space: nowrap;
+  }
+  button:hover { background: #392222; }
+  button.primary { background: #b6222b; border-color: #d3323b; color: #fff; font-weight: 600; padding: 7px 18px; }
+  button.primary:hover { background: #d3323b; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.tiny { padding: 1px 7px; font-size: 0.74rem; }
+  button.icon { padding: 2px 7px; }
+  .muted { color: var(--muted); font-size: 0.78rem; }
+  .err { color: var(--red); font-size: 0.82rem; min-height: 1.2em; }
+  .seedbox { display: flex; gap: 4px; align-items: center; }
+  .seedbox input { width: 110px; }
+  .embedded body { max-width: none; padding: 4px 2px 40px; background: transparent; }
+  .embedded header { display: none; }
+  details.adv { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+  details.adv summary { cursor: pointer; font-size: 0.82rem; font-weight: 600; }
+  .adv-intro { margin: 6px 0 10px; line-height: 1.55; max-width: 980px; }
+  .adv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-bottom: 8px; }
+  .adv-item { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+  .adv-item label { display: block; }
+  .adv-item p { font-size: 0.76rem; color: var(--muted); line-height: 1.5; margin-top: 6px; }
+  .adv-item p b { color: var(--text); font-weight: 600; }
+  input[type=checkbox] { width: auto; accent-color: var(--accent); }
+
+  /* transport + progress */
+  .transport { display: flex; gap: )sa3web") +
+    std::string(R"sa3web(8px; align-items: center; margin: 6px 0 8px; flex-wrap: wrap; }
+  #time { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); min-width: 110px; }
+  .progress { flex: 1; min-width: 160px; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  #progress-label { font-size: 0.76rem; color: var(--muted); min-width: 170px; }
+
+  /* timeline: a fixed-width head column + canvases that share one x scale */
+  .tl-row { display: flex; border-top: 1px solid var(--border); }
+  .tl-row:first-child { border-top: 0; }
+  .tl-head { width: var(--head-w); flex: none; padding: 6px 8px; border-right: 1px solid var(--border);
+             display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; }
+  .tl-body { flex: 1; min-width: 0; position: relative; }
+  .tl-body canvas { display: block; width: 100%; touch-action: none; }
+  #timeline { padding: 0; overflow: hidden; }
+  .lane-head-top { display: flex; gap: 4px; align-items: center; }
+  .lane-head-top select { flex: 1; min-width: 0; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .lane-head .mini { display: flex; gap: 4px; align-items: center; }
+  .lane-head .mini input[type=number] { width: 58px; }
+  .lane-head textarea { min-height: 30px; font-size: 0.74rem; }
+  .presets { display: flex; gap: 3px; flex-wrap: wrap; }
+  .lane-canvas { cursor: crosshair; }
+  .tip { position: absolute; pointer-events: none; font-family: var(--mono); font-size: 0.7rem;
+         background: #000c; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; display: none; }
+
+  /* takes */
+  #takes { display: flex; flex-direction: column; gap: 3px; max-height: 260px; overflow-y: auto; }
+  .take { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; padding: 3px 6px; border-radius: 4px;
+          font-size: 0.78rem; cursor: pointer; border: 1px solid transparent; }
+  .take .meta { order: 9; flex-basis: 100%; padding-left: 26px; }
+  .take:hover { background: #221818; }
+  .take.current { border-color: var(--accent); background: #2a1719; }
+  .take .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .take .meta { color: var(--muted); font-family: var(--mono); font-size: 0.72rem; }
+  .take a.tiny { color: var(--muted); text-decoration: none; padding: 0 4px; }
+  .take a.tiny:hover { color: var(--text); }
+  .help { font-size: 0.74rem; color: var(--muted); line-height: 1.6; }
+  .help kbd { font-family: var(--mono); background: var(--surface2); border: 1px solid var(--border);
+              border-radius: 3px; padding: 0 4px; font-size: 0.7rem; }
+  @media (max-width: 700px) {
+    :root { --head-w: 128px; }
+    .lane-head .presets, .lane-head textarea { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Automation lanes <small>sa3.cpp · experimental</small></h1>
+  <span id="status">connecting…</span>
+  <span id="model" class="muted"></span>
+  <a href="/#lanes">open in the studio</a>
+</header>
+
+<div class="card">
+  <div class="row">
+    <div class="col grow"><label for="prompt">Base prompt <button class="tiny" id="base-dice" title="random prompt">🎲</button></label>
+      <textarea id="prompt" rows="2"></textarea></div>
+    <div class="col grow"><label for="negative">Negative prompt (CFG only)</label>
+      <textarea id="negative" rows="2"></textarea></div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div class="col"><label for="duration">Duration (s) <span id="bars-info" class="muted"></span></label>
+      <div class="seedbox"><input id="duration" type="number" min="1" max="190" step="0.01" value="20">
+        <button class="icon" id="fit-bars" title="round the duration to whole bars at this BPM">⌗</button></div></div>
+    <div class="col"><label for="bpm" title="Added to the base prompt and every lane prompt; also draws the bar grid and Ctrl-snaps to beats">BPM</label)sa3web") +
+    std::string(R"sa3web(>
+      <input id="bpm" type="number" min="0" max="300" step="1" placeholder="none"></div>
+    <div class="col"><label for="key" title="Added to every prompt, e.g. C# minor">Key</label>
+      <input id="key" type="text" placeholder="none" style="width:96px"></div>
+    <div class="col"><label for="decoder" title="The decoder correction for the whole take. Shared with the studio's Models tab.">Decoder correction</label>
+      <select id="decoder"><option value="">none</option></select></div>
+    <div class="col"><label for="steps">Steps</label><input id="steps" type="number" min="1" max="100" step="1" value="8"></div>
+    <div class="col"><label for="cfg">CFG</label><input id="cfg" type="number" min="0" step="0.1" value="1"></div>
+    <div class="col"><label for="seed">Seed</label>
+      <div class="seedbox"><input id="seed" type="number" min="0" step="1">
+        <button class="icon" id="seed-dice" title="new random seed">🎲</button>
+        <label class="muted" style="display:flex;gap:3px;align-items:center;margin:0"><input id="seed-lock" type="checkbox"> lock</label></div></div>
+    <div class="col" style="margin-left:auto"><button class="primary" id="gen">Generate</button></div>
+  </div>
+  <details id="advanced" class="adv">
+    <summary>Advanced <span id="adv-state" class="muted"></span></summary>
+    <p class="muted adv-intro">How the lanes are blended. The defaults are a good place to start; these are
+      here to experiment with. Some background: the model writes the whole clip at once, starting
+      from pure noise and refining it over the steps (8 by default). The first few steps decide the
+      arrangement (groove, melody, where things happen); the last ones polish texture and detail.
+      "σ" is how noisy the clip still is: 1 = pure noise, 0 = finished.</p>
+    <div class="adv-grid">
+      <div class="adv-item">
+        <label for="mode">Mixing</label>
+        <select id="mode"><option value="velocity">velocity (per-pass)</option><option value="layer">layer (one pass, 1 lane)</option></select>
+        <p><b>Velocity</b> (default) runs every lane as its own complete pass, then blends them moment
+          by moment using your curves. It is precise: a lane drawn at 0 really is off there. Each
+          lane adds one pass, so more lanes take longer.<br>
+          <b>Layer</b> is the original single-pass method, kept for comparison. It is cheaper, but the
+          LoRA bleeds across the whole clip (a lane at 0 still measured 60-80% LoRA). One lane only, no
+          lane prompt.</p>
+      </div>
+      <div class="adv-item">
+        <label for="iso">Isolation strength (λ)</label>
+        <input id="iso" type="number" min="0" step="0.5" value="4">
+        <p>Every moment of the clip listens to every other moment, so sections tend to drift towards
+          one shared sound and a LoRA can get washed out. Isolation makes each moment listen mostly to
+          moments with a similar lane mix while the arrangement is being decided, so each phase keeps
+          its own identity. Higher = more separation, but also more of a "changing radio stations"
+          jump at transitions. 0 = off. Around 3 is already full strength; above that changes little.</p>
+      </div>
+      <div class="adv-item">
+        <label for="iso-until">Isolation until (σ)</label>
+        <input id="iso-until" type="number" min="0" max="1" step="0.05" value="0.9">
+        <p>When isolation lets go. After that, every moment listens to the whole clip again, which
+          smooths the joins. 0.9 = isolate the first 4 of 8 steps. Closer to 1 = shorter isolation
+          (in tests, fewer than the first 4 steps made no difference at all); lower = isolate longer,
+          leaving fewer steps to smooth the transitions.</p>
+      </div>
+      <div class="adv-item">
+        <label for="avg-until">Shared structure (σ)</label>
+        <input id="avg-until" type="number" min="0" max="1" step="0.05" value="0">
+        <p>The opposite trade to isolation. While σ i)sa3web") +
+    std::string(R"sa3web(s above this, every lane plays at its average
+          amount across the whole clip, so the take settles on one arrangement first; your curves
+          only take over afterwards, shaping sound and texture more than the song itself. In theory:
+          smoother, more "same song" transitions, possibly with less contrast between phases.
+          Isolation pauses while this is active. 0 = off; try 0.9 with isolation 0.</p>
+      </div>
+    </div>
+    <button class="tiny" id="adv-reset">reset to defaults</button>
+  </details>
+  <div class="err" id="error"></div>
+</div>
+
+<div class="transport">
+  <button id="play" class="icon" title="play / pause (space)">▶</button>
+  <button id="stop" class="icon" title="stop">■</button>
+  <span id="time">0.00 / 0.00</span>
+  <div class="progress"><div id="progress"></div></div>
+  <span id="progress-label"></span>
+</div>
+
+<div class="card" id="timeline">
+  <div class="tl-row">
+    <div class="tl-head"><b>Take</b><span class="muted" id="take-info">no take yet</span>
+      <button class="tiny" id="add-lane">+ lane</button>
+      <button class="tiny" id="view">show waveform</button>
+      <span class="muted" style="font-size:0.7rem">curves here: what this take was made with</span></div>
+    <div class="tl-body"><canvas id="wave" data-h="150"></canvas></div>
+  </div>
+  <div id="lanes"></div>
+</div>
+<audio id="audio" preload="auto"></audio>
+
+<div class="row" style="align-items:flex-start">
+  <div class="card grow" style="flex:2">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px">
+      <b style="font-size:0.85rem">Takes</b>
+      <span class="muted">click to load · ↺ restores that take's settings</span>
+    </div>
+    <div id="takes"><span class="muted">Generated takes appear here (kept until the page reloads).</span></div>
+  </div>
+  <div class="card grow help">
+    <b style="color:var(--text)">Editing a lane</b><br>
+    click empty space: add a point · drag a point: move it<br>
+    double-click / right-click a point: delete it<br>
+    <kbd>Shift</kbd>+drag: draw freehand · <kbd>Ctrl</kbd>: snap to beats (with a BPM) or 0.25 s<br>
+    <kbd>Space</kbd>: play/pause · <kbd>Ctrl</kbd>+<kbd>Enter</kbd>: generate · click the waveform to seek<br><br>
+    <b style="color:var(--text)">What the lanes do</b><br>
+    Each lane is its own DiT pass per step (its LoRA at the curve's peak, on its own prompt if set).
+    The base pass runs on the base prompt; at each frame the step is
+    base + Σ amount × (lane − base). Amount is a strength multiplier: 1 = the LoRA at its strength.
+    The blending options are under Advanced.
+  </div>
+</div>
+
+<script src="lanes.js"></script>
+</body>
+</html>
+)sa3web");
+
+inline const std::string lanes_js =
+    std::string(R"sa3web(// Automation lanes: draw per-LoRA envelopes over a take's waveform and generate with them.
+// Talks to sa3-server: /health, /loras, /prompts, /generate (lora_lanes), /poll_status.
+"use strict";
+
+const $ = (s) => document.querySelector(s);
+const COLORS = ["#e2a03b", "#4fb3d9", "#b07be0", "#6cc58b", "#e5677f", "#d6d65a", "#5f8ff0", "#e08a5c"];
+const MAX_LANES = 8;
+const LANE_H = 96;
+const STORE_KEY = "sa3-lanes-editor-v1";
+
+const state = {
+  prompt: "keygen music, crunchy square leads, tight chip drums",
+  negative: "",
+  duration: 20, steps: 8, cfg: 1, seed: 1234, seedLock: false, mode: "velocity", iso: 4, isoUntil: 0.9,
+  bpm: "", key: "", decoder: "auto", avgUntil: 0,
+  lanes: [],
+};
+let loras = [];          // DiT adapters from /loras
+let decoders = [];       // decoder adapters for this model's autoencoder
+let decoderKey = "";     // the studio's localStorage key for this model family's correction
+let takes = [];          // {id, url, peaks, dur, request, seed, secs, lanes}
+let current = null;      // the take on screen
+let nextLaneId = 1, nextTakeId = 1;
+let pollTimer = null;
+let view = "spec";        // take display: "spec" | "wave"
+
+// ─── persistence (per-viewer convenience only) ─────────────────────────────
+
+function save() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch { /* storage unavailable */ }
+}
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+    if (s && Array.isArray(s.lanes)) Object.assign(state, s);
+  } catch { /* ignore */ }
+  for (const l of state.lanes) nextLaneId = Math.max(nextLaneId, (l.id || 0) + 1);
+}
+
+// ─── envelope maths (mirrors the C++ sampler: sorted, linear, held flat past the ends) ──
+
+function amountAt(points, t) {
+  if (!points.length) return 0;
+  if (t <= points[0][0]) return points[0][1];
+  for (let k = 1; k < points.length; k++) {
+    if (t <= points[k][0]) {
+      const [t0, a0] = points[k - 1], [t1, a1] = points[k];
+      return t1 > t0 ? a0 + (t - t0) / (t1 - t0) * (a1 - a0) : a1;
+    }
+  }
+  return points[points.length - 1][1];
+}
+const sortPts = (l) => l.points.sort((a, b) => a[0] - b[0]);
+const round = (v, q) => Math.round(v / q) * q;
+
+// ─── api ────────────────────────────────────────────────────────────────────
+
+async function apiGet(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  return r.json();
+}
+async function apiPost(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.success === false) throw new Error(j.error || `${path}: HTTP ${r.status}`);
+  return j;
+}
+
+async function connect() {
+  const st = $("#status");
+  try {
+    const h = await apiGet("/health");
+    st.textContent = "✓ connected"; st.className = "ok";
+    $("#model").textContent = `${h.model} / ${h.encoding}`;
+    const r = await apiGet("/loras");
+    loras = (r.loras || []).filter((l) => (l.target || "dit") === "dit");
+    // decoder adapters that fit this model's autoencoder (medium -> SAME-L, small-* -> SAME-S)
+    const fam = h.model === "medium" ? "same-l" : String(h.model).startsWith("small-") ? "same-s" : "";
+    const famOf = (l) => { const s = `${l.base_model} ${l.name}`.toLowerCase();
+      return s.includes("same-l") || s.includes("squeakfix") ? "same-l" : s.includes("same-s") || s.includes("declora") ? "same-s" : ""; };
+    decoders = (r.loras || []).filter((l) => l.target === "decoder" && famOf(l) === fam);
+    // The correction is the studio's (Models tab) setting under the same key, so both views agree;
+    // never chosen anywhere -> squeakfix here, without writing that default back to the studio.
+    decoderKey = fam ? `sa3-decoder-${fam}` : "";
+    let shared = null;
+    try { shared = decoderKey ? localStorage.getItem(decoderKey) : null; } catch { /* storage unavailable */ }
+    if (shared !== null) state.decoder = share)sa3web") +
+    std::string(R"sa3web(d;
+    else if (state.decoder === "auto") state.decoder = (decoders.find((l) => /squeakfix/i.test(l.name)) || {}).name || "";
+    $("#decoder").innerHTML = `<option value="">none</option>` +
+      decoders.map((l) => `<option value="${esc(l.name)}">${esc(l.name)}</option>`).join("");
+    $("#decoder").value = decoders.some((l) => l.name === state.decoder) ? state.decoder : "";
+    if (!state.lanes.length && loras.length) { state.lanes.push(newLane()); save(); }
+    renderLanes();
+  } catch (e) {
+    st.textContent = "✗ server unreachable"; st.className = "err";
+  }
+}
+
+async function dicePrompt(loraName) {
+  const q = loraName ? `?lora=${encodeURIComponent(loraName)}` : "";
+  const r = await apiGet(`/prompts${q}`);
+  const dice = (r.prompts && r.prompts.dice) || {};
+  const pool = dice.instrumental && dice.instrumental.length ? dice.instrumental : [].concat(...Object.values(dice));
+  return pool.length ? pool[Math.floor(Math.random() * pool.length)] : "";
+}
+
+// ─── form <-> state ─────────────────────────────────────────────────────────
+
+function readForm() {
+  state.prompt = $("#prompt").value;
+  state.negative = $("#negative").value;
+  state.duration = Math.max(1, +$("#duration").value || 20);
+  state.steps = Math.max(1, Math.round(+$("#steps").value || 8));
+  state.cfg = +$("#cfg").value || 1;
+  state.seed = Math.max(0, Math.round(+$("#seed").value || 0));
+  state.seedLock = $("#seed-lock").checked;
+  state.mode = $("#mode").value;
+  state.iso = Math.max(0, +$("#iso").value || 0);
+  state.bpm = $("#bpm").value;
+  state.avgUntil = Math.min(1, Math.max(0, +$("#avg-until").value || 0));
+  state.key = $("#key").value;
+  if (state.decoder !== $("#decoder").value && decoderKey) {
+    try { localStorage.setItem(decoderKey, $("#decoder").value); } catch { /* storage unavailable */ }
+  }
+  state.decoder = $("#decoder").value;
+  state.isoUntil = Math.min(1, Math.max(0, +$("#iso-until").value || 0));
+}
+function writeForm() {
+  $("#prompt").value = state.prompt;
+  $("#negative").value = state.negative;
+  $("#duration").value = state.duration;
+  $("#steps").value = state.steps;
+  $("#cfg").value = state.cfg;
+  $("#seed").value = state.seed;
+  $("#seed-lock").checked = state.seedLock;
+  $("#mode").value = state.mode;
+  $("#iso").value = state.iso ?? 4;
+  $("#bpm").value = state.bpm ?? "";
+  $("#avg-until").value = state.avgUntil ?? 0;
+  advState();
+  $("#key").value = state.key ?? "";
+  if (state.decoder !== "auto") $("#decoder").value = state.decoder;
+  barsInfo();
+  $("#iso-until").value = state.isoUntil ?? 0.9;
+}
+const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
+const ADV_DEFAULTS = { mode: "velocity", iso: 4, isoUntil: 0.9, avgUntil: 0 };
+function advState() {   // "custom" on the collapsed Advanced header when anything differs from the defaults
+  const custom = Object.entries(ADV_DEFAULTS).some(([k, v]) => state[k] !== v);
+  $("#adv-state").textContent = custom ? "· custom settings" : "· defaults";
+  if (custom) $("#advanced").open = true;
+}
+
+// ─── tempo / key ────────────────────────────────────────────────────────────
+
+const bpmOf = () => { const b = +state.bpm; return b > 0 ? b : 0; };
+const beatSec = () => (bpmOf() ? 60 / bpmOf() : 0);
+const barSec = () => 4 * beatSec();
+function barsInfo() {
+  const bar = barSec();
+  $("#bars-info").textContent = bar ? `≈ ${(state.duration / bar).toFixed(2)} bars` : "";
+}
+// Every prompt gets the same tempo and key, so all lanes agree on the grid; a BPM already typed
+// into a prompt is replaced rather than doubled.
+function withMusic(p) {
+  let s = String(p || "").replace(/\b(?:\d+(?:\.\d+)?\s*bpm|bpm\s*[:=]?\s*\d+(?:\.\d+)?)\b/gi, "")
+    .replace(/\s*,\s*(,\s*)+/g, ", ").replace(/^[\s,]+|[\s,]+$/g, "");
+  const key = String(state.key || "").trim();
+  if (key && !s.toLowerCase().includes(key.toLowerCase())) s += (s ? ", " : "") + key;
+  if (bpmOf()) s += (s ? ", " : "") + `${bpmOf()} BPM`;
+  return s;
+}
+
+// ─── lanes ────────────────────────────────────────────────────────────────)sa3web") +
+    std::string(R"sa3web(──
+
+function newLane() {
+  const used = new Set(state.lanes.map((l) => l.color));
+  const color = COLORS.find((c) => !used.has(c)) || COLORS[state.lanes.length % COLORS.length];
+  const taken = new Set(state.lanes.map((l) => l.lora));
+  const lora = (loras.find((l) => !taken.has(l.name)) || loras[0] || {}).name || "";
+  const d = state.duration;
+  return { id: nextLaneId++, color, lora, strength: 1, prompt: "", max: 1.5,
+           points: [[0, 0], [d, 1]] };
+}
+
+const PRESETS = {
+  "0": (d) => [[0, 0]],
+  "1": (d) => [[0, 1]],
+  "↗": (d) => [[0, 0], [d, 1]],
+  "↘": (d) => [[0, 1], [d, 0]],
+  "⊓": (d) => [[0, 0], [d * 0.25, 0], [d * 0.35, 1], [d * 0.65, 1], [d * 0.75, 0]],
+  "½": (d) => [[0, 0], [d / 2 - 0.01, 0], [d / 2, 1]],
+};
+
+function renderLanes() {
+  const host = $("#lanes");
+  host.innerHTML = "";
+  state.lanes.forEach((lane, idx) => {
+    const row = document.createElement("div");
+    row.className = "tl-row";
+    const opts = loras.map((l) => `<option value="${esc(l.name)}" ${l.name === lane.lora ? "selected" : ""}>${esc(l.name)}</option>`).join("");
+    const missing = lane.lora && !loras.some((l) => l.name === lane.lora) ? `<option selected>${esc(lane.lora)} (missing)</option>` : "";
+    row.innerHTML = `
+      <div class="tl-head lane-head">
+        <div class="lane-head-top">
+          <span class="swatch" style="background:${lane.color}"></span>
+          <select data-k="lora" title="LoRA">${missing}${opts || "<option value=''>no LoRAs</option>"}</select>
+          <button class="tiny" data-act="remove" title="remove lane">✕</button>
+        </div>
+        <div class="mini">
+          <label style="margin:0">str</label><input type="number" data-k="strength" step="0.05" min="0" value="${lane.strength}">
+          <label style="margin:0">max</label><input type="number" data-k="max" step="0.25" min="0.25" value="${lane.max}">
+        </div>
+        <textarea data-k="prompt" rows="1" placeholder="lane prompt (empty = base prompt)">${esc(lane.prompt)}</textarea>
+        <div class="presets">
+          <button class="tiny" data-act="dice" title="in-distribution prompt for this LoRA">🎲</button>
+          ${Object.keys(PRESETS).map((p) => `<button class="tiny" data-preset="${p}" title="preset">${p}</button>`).join("")}
+        </div>
+      </div>
+      <div class="tl-body"><canvas class="lane-canvas" data-h="${LANE_H}"></canvas><div class="tip"></div></div>`;
+    host.appendChild(row);
+
+    row.querySelectorAll("[data-k]").forEach((el) => {
+      el.addEventListener("input", () => {
+        const k = el.dataset.k;
+        lane[k] = el.type === "number" ? Math.max(0, +el.value || 0) : el.value;
+        if (k === "max") { lane.max = Math.max(0.25, lane.max); for (const p of lane.points) p[1] = Math.min(p[1], lane.max); }
+        drawAll(); save();
+      });
+    });
+    row.querySelector("[data-act=remove]").onclick = () => { state.lanes.splice(idx, 1); renderLanes(); save(); };
+    row.querySelector("[data-act=dice]").onclick = async () => {
+      try { lane.prompt = await dicePrompt(lane.lora); row.querySelector("textarea").value = lane.prompt; save(); }
+      catch (e) { showError(e.message); }
+    };
+    row.querySelectorAll("[data-preset]").forEach((b) => {
+      b.onclick = () => {
+        const q = barSec() || 0.01;
+        lane.points = PRESETS[b.dataset.preset](state.duration).map((p) => [Math.min(state.duration, round(p[0], q)), p[1]]);
+        drawAll(); save();
+      };
+    });
+    attachLaneEditor(row.querySelector("canvas"), row.querySelector(".tip"), lane);
+  });
+  $("#add-lane").disabled = state.lanes.length >= MAX_LANES;
+  resize();
+}
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// ─── geometry shared by every canvas ───────────────────────────────────────
+
+const PAD = 6;                         // px inside each canvas, left/right
+function xOf(cv, t) { return PAD + (t / state.duration) * (cv.clientWidth - 2 * PAD); }
+function)sa3web") +
+    std::string(R"sa3web( tOf(cv, x) { return Math.min(state.duration, Math.max(0, (x - PAD) / (cv.clientWidth - 2 * PAD) * state.duration)); }
+const TOP = 8, BOT = 8;
+function yOf(cv, a, max) { return TOP + (1 - a / max) * (cv.clientHeight - TOP - BOT); }
+function aOf(cv, y, max) { return Math.min(max, Math.max(0, (1 - (y - TOP) / (cv.clientHeight - TOP - BOT)) * max)); }
+
+function prep(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  return g;
+}
+function resize() {
+  for (const cv of document.querySelectorAll("#timeline canvas")) cv.style.height = cv.dataset.h + "px";
+  drawAll();
+}
+
+// ─── drawing ────────────────────────────────────────────────────────────────
+
+function drawWave(g, cv, peaks, dur, alpha) {
+  if (!peaks) return;
+  const h = cv.clientHeight, mid = h / 2;
+  g.fillStyle = `rgba(226,59,66,${alpha})`;
+  const x0 = xOf(cv, 0), x1 = xOf(cv, Math.min(dur, state.duration));
+  const n = peaks.length / 2;
+  for (let x = Math.floor(x0); x < x1; x++) {
+    const t = tOf(cv, x + 0.5);
+    const i = Math.min(n - 1, Math.floor(t / dur * n));
+    const lo = peaks[2 * i], hi = peaks[2 * i + 1];
+    g.fillRect(x, mid - hi * mid * 0.95, 1, Math.max(1, (hi - lo) * mid * 0.95));
+  }
+}
+
+function drawGrid(g, cv, withLabels) {
+  const h = cv.clientHeight, d = state.duration;
+  if (bpmOf()) {
+    const beat = beatSec(), pxBeat = xOf(cv, beat) - xOf(cv, 0);
+    g.font = "10px monospace"; g.lineWidth = 1;
+    for (let b = 0, t = 0; t <= d + 1e-6; b++, t = b * beat) {
+      const bar = b % 4 === 0;
+      if (!bar && pxBeat < 7) continue;
+      const x = Math.round(xOf(cv, t)) + 0.5;
+      g.strokeStyle = bar ? "#ffffff22" : "#ffffff0b";
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+      if (withLabels && bar && x + 26 < cv.clientWidth) { g.fillStyle = "#b6a5a5"; g.fillText(`${b / 4 + 1}`, x + 2, 10); }
+    }
+    return;
+  }
+  const step = d > 120 ? 10 : d > 40 ? 5 : d > 15 ? 2 : 1;
+  g.strokeStyle = "#ffffff12"; g.fillStyle = "#b6a5a5"; g.font = "10px monospace"; g.lineWidth = 1;
+  for (let t = 0; t <= d + 1e-6; t += step) {
+    const x = Math.round(xOf(cv, t)) + 0.5;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+    if (withLabels && x + 26 < cv.clientWidth) g.fillText(`${t}s`, x + 2, 10);
+  }
+}
+
+function drawPlayhead(g, cv) {
+  const a = $("#audio");
+  if (!current || !a.src) return;
+  const x = Math.round(xOf(cv, a.currentTime)) + 0.5;
+  g.beginPath(); g.moveTo(x, 0); g.lineTo(x, cv.clientHeight);
+  g.strokeStyle = "#000000a0"; g.lineWidth = 3; g.stroke();
+  g.strokeStyle = "#ffffff"; g.lineWidth = 1; g.stroke();
+}
+
+function envPath(g, cv, lane, max) {
+  const w = cv.clientWidth;
+  g.beginPath();
+  for (let x = 0; x <= w; x += 2) {
+    const y = yOf(cv, amountAt(lane.points, tOf(cv, x)), max);
+    x ? g.lineTo(x, y) : g.moveTo(x, y);
+  }
+}
+
+// Log-frequency spectrogram of a mono mix: SPEC_COLS frames x SPEC_ROWS bands, dB mapped onto a
+// dark-red-yellow ramp, rendered once per take into an offscreen canvas and stretched on draw.
+const SPEC_COLS = 1200, SPEC_ROWS = 160, NFFT = 2048;
+function fftMag(re, im) {          // in-place radix-2, returns nothing; re/im length NFFT
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = i + k, b = a + len / 2;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[)sa3web") +
+    std::string(R"sa3web(b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
+      }
+    }
+  }
+}
+function spectrogram(mono, sr) {
+  const win = new Float32Array(NFFT).map((_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (NFFT - 1)));
+  const fmin = 30, fmax = Math.min(20000, sr / 2);
+  // each row averages the FFT bins between two log-spaced edges (at least one bin)
+  const edges = Array.from({ length: SPEC_ROWS + 1 }, (_, r) => fmin * Math.pow(fmax / fmin, r / SPEC_ROWS) * NFFT / sr);
+  const db = new Float32Array(SPEC_COLS * SPEC_ROWS);
+  const re = new Float32Array(NFFT), im = new Float32Array(NFFT);
+  const hop = Math.max(1, (mono.length - NFFT) / (SPEC_COLS - 1));
+  for (let c = 0; c < SPEC_COLS; c++) {
+    const o = Math.floor(c * hop);
+    for (let i = 0; i < NFFT; i++) { re[i] = (mono[o + i] || 0) * win[i]; im[i] = 0; }
+    fftMag(re, im);
+    for (let r = 0; r < SPEC_ROWS; r++) {
+      const b0 = Math.floor(edges[r]), b1 = Math.max(b0 + 1, Math.floor(edges[r + 1]));
+      let acc = 0;
+      for (let b = b0; b < b1; b++) acc += re[b] * re[b] + im[b] * im[b];
+      db[c * SPEC_ROWS + r] = 10 * Math.log10(acc / (b1 - b0) + 1e-10);
+    }
+  }
+  let top = -Infinity;
+  for (const v of db) if (v > top) top = v;
+  const img = new ImageData(SPEC_COLS, SPEC_ROWS);
+  for (let c = 0; c < SPEC_COLS; c++) for (let r = 0; r < SPEC_ROWS; r++) {
+    const v = Math.pow(Math.min(1, Math.max(0, (db[c * SPEC_ROWS + r] - (top - 75)) / 75)), 1.7);   // 75 dB, darkened
+    const o = ((SPEC_ROWS - 1 - r) * SPEC_COLS + c) * 4;
+    img.data[o] = Math.min(255, v * 2.2 * 255);
+    img.data[o + 1] = Math.max(0, Math.min(255, (v - 0.45) * 2.2 * 255));
+    img.data[o + 2] = Math.max(0, Math.min(255, (v - 0.8) * 4 * 255));
+    img.data[o + 3] = 255;
+  }
+  const off = document.createElement("canvas");
+  off.width = SPEC_COLS; off.height = SPEC_ROWS;
+  off.getContext("2d").putImageData(img, 0, 0);
+  return off;
+}
+
+function drawWaveCanvas() {
+  const cv = $("#wave"), g = prep(cv);
+  if (current && view === "spec" && current.spec) {
+    const x0 = xOf(cv, 0), x1 = xOf(cv, Math.min(current.dur, state.duration));
+    g.imageSmoothingEnabled = true;
+    g.drawImage(current.spec, 0, 0, Math.round(SPEC_COLS * Math.min(1, state.duration / current.dur)), SPEC_ROWS,
+                x0, 0, x1 - x0, cv.clientHeight);
+  }
+  drawGrid(g, cv, true);
+  if (current && view === "wave") drawWave(g, cv, current.peaks, current.dur, 0.85);
+  if (!current) { g.fillStyle = "#b6a5a5"; g.font = "12px sans-serif"; g.fillText("Generate a take to see it here", 14, cv.clientHeight / 2); }
+  // every lane's curve over the take, on a shared 0..max scale
+  const lanes = current ? current.lanes : state.lanes;
+  const max = Math.max(1, ...lanes.map((l) => l.max || 1));
+  for (const l of lanes) {
+    if (!l.points.length) continue;
+    envPath(g, cv, l, max);
+    g.strokeStyle = "#000000b0"; g.lineWidth = 4; g.stroke();     // outline so curves read over the spectrogram
+    g.strokeStyle = l.color; g.lineWidth = 2; g.stroke();
+  }
+  drawPlayhead(g, cv);
+}
+
+function drawLane(cv, lane, hover) {
+  const g = prep(cv), w = cv.clientWidth, h = cv.clientHeight;
+  drawGrid(g, cv, false);
+  if (current) drawWave(g, cv, current.peaks, current.dur, 0.22);
+  // amount grid
+  g.font = "10px monospace";
+  for (const a of [0, 0.5, 1, 1.5, 2].filter((v) => v <= lane.max)) {
+    const y = Math.round(yOf(cv, a, lane.max)) + 0.5;
+    g.strokeStyle = a === 1 ? "#ffffff30" : "#ffffff14";
+    g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+    g.fillStyle = "#b6a5a580"; g.fillText(a.toFixed(1), w - 24, y - 2);
+  }
+  if (!lane.points.length) { drawPlayhead(g, cv); return; }
+  envPath(g, cv, lane, lane.max);
+  g.lineTo(w, h); g.lineTo(0, h); g.closePath();
+  g.fillStyle = lane.color + "26"; g.fill();
+  envPath(g, cv, lane, lane.max);
+  g.strokeStyle = lane.color; g.lineWidth = 2; g.stroke();
+  lane.points.forEach((p, i) => {
+ )sa3web") +
+    std::string(R"sa3web(   g.beginPath(); g.arc(xOf(cv, p[0]), yOf(cv, p[1], lane.max), i === hover ? 6 : 4, 0, Math.PI * 2);
+    g.fillStyle = i === hover ? "#fff" : lane.color; g.fill();
+  });
+  drawPlayhead(g, cv);
+}
+
+const laneCanvases = new Map();   // canvas -> {lane, hover}
+function drawAll() {
+  drawWaveCanvas();
+  for (const [cv, s] of laneCanvases) if (cv.isConnected) drawLane(cv, s.lane, s.hover); else laneCanvases.delete(cv);
+  const a = $("#audio");
+  $("#time").textContent = `${(a.currentTime || 0).toFixed(2)} / ${(current ? current.dur : 0).toFixed(2)}`;
+}
+
+// ─── lane editing ───────────────────────────────────────────────────────────
+
+function attachLaneEditor(cv, tip, lane) {
+  const s = { lane, hover: -1 };
+  laneCanvases.set(cv, s);
+  let drag = null;   // {kind: "point", i} | {kind: "draw", t0, t1, samples}
+  const pos = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  const hit = (x, y) => lane.points.findIndex((p) => Math.hypot(xOf(cv, p[0]) - x, yOf(cv, p[1], lane.max) - y) < 8);
+  const snap = (t, a, e) => e.ctrlKey || e.metaKey ? [round(t, beatSec() || 0.25), round(a, 0.05)] : [round(t, 0.01), round(a, 0.005)];
+  const showTip = (x, y, t, a) => {
+    tip.style.display = "block"; tip.textContent = `${t.toFixed(2)}s · ${a.toFixed(2)}`;
+    tip.style.left = Math.min(x + 10, cv.clientWidth - 90) + "px"; tip.style.top = Math.max(0, y - 22) + "px";
+  };
+
+  cv.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    const [x, y] = pos(e);
+    cv.setPointerCapture(e.pointerId);
+    const i = hit(x, y);
+    if (i >= 0) { drag = { kind: "point", i }; return; }
+    const [t, a] = snap(tOf(cv, x), aOf(cv, y, lane.max), e);
+    if (e.shiftKey) { drag = { kind: "draw", samples: [[t, a]] }; return; }
+    lane.points.push([t, a]); sortPts(lane);
+    drag = { kind: "point", i: lane.points.findIndex((p) => p[0] === t && p[1] === a) };
+    s.hover = drag.i; drawAll();
+  });
+
+  cv.addEventListener("pointermove", (e) => {
+    const [x, y] = pos(e);
+    let [t, a] = snap(tOf(cv, x), aOf(cv, y, lane.max), e);
+    if (drag && drag.kind === "point") {
+      const P = lane.points, i = drag.i;
+      const lo = i > 0 ? P[i - 1][0] : 0, hi = i < P.length - 1 ? P[i + 1][0] : state.duration;
+      t = Math.min(hi, Math.max(lo, t));
+      P[i] = [t, a]; s.hover = i;
+      showTip(x, y, t, a); drawAll();
+    } else if (drag && drag.kind === "draw") {
+      drag.samples.push([t, a]);
+      const ts = drag.samples.map((p) => p[0]);
+      const t0 = Math.min(...ts), t1 = Math.max(...ts);
+      // the stroke replaces whatever was under it, resampled at ~0.1 s
+      const byT = [...drag.samples].sort((p, q) => p[0] - q[0]);
+      const kept = lane.points.filter((p) => p[0] < t0 - 1e-6 || p[0] > t1 + 1e-6);
+      const stroke = [];
+      for (const p of byT) if (!stroke.length || p[0] - stroke[stroke.length - 1][0] >= 0.1) stroke.push([...p]);
+      if (stroke.length && byT.length) stroke[stroke.length - 1] = [...byT[byT.length - 1]];
+      lane.points = kept.concat(stroke); sortPts(lane);
+      showTip(x, y, t, a); drawAll();
+    } else {
+      const i = hit(x, y);
+      if (i !== s.hover) { s.hover = i; drawAll(); }
+      cv.style.cursor = i >= 0 ? "grab" : "crosshair";
+      showTip(x, y, i >= 0 ? lane.points[i][0] : t, i >= 0 ? lane.points[i][1] : amountAt(lane.points, t));
+    }
+  });
+
+  const end = () => { if (drag) { drag = null; save(); } };
+  cv.addEventListener("pointerup", end);
+  cv.addEventListener("pointercancel", end);
+  cv.addEventListener("pointerleave", () => { tip.style.display = "none"; if (!drag && s.hover >= 0) { s.hover = -1; drawAll(); } });
+  const del = (e) => {
+    const [x, y] = pos(e); const i = hit(x, y);
+    if (i >= 0) { e.preventDefault(); lane.points.splice(i, 1); s.hover = -1; drawAll(); save(); }
+  };
+  cv.addEventListener("dblclick", del);
+  cv.addEventListener("contextmenu", del);
+}
+
+// ─── generation ───────────────────────────────────────────────────────)sa3web") +
+    std::string(R"sa3web(──────
+
+function showError(msg) { $("#error").textContent = msg || ""; }
+
+function buildRequest() {
+  const lanes = state.lanes.filter((l) => l.lora && l.points.length);
+  const body = {
+    prompt: withMusic(state.prompt),
+    loras: state.decoder && state.decoder !== "auto" ? [{ name: state.decoder, strength: 1 }] : [],
+    duration: state.duration,
+    steps: state.steps,
+    seed: state.seed,
+    cfg_scale: state.cfg,
+    keep_models: false,   // frugal: on 8 GB, DiT + lane adapters + decoder together oversubscribe VRAM
+    lora_envelope_mode: state.mode,
+    lane_isolation: state.mode === "velocity" ? state.iso : 0,
+    lane_isolation_until: state.isoUntil,
+    lane_average_until: state.mode === "velocity" ? state.avgUntil : 0,
+    lora_lanes: lanes.map((l) => ({
+      loras: [{ name: l.lora, strength: l.strength }],
+      envelope: l.points.map((p) => [+p[0].toFixed(3), +p[1].toFixed(3)]),
+      ...(l.prompt.trim() ? { prompt: withMusic(l.prompt.trim()) } : {}),
+    })),
+  };
+  if (state.negative.trim()) body.negative_prompt = state.negative.trim();
+  return body;
+}
+
+async function generate() {
+  readForm();
+  if (!state.seedLock) { state.seed = randomSeed(); writeForm(); }
+  save();
+  showError("");
+  const body = buildRequest();
+  const snapshot = JSON.parse(JSON.stringify(state));
+  const btn = $("#gen");
+  btn.disabled = true; btn.textContent = "Generating…";
+  const t0 = performance.now();
+  try {
+    const r = await apiPost("/generate", body);
+    poll(r.session_id, body, snapshot, t0);
+  } catch (e) {
+    showError(e.message); btn.disabled = false; btn.textContent = "Generate";
+  }
+}
+
+function poll(id, body, snapshot, t0) {
+  clearInterval(pollTimer);
+  const bar = $("#progress"), lbl = $("#progress-label"), btn = $("#gen");
+  const done = () => { clearInterval(pollTimer); btn.disabled = false; btn.textContent = "Generate"; };
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await apiGet(`/poll_status/${id}`);
+      bar.style.width = `${r.progress || 0}%`;
+      lbl.textContent = r.status === "completed" ? "done" : `${r.status} ${r.step ?? ""}/${r.total_steps ?? ""}`;
+      if (r.status === "completed" && r.audio_data) {
+        done();
+        await addTake(r.audio_data, body, snapshot, (r.meta && r.meta.seed) ?? body.seed, (performance.now() - t0) / 1000);
+      } else if (r.status === "failed" || r.status === "cancelled" || r.success === false) {
+        done(); showError(r.error || r.status);
+      }
+    } catch (e) { done(); showError(e.message); }
+  }, 400);
+}
+
+let audioCtx = null;
+async function addTake(b64, request, snapshot, seed, secs) {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  const buf = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
+  // min/max peaks at 2000 columns over the whole take
+  const n = 2000, ch = buf.getChannelData(0), ch2 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
+  const peaks = new Float32Array(2 * n), per = Math.max(1, Math.floor(ch.length / n));
+  for (let i = 0; i < n; i++) {
+    let lo = 0, hi = 0;
+    for (let j = i * per, e = Math.min(ch.length, j + per); j < e; j++) {
+      const v = ch2 ? 0.5 * (ch[j] + ch2[j]) : ch[j];
+      if (v < lo) lo = v; if (v > hi) hi = v;
+    }
+    peaks[2 * i] = lo; peaks[2 * i + 1] = hi;
+  }
+  const mono = ch2 ? ch.map((v, i) => 0.5 * (v + ch2[i])) : ch;
+  const spec = spectrogram(mono, buf.sampleRate);
+  const take = { id: nextTakeId++, url, peaks, spec, dur: buf.duration, request, seed, secs, lanes: snapshot.lanes, snapshot };
+  takes.unshift(take);
+  setCurrent(take, true);
+}
+
+function setCurrent(take, autoplay) {
+  const a = $("#audio");
+  const keepAt = current && a.src && !a.paused ? a.currentTime : null;
+  current = take;
+  a.src = take.url;
+  if (keepAt != null) a.addEventListener("loadedmetadata", () => { a.current)sa3web") +
+    std::string(R"sa3web(Time = Math.min(keepAt, take.dur); }, { once: true });
+  if (autoplay || keepAt != null) a.play().catch(() => {});
+  const names = take.lanes.filter((l) => l.lora).map((l) => l.lora).join(" + ") || "base only";
+  $("#take-info").textContent = `#${take.id} · seed ${take.seed} · ${names}`;
+  renderTakes(); drawAll();
+}
+
+function takeFileName(t) {
+  const lanes = t.lanes.filter((l) => l.lora).map((l) => l.lora).join("+") || "base";
+  const parts = [`take${String(t.id).padStart(2, "0")}`, lanes];
+  if (t.snapshot.bpm) parts.push(`${t.snapshot.bpm}bpm`);
+  parts.push(t.request.lane_isolation ? `iso${t.request.lane_isolation}` : "noiso");
+  if (t.request.lane_average_until) parts.push(`shared${t.request.lane_average_until}`);
+  parts.push(`seed${t.seed}`);
+  return parts.join("_").replace(/[^\w+.-]+/g, "-") + ".wav";
+}
+
+function renderTakes() {
+  const host = $("#takes");
+  if (!takes.length) return;
+  host.innerHTML = "";
+  for (const t of takes) {
+    const div = document.createElement("div");
+    div.className = "take" + (t === current ? " current" : "");
+    const lanes = t.lanes.filter((l) => l.lora);
+    const dots = lanes.map((l) => `<span class="swatch" style="background:${l.color};display:inline-block"></span>`).join(" ");
+    div.innerHTML = `<b>#${t.id}</b> ${dots}
+      <span class="lbl" title="${esc(t.request.prompt)}">${esc(lanes.map((l) => l.lora + (l.prompt ? "*" : "")).join(" + ") || "base")} — ${esc(t.request.prompt)}</span>
+      <span class="meta">${t.snapshot.bpm ? `${t.snapshot.bpm}bpm · ` : ""}${t.request.lane_isolation ? `iso ${t.request.lane_isolation}@${t.request.lane_isolation_until}` : "no iso"}${t.request.lane_average_until ? ` · shared@${t.request.lane_average_until}` : ""}${t.request.loras.length ? ` · ${esc(t.request.loras[0].name)}` : ""} · seed ${t.seed} · ${t.secs.toFixed(1)}s</span>
+      <a class="tiny" href="${t.url}" download="${esc(takeFileName(t))}" title="download ${esc(takeFileName(t))}" onclick="event.stopPropagation()">⬇</a>
+      <button class="tiny" title="restore this take's settings into the editor">↺</button>`;
+    div.onclick = () => setCurrent(t, true);
+    div.querySelector("button").onclick = (e) => {
+      e.stopPropagation();
+      Object.assign(state, JSON.parse(JSON.stringify(t.snapshot)));
+      state.seed = t.seed; state.seedLock = true;
+      writeForm(); renderLanes(); save();
+    };
+    host.appendChild(div);
+  }
+}
+
+// ─── transport ──────────────────────────────────────────────────────────────
+
+function togglePlay() {
+  const a = $("#audio");
+  if (!a.src) return;
+  a.paused ? a.play().catch(() => {}) : a.pause();
+}
+function tick() {
+  const a = $("#audio");
+  $("#play").textContent = a.paused ? "▶" : "❚❚";
+  if (!a.paused) drawAll();
+  requestAnimationFrame(tick);
+}
+
+// ─── wiring ─────────────────────────────────────────────────────────────────
+
+function init() {
+  load();
+  if (!state.seed) state.seed = randomSeed();
+  writeForm();
+  for (const id of ["#prompt", "#negative", "#duration", "#steps", "#cfg", "#seed", "#seed-lock", "#mode", "#iso", "#iso-until",
+                    "#bpm", "#key", "#decoder", "#avg-until"]) {
+    $(id).addEventListener("input", () => { readForm(); barsInfo(); advState(); drawAll(); save(); });
+  }
+  $("#gen").onclick = generate;
+  $("#seed-dice").onclick = () => { state.seed = randomSeed(); writeForm(); save(); };
+  $("#adv-reset").onclick = () => { Object.assign(state, ADV_DEFAULTS); writeForm(); save(); };
+  $("#fit-bars").onclick = () => {
+    const bar = barSec(); if (!bar) return;
+    state.duration = +(Math.max(1, Math.round(state.duration / bar)) * bar).toFixed(3);
+    writeForm(); drawAll(); save();
+  };
+  $("#base-dice").onclick = async () => {
+    try { state.prompt = await dicePrompt(""); writeForm(); save(); } catch (e) { showError(e.message); }
+  };
+  $("#add-lane").onclick = () => { if (state.lanes.length < MAX_LANES) { state.lanes.push(newLane()); renderLanes(); save(); } };
+  $("#play").onclick = togglePlay;
+  $("#view").)sa3web") +
+    std::string(R"sa3web(onclick = () => { view = view === "spec" ? "wave" : "spec"; $("#view").textContent = view === "spec" ? "show waveform" : "show spectrogram"; drawAll(); };
+  $("#stop").onclick = () => { const a = $("#audio"); a.pause(); a.currentTime = 0; drawAll(); };
+  $("#wave").addEventListener("pointerdown", (e) => {
+    if (!current) return;
+    const cv = $("#wave"), r = cv.getBoundingClientRect();
+    $("#audio").currentTime = Math.min(current.dur, tOf(cv, e.clientX - r.left));
+    drawAll();
+  });
+  $("#audio").addEventListener("ended", drawAll);
+  document.addEventListener("keydown", (e) => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); generate(); }
+    else if (e.code === "Space" && !typing) { e.preventDefault(); togglePlay(); }
+  });
+  window.addEventListener("resize", resize);
+  renderLanes();
+  connect();
+  requestAnimationFrame(tick);
+}
+init();
 )sa3web");
 
 } // namespace embedded_web

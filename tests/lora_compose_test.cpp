@@ -276,6 +276,46 @@ int main() {
         expect(!sa3::functional_lora_ok(two), "one column-family member rejects the whole chain");
     }
 
+    // A malformed adapter (a targeted stem missing a tensor the build reads) fails during planning,
+    // before any constant is allocated; the throw used to leave those allocations unowned.
+    {
+        auto build_without = [&](const AdapterSpec& as, const std::string& drop) -> std::string {
+            std::vector<TensorSpec> specs = make_adapter_specs(as, 99u);
+            specs.erase(std::remove_if(specs.begin(), specs.end(),
+                                       [&](const TensorSpec& s) { return s.name == drop; }), specs.end());
+            sa3::GgufModel base; build_model(base, base_specs);
+            std::vector<sa3::LoraAdapter> ads(1);
+            build_model(ads[0].gguf, specs);
+            ads[0].type = as.type; ads[0].rank = as.rank; ads[0].alpha = as.alpha; ads[0].strength = as.strength;
+            try {
+                sa3::FunctionalLora fl = sa3::build_functional_lora(base, ads, "");
+                fl.free();
+                return "";
+            } catch (const std::exception& e) { return e.what(); }
+        };
+        for (auto [as, drop] : std::vector<std::pair<AdapterSpec, std::string>>{
+                 {dora, "dit.0.ff.up.lora_B"}, {dora, "dit.1.self.out.magnitude"}, {doraXs, "dit.0.self.qkv.U"}}) {
+            const std::string err = build_without(as, drop);
+            expect(err.find("missing tensor: " + drop) != std::string::npos,
+                   as.type + " without " + drop + " throws a missing-tensor error (got '" + err + "')");
+        }
+        expect(build_without(dora, "").empty(), "a complete adapter still builds after the failures");
+    }
+
+    // A supported chain whose strengths are all zero builds no terms: an inactive map that the
+    // pipeline runs as the base weights, not a family the functional path cannot take.
+    {
+        AdapterSpec zero = dora; zero.strength = 0.0f;
+        sa3::GgufModel base; build_model(base, base_specs);
+        std::vector<sa3::LoraAdapter> ads(1);
+        build_model(ads[0].gguf, make_adapter_specs(zero, 5u));
+        ads[0].type = zero.type; ads[0].rank = zero.rank; ads[0].alpha = zero.alpha; ads[0].strength = 0.0f;
+        expect(sa3::functional_lora_ok(ads), "a zero-strength dora-rows adapter is a supported family");
+        sa3::FunctionalLora fl = sa3::build_functional_lora(base, ads, "");
+        expect(!fl.active && fl.map.empty(), "a zero-strength chain builds an empty, inactive map");
+        fl.free();
+    }
+
     if (fails) return 1;
     std::printf("lora_compose_test: ok\n");
     return 0;

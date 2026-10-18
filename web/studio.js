@@ -6,6 +6,7 @@ const studio = {
   view: "studio", operation: "create", buffer: null, audioUrl: "", title: "",
   selection: [0, 1], cropMode: false, pointer: null, busy: false, peaks: null, frame: 0,
   activeModel: "",
+  preferences: null, lorasRestored: false,
 };
 const studioEl = (id) => document.getElementById(id);
 const studioIcons = {
@@ -22,7 +23,7 @@ function studioShell() {
   root.innerHTML = `<div class="studio-shell">
     <header class="studio-header">
       <h1><a href="https://github.com/betweentwomidnights/sa3.cpp" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">SA3.CPP</a> <small>studio</small></h1>
-      <nav aria-label="Studio views"><button type="button" data-studio-view="studio" aria-current="page">Studio</button><button type="button" data-studio-view="train">LoRA training</button><button type="button" data-studio-view="models">Models</button><button type="button" data-studio-view="settings">Settings</button></nav>
+      <nav aria-label="Studio views"><button type="button" data-studio-view="studio" aria-current="page">Studio</button><button type="button" data-studio-view="lanes" title="Experimental LoRA automation">Automation <span class="studio-beta">beta</span></button><button type="button" data-studio-view="train">LoRA training</button><button type="button" data-studio-view="models">Models</button><button type="button" data-studio-view="settings">Settings</button></nav>
       <div class="status" id="studio-header-status"></div>
     </header>
     <main id="studio-view-studio" class="studio-view">
@@ -30,10 +31,10 @@ function studioShell() {
       <section class="studio-panel" aria-label="Current take"><div class="studio-panel-title"><h2>Current take</h2><span id="studio-take-info">No audio yet</span></div><div class="studio-wave-wrap" id="studio-wave-wrap"><canvas id="studio-waveform" aria-label="Audio waveform; click to seek"></canvas><div id="studio-wave-empty">Create audio or drop a WAV here.</div><div class="studio-wave-actions"><button id="studio-upload-wave" type="button" aria-label="Upload WAV" title="Upload WAV">${studioIcons.upload}</button><button id="studio-crop" type="button" aria-label="Select crop" title="Select crop" disabled>${studioIcons.crop}</button></div><div id="studio-drop-hint" hidden>Drop WAV to open it</div><input id="studio-import-file" type="file" accept="audio/wav,.wav" hidden></div><div class="studio-take-tools"><div id="studio-audio-slot"></div><button id="studio-play" type="button" aria-label="Play" title="Play" disabled>${studioIcons.play}</button><button id="studio-stop" type="button" aria-label="Stop" title="Stop" disabled>${studioIcons.stop}</button><span id="studio-time" class="studio-time">0:00 / 0:00</span><span id="studio-selection-label" hidden>No selection</span><button id="studio-download" type="button" disabled>Download WAV</button><button id="studio-clear" type="button" disabled>Clear take</button></div><div id="studio-meta-slot"></div><div id="studio-progress-slot"></div><div id="studio-error-slot"></div></section>
       <div class="studio-history-head"><h2>Past takes <span id="studio-history-count"></span></h2><div id="studio-history-actions"></div></div><div id="studio-history-slot"></div>
     </main>
+    <main id="studio-view-lanes" class="studio-view" hidden><iframe id="studio-lanes-frame" title="Automation lanes"></iframe></main>
     <main id="studio-view-train" class="studio-view" hidden><iframe id="studio-training-frame" title="LoRA training workspace"></iframe></main>
     <main id="studio-view-models" class="studio-view" hidden><div class="studio-hero"><div><div class="studio-eyebrow">Model library</div><h2>Get the sound you need.</h2><p>Model weights live beside the runtime in your configured models folder.</p></div></div><div id="studio-model-cards" class="studio-model-grid"></div><section class="studio-panel" style="margin-top:16px"><h2 style="font-size:1rem;margin:0 0 12px;border:0">Download a model set</h2><div class="param-grid"><div><label for="studio-download-variant">Variant</label><select id="studio-download-variant"><option value="medium">Medium</option><option value="small-music">Small music</option><option value="small-sfx">Small SFX</option></select></div><div><label for="studio-download-tier">DiT tier</label><select id="studio-download-tier"><option value="f16">F16</option><option value="q4_k_m">Q4_K_M · compact</option><option value="f32">F32</option><option value="q5_k_m">Q5_K_M</option><option value="q8_0">Q8_0</option></select></div></div><p class="small-note" style="margin:12px 0">The set includes an F32 autoencoder, F16 text encoder, conditioner, and tokenizer. <a href="https://huggingface.co/thepatch" target="_blank" rel="noopener" style="color:var(--accent)">Review model licenses and cards</a>.</p><button id="studio-download-model" type="button" class="primary">Download model set</button><p id="studio-download-status" class="small-note" role="status" style="margin:10px 0 0"></p></section><section class="studio-panel" style="margin-top:16px"><h2 style="font-size:1rem;margin:0 0 8px;border:0">Decoder corrections</h2><p class="small-note">A selected correction runs with every generation on its compatible model. Creative LoRAs stay in the render dialogs.</p><div id="studio-decoder-list"></div><button id="studio-download-decoder" type="button">Download SAME-L correction</button><p id="studio-decoder-status" class="small-note" role="status"></p></section></main>
     <main id="studio-view-settings" class="studio-view studio-settings" hidden><div class="studio-hero"><div><div class="studio-eyebrow">Studio settings</div><h2>Runtime and output.</h2><p>Keep the model loaded and tune output processing here.</p></div></div><div id="studio-session-settings"></div><details><summary>Audio processing</summary><div id="studio-audio-settings"></div></details></main>
-    <div id="studio-footer"></div>
   </div>
     <div id="studio-modal" class="studio-modal" hidden><div class="studio-dialog" role="dialog" aria-modal="true" aria-labelledby="studio-dialog-title"><div class="studio-dialog-head"><h2 id="studio-dialog-title">create</h2><button id="studio-dialog-close" type="button" aria-label="Close dialog">×</button></div><p id="studio-dialog-description" class="studio-dialog-description">Start a new take from a prompt.</p><div id="studio-dialog-prompt"></div><div id="studio-dialog-basic"></div><div class="studio-extra-controls"><div id="studio-tail-wrap"><span class="studio-field-label">Ending</span><div class="studio-segmented"><label><input type="radio" name="studio-tail" value="0"> Ends here</label><label><input type="radio" name="studio-tail" value="6"> Keeps going</label></div></div><div id="studio-loop-wrap"><label class="inline-label"><input id="studio-loop" type="checkbox"> Make a loop</label><div id="studio-loop-fields" class="studio-loop-options studio-conditional" hidden></div></div><div id="studio-noise-wrap" class="studio-conditional" hidden><label for="studio-noise">Transform strength <output id="studio-noise-value">0.85</output></label><input id="studio-noise" type="range" min="0" max="1" step="0.05" value="0.85"></div></div><div id="studio-dialog-loras"></div><details id="studio-advanced"><summary>Advanced</summary><div id="studio-dialog-cfg"></div><div id="studio-dialog-ds"></div><div id="studio-inpaint-wrap" hidden><label class="inline-label"><input id="studio-inpaint" type="checkbox"> Inpaint part of the selected audio</label><div class="param-grid studio-conditional" id="studio-inpaint-fields" hidden><div><label for="studio-inpaint-start">Start (seconds)</label><input id="studio-inpaint-start" type="number" min="0" step="0.01" value="0"></div><div><label for="studio-inpaint-end">End (seconds)</label><input id="studio-inpaint-end" type="number" min="0" step="0.01" value="0"></div></div></div></details><p id="studio-dialog-error" role="alert" hidden></p><div class="studio-dialog-actions"><button id="studio-dialog-cancel" type="button">Cancel</button><button id="studio-dialog-submit" type="button" class="primary">Create</button></div></div></div>`;
 
@@ -61,18 +62,21 @@ function studioShell() {
   if (loopBars) studioEl("studio-loop-fields").append(loopBars);
   move("#progress-wrap", "studio-progress-slot"); move("#result-section", "studio-audio-slot"); move("#seed-info", "studio-meta-slot"); move("#error-msg", "studio-error-slot");
   move("#past-songs", "studio-history-slot"); move("#past-count", "studio-history-count"); move("#clear-all-btn", "studio-history-actions");
-  const credit = document.querySelector("#legacy-root .studio-credit"); if (credit) studioEl("studio-footer").append(credit);
 }
 
 function studioShowView(name) {
   studio.view = name;
-  for (const view of ["studio", "train", "models", "settings"]) {
+  for (const view of ["studio", "lanes", "train", "models", "settings"]) {
     studioEl(`studio-view-${view}`).hidden = view !== name;
     document.querySelector(`[data-studio-view="${view}"]`).setAttribute("aria-current", view === name ? "page" : "false");
   }
   if (name === "train") {
     const frame = studioEl("studio-training-frame");
     if (!frame.src) frame.src = "/training/?embedded=1";
+  }
+  if (name === "lanes") {
+    const frame = studioEl("studio-lanes-frame");
+    if (!frame.src) frame.src = "/lanes?embedded=1";
   }
   if (name === "models") studioRefreshModels();
   if (name === "studio") loadLoras();
@@ -207,8 +211,85 @@ async function studioUploadSelection() {
   return {path:body.path,duration:end-start};
 }
 
+// Remember editable controls, not source audio or the derived transform length. The shared
+// controls stay shared; Create and Continue each keep their own duration and ending.
+const studioPreferencesKey = "sa3-studio-preferences-v1";
+function studioPreferenceControls() {
+  return [...document.querySelectorAll("#studio-modal input[id], #studio-modal textarea[id], #studio-modal select[id], #studio-session-settings input[id], #studio-audio-settings input[id]")]
+    .filter(el => el.type !== "file" && !["duration", "duration-num", "duration-padding", "duration-padding-num", "lora-select"].includes(el.id));
+}
+function studioSavePreferences(ids) {
+  const prefs = studio.preferences;
+  if (!prefs) return;
+  for (const el of studioPreferenceControls()) {
+    if (ids && !ids.includes(el.id)) continue;
+    prefs.fields[el.id] = el.type === "checkbox" ? el.checked : el.value;
+    if (/^dsp[1-4]$/.test(el.id)) prefs.dsEdited[el.id] = el.dataset.userEdited === "true";
+  }
+  if ((!ids || ids.includes("duration") || ids.includes("duration-num")) && studio.operation !== "transform")
+    prefs.durations[studio.operation] = studioEl("duration-num").value;
+  if (studio.lorasRestored) prefs.loras = activeLoras.map(l => ({...l}));
+  if (!studioEl("studio-modal").hidden && studio.operation !== "transform")
+    prefs.endings[studio.operation] = document.querySelector('input[name="studio-tail"]:checked')?.value || "0";
+  try { localStorage.setItem(studioPreferencesKey, JSON.stringify(prefs)); } catch { /* Keep session memory when storage is unavailable. */ }
+}
+function studioApplyPreferences() {
+  if (!studio.preferences) return;
+  for (const el of studioPreferenceControls()) {
+    const value = studio.preferences.fields[el.id];
+    if (el.type === "checkbox") { if (typeof value === "boolean") el.checked = value; }
+    else if (typeof value === "string") el.value = value;
+    if (/^dsp[1-4]$/.test(el.id)) {
+      if (studio.preferences.dsEdited[el.id]) el.dataset.userEdited = "true";
+      else delete el.dataset.userEdited;
+    }
+  }
+  onDistShiftChange();
+  studioUpdateDialogOptions();
+}
+function studioUpdateDialogOptions() {
+  studioEl("studio-loop-fields").hidden = !studioEl("studio-loop").checked;
+  studioEl("studio-inpaint-fields").hidden = !studioEl("studio-inpaint").checked;
+  studioEl("studio-noise-value").textContent = Number(studioEl("studio-noise").value).toFixed(2);
+}
+function studioInitPreferences() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(studioPreferencesKey)) || {}; } catch { /* Missing, corrupt or blocked storage uses defaults. */ }
+  const object = value => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  studio.preferences = {
+    fields: object(saved.fields), dsEdited: object(saved.dsEdited),
+    durations: {create: "30", continue: "30", ...object(saved.durations)},
+    endings: {create: "0", continue: "6", ...object(saved.endings)},
+    loras: Array.isArray(saved.loras) ? saved.loras.filter(l => l && typeof l.name === "string" && Number.isFinite(l.strength)) : [],
+  };
+  for (const op of ["create", "continue"]) {
+    try {
+      if (!Object.hasOwn(object(saved.endings), op))
+        studio.preferences.endings[op] = localStorage.getItem(`sa3-tail-${op}`) || studio.preferences.endings[op];
+    } catch { /* Legacy ending preferences are optional. */ }
+  }
+  studioApplyPreferences();
+  const remember = event => {
+    const el = event.target;
+    if (!el.closest?.("#studio-modal, #studio-session-settings, #studio-audio-settings")) return;
+    const ids = [el.id];
+    if (el.id === "steps" || el.id === "steps-num") ids.push("steps", "steps-num");
+    if (el.id === "dist-shift") ids.push("dsp1", "dsp2", "dsp3", "dsp4");
+    studioSavePreferences(ids);
+  };
+  document.addEventListener("input", remember);
+  document.addEventListener("change", remember);
+  window.addEventListener("pagehide", () => {
+    if (!studioEl("studio-modal").hidden) studioSavePreferences(studioPreferenceControls().filter(el => el.closest("#studio-modal")).map(el => el.id).concat("duration-num"));
+  });
+}
+window.studioSettingsChanged = studioSavePreferences;
+// Health arrives asynchronously and supplies server defaults. Saved choices take precedence.
+window.studioHealthReady = studioApplyPreferences;
+
 function studioOpenOperation(operation) {
   if(studio.busy || (operation!=="create"&&!studio.buffer))return;
+  if(!studioEl("studio-modal").hidden)studioCloseOperation();
   studio.operation=operation;
   studioEl("studio-dialog-error").hidden=true;
   studioEl("studio-dialog-title").textContent=operation;
@@ -219,23 +300,31 @@ function studioOpenOperation(operation) {
   studioEl("studio-noise-wrap").hidden=operation!=="transform";
   studioEl("studio-tail-wrap").hidden=operation==="transform";
   studioEl("studio-inpaint-wrap").hidden=operation!=="transform";
-  studioEl("studio-inpaint").checked=false;studioEl("studio-inpaint-fields").hidden=true;
-  const tail=localStorage.getItem(`sa3-tail-${operation}`) || (operation==="continue"?"6":"0");
+  const tail=studio.preferences.endings[operation] || "0";
   const radio=document.querySelector(`input[name="studio-tail"][value="${tail}"]`);if(radio)radio.checked=true;
   studioEl("studio-advanced").open=false;
   const duration=studioEl("duration-num");
   const label=document.querySelector('label[for="duration"]');
   if(label)label.textContent=operation==="continue"?"Add seconds":operation==="transform"?"Selected length (seconds)":"Duration (seconds)";
   duration.readOnly=operation==="transform";
-  if(operation==="continue")duration.value="8";
+  studioEl("duration").disabled=operation==="transform";
+  duration.value=studio.preferences.durations[operation] || "30";
   if(operation==="transform"){
     const length=studioRange()[1]-studioRange()[0];duration.value=length.toFixed(2);
-    studioEl("studio-inpaint-start").value="0";studioEl("studio-inpaint-end").value=length.toFixed(2);
+    const start=Math.min(Math.max(0,Number(studioEl("studio-inpaint-start").value)||0),Math.max(0,length-.01));
+    const end=Math.min(Number(studioEl("studio-inpaint-end").value)||length,length);
+    studioEl("studio-inpaint-start").value=start.toFixed(2);
+    studioEl("studio-inpaint-end").value=(end>start?end:length).toFixed(2);
   }
+  studioEl("duration").value=duration.value;
+  studioUpdateDialogOptions();
   studioEl("studio-modal").hidden=false; studioEl("prompt").focus();
 }
 
-function studioCloseOperation() { studioEl("studio-modal").hidden=true; }
+function studioCloseOperation() {
+  studioSavePreferences(studioPreferenceControls().filter(el => el.closest("#studio-modal")).map(el => el.id).concat("duration-num"));
+  studioEl("studio-modal").hidden=true;
+}
 
 async function studioSubmit() {
   const button=studioEl("studio-dialog-submit"); button.disabled=true;
@@ -246,7 +335,7 @@ async function studioSubmit() {
     studioEl("steps").value=studioEl("steps-num").value;
     let overrides={duration:requested,init_path:"",inpaint_start:-1,inpaint_end:-1,
       duration_padding_sec:studio.operation==="transform"?0:Number(document.querySelector('input[name="studio-tail"]:checked')?.value||0)};
-    if(studio.operation!=="transform")localStorage.setItem(`sa3-tail-${studio.operation}`,String(overrides.duration_padding_sec));
+    studioSavePreferences(studioPreferenceControls().filter(el => el.closest("#studio-modal")).map(el => el.id).concat("duration-num"));
     if(studio.operation!=="create") {
       const source=await studioUploadSelection();
       overrides.init_path=source.path;
@@ -352,7 +441,14 @@ window.studioDecoderAdapter=()=>{
   const entry=loraList.find(l=>l.name===name&&l.target==="decoder"&&studioDecoderLoraFamily(l)===family);
   return entry?[{name:entry.name,strength:1}]:[];
 };
-window.studioLorasReady=studioRenderDecoderLoras;
+window.studioLorasReady=()=>{
+  if(studio.preferences&&!studio.lorasRestored){
+    activeLoras=studio.preferences.loras.filter(l=>loraList.some(known=>known.name===l.name&&known.target==="dit")).map(l=>({...l}));
+    studio.lorasRestored=true;
+    renderActiveLoras();
+  }
+  studioRenderDecoderLoras();
+};
 
 async function studioStartDownload() {
   const status=studioEl("studio-download-status"),button=studioEl("studio-download-model");button.disabled=true;
@@ -450,9 +546,9 @@ function studioWire() {
     if(!studioEl("studio-modal").hidden)studioCloseOperation();
     else if(studio.cropMode){studio.cropMode=false;studio.selection=[0,1];studioUpdateTakeControls();studioDrawWaveform();}
   });
-  window.addEventListener("hashchange",()=>{const view=location.hash.slice(1)||"studio";if(["studio","train","models","settings"].includes(view)&&view!==studio.view)studioShowView(view);});
+  window.addEventListener("hashchange",()=>{const view=location.hash.slice(1)||"studio";if(["studio","lanes","train","models","settings"].includes(view)&&view!==studio.view)studioShowView(view);});
   window.addEventListener("message",event=>{if(event.origin===location.origin&&event.data?.type==="sa3-lora-registered")loadLoras();});
-  const initial=location.hash.slice(1);if(["train","models","settings"].includes(initial))studioShowView(initial);
+  const initial=location.hash.slice(1);if(["lanes","train","models","settings"].includes(initial))studioShowView(initial);
 }
 
 function studioClearTake() { const audio=studioEl("result-audio");audio.pause();if(studio.frame)cancelAnimationFrame(studio.frame);studio.frame=0;studio.buffer=null;studio.peaks=null;studio.audioUrl="";studio.title="";studio.selection=[0,1];studio.cropMode=false;studioEl("result-section").style.display="none";audio.removeAttribute("src");audio.load();studioUpdateTakeControls();studioDrawWaveform(); }
@@ -461,6 +557,6 @@ window.studioClearTake=studioClearTake;
 window.studioResultReady=entry=>studioLoadTake(entry).catch(e=>showError(`Cannot display waveform: ${e.message}`));
 window.studioSetBusy=studioSetBusy;
 document.addEventListener("DOMContentLoaded",()=>{
-  try { studioShell();studioWire();studioUpdateTakeControls();studioDrawWaveform();studioRefreshModels(); }
+  try { studioShell();studioInitPreferences();studioWire();studioUpdateTakeControls();studioDrawWaveform();studioRefreshModels(); }
   catch(error) { console.error("Studio initialization failed",error); studioEl("studio-header-status").textContent=`Studio initialization failed: ${error.message}`; }
 });

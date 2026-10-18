@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sa3.cpp studio — automation lanes</title>
+<script>if (window.top !== window || new URLSearchParams(location.search).has('embedded')) document.documentElement.classList.add('embedded');</script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #090909; --surface: #171313; --surface2: #100d0d; --border: #493030;
+    --text: #f4eded; --muted: #b6a5a5; --accent: #e23b42;
+    --green: #6cc58b; --red: #ed6268; --orange: #d9a36c;
+    --radius: 6px; --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    --head-w: 230px;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.5;
+    max-width: 1400px; margin: 0 auto; padding: 16px 16px 60px;
+  }
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 1.35rem; font-weight: 600; }
+  h1 small { font-weight: 400; font-size: 0.8rem; color: var(--muted); }
+  header a { color: var(--muted); font-size: 0.82rem; }
+  #status { font-size: 0.82rem; }
+  #status.ok { color: var(--green); } #status.err { color: var(--red); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+          padding: 12px; margin-bottom: 10px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .col { display: flex; flex-direction: column; min-width: 0; }
+  .grow { flex: 1; min-width: 220px; }
+  label { font-size: 0.74rem; color: var(--muted); margin-bottom: 2px; font-weight: 500; }
+  input, select, textarea {
+    font-family: inherit; font-size: 0.85rem; background: var(--surface2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 8px; outline: none;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 38px; font-family: var(--mono); font-size: 0.8rem; width: 100%; }
+  input[type=number] { font-family: var(--mono); font-size: 0.8rem; width: 78px; }
+  button {
+    font-family: inherit; font-size: 0.82rem; cursor: pointer; border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 5px 12px; background: #251a1a; color: var(--text); white-space: nowrap;
+  }
+  button:hover { background: #392222; }
+  button.primary { background: #b6222b; border-color: #d3323b; color: #fff; font-weight: 600; padding: 7px 18px; }
+  button.primary:hover { background: #d3323b; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.tiny { padding: 1px 7px; font-size: 0.74rem; }
+  button.icon { padding: 2px 7px; }
+  .muted { color: var(--muted); font-size: 0.78rem; }
+  .err { color: var(--red); font-size: 0.82rem; min-height: 1.2em; }
+  .seedbox { display: flex; gap: 4px; align-items: center; }
+  .seedbox input { width: 110px; }
+  .embedded body { max-width: none; padding: 4px 2px 40px; background: transparent; }
+  .embedded header { display: none; }
+  details.adv { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+  details.adv summary { cursor: pointer; font-size: 0.82rem; font-weight: 600; }
+  .adv-intro { margin: 6px 0 10px; line-height: 1.55; max-width: 980px; }
+  .adv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-bottom: 8px; }
+  .adv-item { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+  .adv-item label { display: block; }
+  .adv-item p { font-size: 0.76rem; color: var(--muted); line-height: 1.5; margin-top: 6px; }
+  .adv-item p b { color: var(--text); font-weight: 600; }
+  input[type=checkbox] { width: auto; accent-color: var(--accent); }
+
+  /* transport + progress */
+  .transport { display: flex; gap: 8px; align-items: center; margin: 6px 0 8px; flex-wrap: wrap; }
+  #time { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); min-width: 110px; }
+  .progress { flex: 1; min-width: 160px; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  #progress-label { font-size: 0.76rem; color: var(--muted); min-width: 170px; }
+
+  /* timeline: a fixed-width head column + canvases that share one x scale */
+  .tl-row { display: flex; border-top: 1px solid var(--border); }
+  .tl-row:first-child { border-top: 0; }
+  .tl-head { width: var(--head-w); flex: none; padding: 6px 8px; border-right: 1px solid var(--border);
+             display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; }
+  .tl-body { flex: 1; min-width: 0; position: relative; }
+  .tl-body canvas { display: block; width: 100%; touch-action: none; }
+  #timeline { padding: 0; overflow: hidden; }
+  .lane-head-top { display: flex; gap: 4px; align-items: center; }
+  .lane-head-top select { flex: 1; min-width: 0; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .lane-head .mini { display: flex; gap: 4px; align-items: center; }
+  .lane-head .mini input[type=number] { width: 58px; }
+  .lane-head textarea { min-height: 30px; font-size: 0.74rem; }
+  .presets { display: flex; gap: 3px; flex-wrap: wrap; }
+  .lane-canvas { cursor: crosshair; }
+  .tip { position: absolute; pointer-events: none; font-family: var(--mono); font-size: 0.7rem;
+         background: #000c; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; display: none; }
+
+  /* takes */
+  #takes { display: flex; flex-direction: column; gap: 3px; max-height: 260px; overflow-y: auto; }
+  .take { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; padding: 3px 6px; border-radius: 4px;
+          font-size: 0.78rem; cursor: pointer; border: 1px solid transparent; }
+  .take .meta { order: 9; flex-basis: 100%; padding-left: 26px; }
+  .take:hover { background: #221818; }
+  .take.current { border-color: var(--accent); background: #2a1719; }
+  .take .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .take .meta { color: var(--muted); font-family: var(--mono); font-size: 0.72rem; }
+  .take a.tiny { color: var(--muted); text-decoration: none; padding: 0 4px; }
+  .take a.tiny:hover { color: var(--text); }
+  .help { font-size: 0.74rem; color: var(--muted); line-height: 1.6; }
+  .help kbd { font-family: var(--mono); background: var(--surface2); border: 1px solid var(--border);
+              border-radius: 3px; padding: 0 4px; font-size: 0.7rem; }
+  @media (max-width: 700px) {
+    :root { --head-w: 128px; }
+    .lane-head .presets, .lane-head textarea { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Automation lanes <small>sa3.cpp · experimental</small></h1>
+  <span id="status">connecting…</span>
+  <span id="model" class="muted"></span>
+  <a href="/#lanes">open in the studio</a>
+</header>
+
+<div class="card">
+  <div class="row">
+    <div class="col grow"><label for="prompt">Base prompt <button class="tiny" id="base-dice" title="random prompt">🎲</button></label>
+      <textarea id="prompt" rows="2"></textarea></div>
+    <div class="col grow"><label for="negative">Negative prompt (CFG only)</label>
+      <textarea id="negative" rows="2"></textarea></div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div class="col"><label for="duration">Duration (s) <span id="bars-info" class="muted"></span></label>
+      <div class="seedbox"><input id="duration" type="number" min="1" max="190" step="0.01" value="20">
+        <button class="icon" id="fit-bars" title="round the duration to whole bars at this BPM">⌗</button></div></div>
+    <div class="col"><label for="bpm" title="Added to the base prompt and every lane prompt; also draws the bar grid and Ctrl-snaps to beats">BPM</label>
+      <input id="bpm" type="number" min="0" max="300" step="1" placeholder="none"></div>
+    <div class="col"><label for="key" title="Added to every prompt, e.g. C# minor">Key</label>
+      <input id="key" type="text" placeholder="none" style="width:96px"></div>
+    <div class="col"><label for="decoder" title="The decoder correction for the whole take. Shared with the studio's Models tab.">Decoder correction</label>
+      <select id="decoder"><option value="">none</option></select></div>
+    <div class="col"><label for="steps">Steps</label><input id="steps" type="number" min="1" max="100" step="1" value="8"></div>
+    <div class="col"><label for="cfg">CFG</label><input id="cfg" type="number" min="0" step="0.1" value="1"></div>
+    <div class="col"><label for="seed">Seed</label>
+      <div class="seedbox"><input id="seed" type="number" min="0" step="1">
+        <button class="icon" id="seed-dice" title="new random seed">🎲</button>
+        <label class="muted" style="display:flex;gap:3px;align-items:center;margin:0"><input id="seed-lock" type="checkbox"> lock</label></div></div>
+    <div class="col" style="margin-left:auto"><button class="primary" id="gen">Generate</button></div>
+  </div>
+  <details id="advanced" class="adv">
+    <summary>Advanced <span id="adv-state" class="muted"></span></summary>
+    <p class="muted adv-intro">How the lanes are blended. The defaults are a good place to start; these are
+      here to experiment with. Some background: the model writes the whole clip at once, starting
+      from pure noise and refining it over the steps (8 by default). The first few steps decide the
+      arrangement (groove, melody, where things happen); the last ones polish texture and detail.
+      "σ" is how noisy the clip still is: 1 = pure noise, 0 = finished.</p>
+    <div class="adv-grid">
+      <div class="adv-item">
+        <label for="mode">Mixing</label>
+        <select id="mode"><option value="velocity">velocity (per-pass)</option><option value="layer">layer (one pass, 1 lane)</option></select>
+        <p><b>Velocity</b> (default) runs every lane as its own complete pass, then blends them moment
+          by moment using your curves. It is precise: a lane drawn at 0 really is off there. Each
+          lane adds one pass, so more lanes take longer.<br>
+          <b>Layer</b> is the original single-pass method, kept for comparison. It is cheaper, but the
+          LoRA bleeds across the whole clip (a lane at 0 still measured 60-80% LoRA). One lane only, no
+          lane prompt.</p>
+      </div>
+      <div class="adv-item">
+        <label for="iso">Isolation strength (λ)</label>
+        <input id="iso" type="number" min="0" step="0.5" value="4">
+        <p>Every moment of the clip listens to every other moment, so sections tend to drift towards
+          one shared sound and a LoRA can get washed out. Isolation makes each moment listen mostly to
+          moments with a similar lane mix while the arrangement is being decided, so each phase keeps
+          its own identity. Higher = more separation, but also more of a "changing radio stations"
+          jump at transitions. 0 = off. Around 3 is already full strength; above that changes little.</p>
+      </div>
+      <div class="adv-item">
+        <label for="iso-until">Isolation until (σ)</label>
+        <input id="iso-until" type="number" min="0" max="1" step="0.05" value="0.9">
+        <p>When isolation lets go. After that, every moment listens to the whole clip again, which
+          smooths the joins. 0.9 = isolate the first 4 of 8 steps. Closer to 1 = shorter isolation
+          (in tests, fewer than the first 4 steps made no difference at all); lower = isolate longer,
+          leaving fewer steps to smooth the transitions.</p>
+      </div>
+      <div class="adv-item">
+        <label for="avg-until">Shared structure (σ)</label>
+        <input id="avg-until" type="number" min="0" max="1" step="0.05" value="0">
+        <p>The opposite trade to isolation. While σ is above this, every lane plays at its average
+          amount across the whole clip, so the take settles on one arrangement first; your curves
+          only take over afterwards, shaping sound and texture more than the song itself. In theory:
+          smoother, more "same song" transitions, possibly with less contrast between phases.
+          Isolation pauses while this is active. 0 = off; try 0.9 with isolation 0.</p>
+      </div>
+    </div>
+    <button class="tiny" id="adv-reset">reset to defaults</button>
+  </details>
+  <div class="err" id="error"></div>
+</div>
+
+<div class="transport">
+  <button id="play" class="icon" title="play / pause (space)">▶</button>
+  <button id="stop" class="icon" title="stop">■</button>
+  <span id="time">0.00 / 0.00</span>
+  <div class="progress"><div id="progress"></div></div>
+  <span id="progress-label"></span>
+</div>
+
+<div class="card" id="timeline">
+  <div class="tl-row">
+    <div class="tl-head"><b>Take</b><span class="muted" id="take-info">no take yet</span>
+      <button class="tiny" id="add-lane">+ lane</button>
+      <button class="tiny" id="view">show waveform</button>
+      <span class="muted" style="font-size:0.7rem">curves here: what this take was made with</span></div>
+    <div class="tl-body"><canvas id="wave" data-h="150"></canvas></div>
+  </div>
+  <div id="lanes"></div>
+</div>
+<audio id="audio" preload="auto"></audio>
+
+<div class="row" style="align-items:flex-start">
+  <div class="card grow" style="flex:2">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px">
+      <b style="font-size:0.85rem">Takes</b>
+      <span class="muted">click to load · ↺ restores that take's settings</span>
+    </div>
+    <div id="takes"><span class="muted">Generated takes appear here (kept until the page reloads).</span></div>
+  </div>
+  <div class="card grow help">
+    <b style="color:var(--text)">Editing a lane</b><br>
+    click empty space: add a point · drag a point: move it<br>
+    double-click / right-click a point: delete it<br>
+    <kbd>Shift</kbd>+drag: draw freehand · <kbd>Ctrl</kbd>: snap to beats (with a BPM) or 0.25 s<br>
+    <kbd>Space</kbd>: play/pause · <kbd>Ctrl</kbd>+<kbd>Enter</kbd>: generate · click the waveform to seek<br><br>
+    <b style="color:var(--text)">What the lanes do</b><br>
+    Each lane is its own DiT pass per step (its LoRA at the curve's peak, on its own prompt if set).
+    The base pass runs on the base prompt; at each frame the step is
+    base + Σ amount × (lane − base). Amount is a strength multiplier: 1 = the LoRA at its strength.
+    The blending options are under Advanced.
+  </div>
+</div>
+
+<script src="lanes.js"></script>
+</body>
+</html>
