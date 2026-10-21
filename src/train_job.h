@@ -337,6 +337,7 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             snap << "checkpoint_every=" << cfg.checkpoint_every << "\n";
             snap << "output_dir=" << cfg.output_dir << "\n";
             snap << "resume=" << (cfg.resume_path.empty() ? "(none)" : cfg.resume_path) << "\n";
+            snap << "init_adapter=" << (cfg.init_adapter_path.empty() ? "(none)" : cfg.init_adapter_path) << "\n";
             snap << "prompt_config=" << (cfg.prompt_config_path.empty() ? "(none)" : cfg.prompt_config_path) << "\n";
             snap << "max_steps=" << cfg.max_steps << "\n";
             snap << "max_epochs=" << cfg.max_epochs << "\n";
@@ -492,6 +493,13 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
             if (cfg.max_steps > 0 && loop.step > cfg.max_steps)
                 throw std::runtime_error("resume step exceeds --steps (which is the total target step)");
             train_job_logf(hooks, "[resume] step %d from %s\n", loop.step, resume_state_path.c_str());
+        } else if (!cfg.init_adapter_path.empty()) {
+            // Nothing else carries over: loop stays at step 0 with an empty optimizer, and the RNG
+            // streams and LR schedule below start from the seed as in any fresh run.
+            if (!sa3::train_load_init_adapter(lora, cfg.init_adapter_path, err))
+                throw std::runtime_error(err);
+            train_job_logf(hooks, "[init-adapter] %zu targets from %s; step 0, fresh optimizer, RNG and LR schedule\n",
+                           lora.params.size(), sa3::train_resolve_init_adapter(cfg.init_adapter_path).c_str());
         }
 
         // Pre-encoded latents (the reference training method, train_latents.h): every file is

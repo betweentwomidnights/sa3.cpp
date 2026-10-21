@@ -8,7 +8,8 @@ import tempfile
 binary = Path(sys.argv[1]).resolve()
 info = subprocess.run([binary, "--control-info"], capture_output=True, text=True, check=True)
 capabilities = json.loads(info.stdout)
-assert capabilities == {"schema_version": 1, "cooperative_cancel_file": True, "atomic_progress_file": True}
+assert capabilities == {"schema_version": 1, "cooperative_cancel_file": True, "atomic_progress_file": True,
+                        "init_adapter": True}
 with tempfile.TemporaryDirectory(prefix="sa3-cli-control-") as temporary:
     root = Path(temporary)
     dataset = root / "dataset"

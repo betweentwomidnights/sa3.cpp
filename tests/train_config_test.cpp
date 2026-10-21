@@ -93,6 +93,26 @@ int main() {
                         "resume defaults output to checkpoint directory");
     }
     {
+        sa3::TrainConfig c;
+        c.dataset_dir = "../data";
+        std::string err;
+        char a0[] = "test";
+        char a1[] = "--init-adapter";
+        char a2[] = "runs/example/adapter-final.gguf";
+        char* argv[] = {arg(a0), arg(a1), arg(a2)};
+        fails += expect(sa3::train_parse_args(3, argv, c, err), "init-adapter CLI parse succeeds");
+        sa3::train_finalize_defaults(c);
+        fails += expect(c.init_adapter_path == a2 && c.resume_path.empty(), "init-adapter path parsed");
+        fails += expect(std::filesystem::path(c.output_dir).lexically_normal() !=
+                        std::filesystem::path(a2).parent_path().lexically_normal(),
+                        "a warm start is a new run: output is not the adapter's directory");
+        fails += expect(sa3::validate_train_config(c, err), "init-adapter config validates");
+        c.resume_path = "runs/example/trainer-state-step-500.gguf";
+        fails += expect(!sa3::validate_train_config(c, err) &&
+                        err.find("exclusive") != std::string::npos,
+                        "resume and init-adapter are exclusive");
+    }
+    {
         const char* path = "train_config_test.json";
         {
             std::ofstream f(path);

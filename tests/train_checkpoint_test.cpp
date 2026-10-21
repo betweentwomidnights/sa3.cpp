@@ -188,6 +188,63 @@ int main() {
                     continued_loop.B_state[0].v == uninterrupted_loop.B_state[0].v,
                     "final AdamW moments exact");
 
+    // --init-adapter warm start: the weights alone, into a freshly initialized state.
+    fails += expect(fs::path(sa3::train_resolve_init_adapter(pair_state.string())) == pair_adapter,
+                    "a trainer-state path warm-starts from its paired adapter");
+    fails += expect(sa3::train_resolve_init_adapter(pair_adapter.string()) == pair_adapter.string(),
+                    "an adapter path warm-starts from itself");
+    const fs::path final_adapter = pair_dir / "elsewhere" / "adapter-final.gguf";
+    fs::create_directories(final_adapter.parent_path());
+    fs::copy_file(pair_adapter, final_adapter);   // no trainer state beside it
+    auto fresh = [&] {
+        sa3::TrainLoraState state = st;
+        for (float& v : state.params[0].lora_A) v = 0.0f;
+        for (float& v : state.params[0].lora_B) v = 0.0f;
+        return state;
+    };
+    sa3::TrainLoraState warm = fresh();
+    err.clear();
+    fails += expect(sa3::train_load_init_adapter(warm, final_adapter.string(), err), err.c_str());
+    fails += expect(warm.params[0].lora_A == split.params[0].lora_A &&
+                    warm.params[0].lora_B == split.params[0].lora_B,
+                    "warm start copies the saved weights without a trainer state");
+    sa3::TrainLoopState warm_loop;   // step 0 and empty moments, as in any fresh run
+    for (int i = 3; i < 6; ++i) fails += expect(apply_step(warm, warm_loop, i), "warm-start AdamW step");
+    fails += expect(warm_loop.step == 3, "a warm start counts its own steps from zero");
+    fails += expect(warm.params[0].lora_A != uninterrupted.params[0].lora_A,
+                    "a warm start restarts the optimizer instead of continuing it");
+    auto rejected = [&](sa3::TrainLoraState state, const char* why, const char* needle) {
+        std::string e;
+        const bool ok = !sa3::train_load_init_adapter(state, final_adapter.string(), e) &&
+                        e.find(needle) != std::string::npos;
+        if (!ok) std::fprintf(stderr, "  (%s: %s)\n", why, e.c_str());
+        return expect(ok, why);
+    };
+    sa3::TrainLoraState other = fresh();
+    other.rank = 3;
+    fails += rejected(other, "warm start rejects a different rank", "rank");
+    other = fresh();
+    other.alpha = 8.0f;
+    fails += rejected(other, "warm start rejects a different alpha", "alpha");
+    other = fresh();
+    other.adapter_type = "dora-rows";
+    fails += rejected(other, "warm start rejects a different adapter type", "type");
+    other = fresh();
+    other.model_variant = "medium";
+    fails += rejected(other, "warm start rejects another model's adapter", "small-music");
+    other = fresh();
+    other.params[0].target.stem = "dit.1.self.qkv";
+    fails += rejected(other, "warm start rejects a different target set", "dit.1.self.qkv");
+    other = fresh();
+    other.params[0].lora_A.resize(9);
+    fails += rejected(other, "warm start rejects a different tensor shape", "shape");
+    {
+        sa3::TrainLoraState state = fresh();
+        std::string e;
+        fails += expect(!sa3::train_load_init_adapter(state, (pair_dir / "absent.gguf").string(), e) &&
+                        !e.empty(), "warm start reports a missing adapter");
+    }
+
     fs::remove(out);
     fs::remove_all(pair_dir);
     if (fails) return 1;
