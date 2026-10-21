@@ -67,6 +67,10 @@ struct TrainConfig {
     // Exact continuation from an immutable adapter-step-N.gguf / trainer-state-step-N.gguf pair.
     // Either member of the pair may be supplied. max_steps remains the total target step.
     std::string resume_path;
+    // Weights-only continuation from any adapter GGUF this trainer wrote (a trainer-state-step-N
+    // path selects its adapter): a fresh run at step 0 with a new optimizer, RNG streams and LR
+    // schedule. Only what the weights' shapes depend on must match. Exclusive with resume_path.
+    std::string init_adapter_path;
     std::string optimizer = "adamw";
     std::string svd_bases_path;   // optional GGUF of frozen U/V bases for -xs adapters (exact-parity path)
     // Prompt tag-composition (Stage 13). When set, per sample the prompt is composed from the
@@ -296,6 +300,8 @@ inline bool train_set_config_value(TrainConfig& c, const std::string& key, const
     else if (key == "checkpoint-every" || key == "checkpoint_every") return set_i(c.checkpoint_every);
     else if (key == "out" || key == "output-dir" || key == "output_dir") c.output_dir = value;
     else if (key == "resume" || key == "resume_path") c.resume_path = value;
+    else if (key == "init-adapter" || key == "init_adapter" || key == "init_adapter_path")
+        c.init_adapter_path = value;
     else if (key == "optimizer") c.optimizer = value;
     else if (key == "svd-bases" || key == "svd_bases" || key == "svd-bases-path" || key == "svd_bases_path") c.svd_bases_path = value;
     else if (key == "prompt-config" || key == "prompt_config") c.prompt_config_path = value;
@@ -476,6 +482,10 @@ inline void train_finalize_defaults(TrainConfig& c) {
 inline bool validate_train_config(const TrainConfig& c, std::string& err) {
     if (c.dataset_dir.empty()) { err = "dataset_dir is required"; return false; }
     if (c.output_dir.empty()) { err = "output_dir is required"; return false; }
+    if (!c.resume_path.empty() && !c.init_adapter_path.empty()) {
+        err = "--resume and --init-adapter are exclusive: resume exactly, or start fresh from weights";
+        return false;
+    }
     if (c.model_variant != "medium" && c.model_variant != "small-music" &&
         c.model_variant != "small-sfx") {
         err = "unsupported model variant: " + c.model_variant;
@@ -558,6 +568,7 @@ inline std::string train_config_usage(const char* argv0) {
        << "core options: --model medium|small-music|small-sfx --models-dir DIR --dataset DIR --out DIR\n"
        << "              --steps N (alias: --max-steps; default 10000)\n"
        << "              --resume adapter-step-N.gguf|trainer-state-step-N.gguf (N -> --steps total)\n"
+       << "              --init-adapter ADAPTER.gguf (fresh run from its weights: step 0, new optimizer)\n"
        << "              --encoding f16|f32|q4_k_m|q5_k_m|q5_k|q8_0 (default f16; quantized bases train)\n"
        << "              --t5-encoding ENC (text encoder precision; default auto, prefers F16)\n"
        << "              --ae-encoding ENC (autoencoder precision; default auto, prefers F32)\n"

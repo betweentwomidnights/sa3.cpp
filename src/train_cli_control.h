@@ -34,7 +34,8 @@ struct TrainCliControl {
     std::string final_adapter, adapter_checkpoint, state_checkpoint;
 
     static const char* capabilities() {
-        return "{\"schema_version\":1,\"cooperative_cancel_file\":true,\"atomic_progress_file\":true}\n";
+        return "{\"schema_version\":1,\"cooperative_cancel_file\":true,\"atomic_progress_file\":true,"
+               "\"init_adapter\":true}\n";
     }
 
     static const char* usage() {

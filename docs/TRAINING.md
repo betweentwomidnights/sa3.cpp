@@ -383,9 +383,25 @@ may change. Resume the latest checkpoint when continuing in place because step p
 this prevents an older continuation from silently overwriting newer state.
 
 The final update is always saved as a resumable numbered pair even when it does not fall on
-`--checkpoint-every`; `adapter-final.gguf` remains the convenient inference copy. Weight-only
-warm-starting is intentionally not called resume and may later be exposed separately as
-`--init-adapter`.
+`--checkpoint-every`; `adapter-final.gguf` remains the convenient inference copy.
+
+## Warm-Start From An Adapter
+
+`--init-adapter ADAPTER.gguf` starts a new run from a saved adapter's weights. Anything this
+trainer wrote works: `adapter-step-N.gguf`, `adapter-final.gguf`, or `trainer-state-step-N.gguf`
+(which selects its paired adapter). Unlike `--resume`, nothing else carries over: the run starts
+at step 0 with fresh AdamW moments, RNG streams and LR schedule, and `--steps` counts from zero.
+The dataset, learning rate, schedule, crop length and every other trajectory setting may change.
+Only what the weights' shapes depend on must match, and the trainer refuses otherwise: the model,
+`--adapter-type`, `--rank`, `--alpha`, and the target set (`--lora-scope`, `--lora-include`,
+`--lora-exclude`, and inpainting, which adds the local-conditioning targets).
+
+```powershell
+sa3-train --dataset C:\datasets\more-material --init-adapter C:\dev\sa3.cpp\train-runs\my-training-set\adapter-final.gguf --out C:\dev\sa3.cpp\train-runs\more-material --steps 500 --lr 5e-5
+```
+
+`--resume` and `--init-adapter` are exclusive. `--control-info` reports `"init_adapter": true`
+so a host can tell a trainer that supports it.
 
 ## Generate With The Adapter
 

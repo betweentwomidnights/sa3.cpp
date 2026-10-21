@@ -147,6 +147,39 @@ inline bool train_restore_adapter_values(TrainLoraState& expected, const TrainLo
     return true;
 }
 
+// The adapter --init-adapter loads: the path itself, or for a trainer-state-step-N
+// path the adapter it pairs with, so either member of a checkpoint pair (or a final adapter) works.
+inline std::string train_resolve_init_adapter(const std::string& input) {
+    namespace fs = std::filesystem;
+    const fs::path p(input);
+    static const std::string state_prefix = "trainer-state-step-";
+    const std::string name = p.filename().string();
+    if (name.rfind(state_prefix, 0) == 0 && p.extension() == ".gguf")
+        return (p.parent_path() / ("adapter-step-" + name.substr(state_prefix.size()))).string();
+    return input;
+}
+
+// --init-adapter: copy a saved adapter's values into a freshly initialized state (a warm start).
+// Unlike an exact resume nothing about the dataset, schedule or optimizer has to match -- only
+// what the weights' shapes depend on: model, adapter type, rank, alpha and the target set.
+inline bool train_load_init_adapter(TrainLoraState& expected, const std::string& input,
+                                    std::string& err) {
+    const std::string path = train_resolve_init_adapter(input);
+    TrainLoraState loaded;
+    if (!load_train_lora_gguf(path, loaded, err)) return false;
+    if (!loaded.model_variant.empty() && !expected.model_variant.empty() &&
+        loaded.model_variant != expected.model_variant) {
+        err = "--init-adapter was trained for " + loaded.model_variant + ", not " +
+              expected.model_variant;
+        return false;
+    }
+    if (!train_restore_adapter_values(expected, loaded, err)) {
+        err = "--init-adapter " + path + ": " + err;
+        return false;
+    }
+    return true;
+}
+
 inline uint64_t train_resume_fnv1a(uint64_t hash, const void* data, size_t size) {
     const unsigned char* p = static_cast<const unsigned char*>(data);
     for (size_t i = 0; i < size; ++i) {
