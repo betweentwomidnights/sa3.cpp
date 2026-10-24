@@ -36,6 +36,7 @@
 #include "audio_post.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <functional>
 #include <limits>
@@ -422,6 +423,44 @@ inline std::string resolve_one(const std::string& dir, const std::string& prefix
         }
     }
     return found;
+}
+
+// A trailing token of an adapter file name that is not part of the adapter's name: an encoding,
+// "lora", or a version (v2, v3...). lora-koan-v2-f32.gguf is "koan"; lora-koan-27-2-f32.gguf is
+// "koan-27-2". sa3-server's /loras names files by this rule.
+inline bool lora_name_suffix_token(const std::string& token) {
+    std::string t;
+    for (char ch : token) t += (char)std::tolower((unsigned char)ch);
+    static const char* const tags[] = {"lora", "f32", "f16", "q8_0", "q6_k", "q5_k_m", "q4_k_m"};
+    for (const char* tag : tags) if (t == tag) return true;
+    return t.size() >= 2 && t[0] == 'v' && std::isdigit((unsigned char)t[1]);
+}
+
+// The adapter file a bare --lora / loras[] name means: the first lora-<name>[-<suffix>...].gguf
+// whose every suffix token is a lora_name_suffix_token, which is the file /loras lists under that
+// name. Only when no file is named exactly that does it fall back to the first lora-<name>-*.gguf.
+// A plain prefix match let "koan" pick lora-koan-27-2-f32.gguf, which sorts first.
+inline std::string resolve_lora_file(const std::string& dir, const std::string& name) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (name.empty() || !fs::is_directory(dir, ec)) return "";
+    const std::string prefix = "lora-" + name, ext = ".gguf";
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        const std::string n = e.path().filename().string();
+        if (n.size() < prefix.size() + ext.size() || n.compare(0, prefix.size(), prefix) != 0 ||
+            n.compare(n.size() - ext.size(), ext.size(), ext) != 0) continue;
+        std::string rest = n.substr(prefix.size(), n.size() - prefix.size() - ext.size());
+        if (!rest.empty() && rest[0] != '-') continue;            // lora-koanx-... is another name
+        bool exact = true;
+        for (size_t i = 0; exact && i < rest.size();) {
+            const size_t j = rest.find('-', i + 1);
+            const std::string tok = rest.substr(i + 1, (j == std::string::npos ? rest.size() : j) - i - 1);
+            exact = lora_name_suffix_token(tok);
+            i = j == std::string::npos ? rest.size() : j;
+        }
+        if (exact) return e.path().string();
+    }
+    return resolve_one(dir, prefix + "-", ext);
 }
 
 // The five gguf paths a generation needs. Resolve by the naming convention (--model / download_models.py)

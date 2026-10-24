@@ -242,7 +242,7 @@ int main(int argc, char** argv) {
     for (auto* specp : to_resolve) {
         auto& spec = *specp;
         if (std::filesystem::exists(spec.first)) continue;
-        std::string p = sa3::resolve_one(adir, "lora-" + spec.first + "-", ".gguf");
+        std::string p = sa3::resolve_lora_file(adir, spec.first);
         if (p.empty()) {
             fprintf(stderr, "[sa3] --lora %s: not a file and no lora-%s-*.gguf in %s/\n",
                     spec.first.c_str(), spec.first.c_str(), adir);

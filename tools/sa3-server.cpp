@@ -112,6 +112,11 @@ std::string g_t5_encoding;
 std::string g_ae_encoding;
 std::string g_models_dir;
 std::string g_adapters_dir;
+// --rng / SA3_RNG and --rng-cuda-blocks / SA3_RNG_CUDA_BLOCKS: the noise for requests that do not
+// name one. A host that A/Bs against a PyTorch service (gary4juce's remote/local switch) sets
+// torch-cuda plus that service's GPU grid cap here, so the same seed gives the same clip.
+std::string g_rng = "mt19937";
+uint32_t g_rng_cuda_blocks = 0;
 std::string g_prompts_dir;
 std::string g_source_loras_dir;
 std::string g_web_dir;                    // --web-dir: override the embedded inference page with local assets
@@ -340,20 +345,9 @@ std::string join_dash(const std::vector<std::string>& parts) {
     return out;
 }
 
-bool looks_like_version_token(const std::string& token) {
-    return token.size() >= 2 && (token[0] == 'v' || token[0] == 'V') && std::isdigit((unsigned char)token[1]);
-}
-
 std::string strip_lora_suffix_tokens(const std::string& raw) {
     std::vector<std::string> parts = split_dash(raw);
-    static const std::set<std::string> trailing = {
-        "lora", "f32", "f16", "q8_0", "q6_k", "q5_k_m", "q4_k_m"
-    };
-    while (!parts.empty()) {
-        const std::string t = lower_ascii(parts.back());
-        if (trailing.count(t) || looks_like_version_token(parts.back())) parts.pop_back();
-        else break;
-    }
+    while (!parts.empty() && sa3::lora_name_suffix_token(parts.back())) parts.pop_back();
     return join_dash(parts);
 }
 
@@ -374,7 +368,7 @@ std::string resolve_lora_path(const std::string& adapters_dir, const std::string
     const fs::path direct_gguf = fs::path(adapters_dir) / (name_or_path + ".gguf");
     if (fs::exists(direct_gguf)) return direct_gguf.string();
 
-    std::string p = sa3::resolve_one(adapters_dir, "lora-" + name_or_path + "-", ".gguf");
+    std::string p = sa3::resolve_lora_file(adapters_dir, name_or_path);
     if (!p.empty()) return p;
     return sa3::resolve_one(adapters_dir, name_or_path + "-", ".gguf");
 }
@@ -1015,12 +1009,12 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
         ? yyjson_get_uint(seed_value)
         : sa3::pick_seed(seed_value && yyjson_is_sint(seed_value) ? yyjson_get_sint(seed_value) : -1);
     params.seed             = seed_resolved;
-    params.rng              = S("rng", "mt19937");             // "torch-cuda": stable_audio_3's noise
+    params.rng              = S("rng", g_rng.c_str());         // "torch-cuda": stable_audio_3's noise
     if (params.rng != "mt19937" && params.rng != "torch-cuda") {
         perr = "rng must be mt19937 or torch-cuda";
         return false;
     }
-    params.rng_cuda_blocks  = (uint32_t)std::max(0, I("rng_cuda_blocks", 0));
+    params.rng_cuda_blocks  = (uint32_t)std::max(0, I("rng_cuda_blocks", (int)g_rng_cuda_blocks));
     params.keep_models      = B("keep_models", false);        // FRUGAL default
     params.init_noise_level = (float)D("init_noise_level", 0.85);
     params.legacy_schedule  = B("legacy_schedule", false);
@@ -1343,6 +1337,8 @@ int main(int argc, char** argv) {
     if (const char* e = getenv("SA3_SOURCE_LORAS_DIR")) g_source_loras_dir = e;
     if (const char* e = getenv("SA3_WEB_DIR"))      g_web_dir      = e;
     if (const char* e = getenv("SA3_AUDIO_IN_DIR")) g_audio_in_dir = e;
+    if (const char* e = getenv("SA3_RNG"))          g_rng          = e;
+    if (const char* e = getenv("SA3_RNG_CUDA_BLOCKS")) g_rng_cuda_blocks = (uint32_t)std::max(0, atoi(e));
     if (g_models_dir.empty()) g_models_dir = "models";
     if (g_prompts_dir.empty()) g_prompts_dir = "prompts";
     if (g_source_loras_dir.empty()) g_source_loras_dir = "loras";
@@ -1365,6 +1361,12 @@ int main(int argc, char** argv) {
         else if (a == "--web-dir")      g_web_dir = next("");
         else if (a == "--audio-in-dir") g_audio_in_dir = next("audio-in");
         else if (a == "--threads")      { g_cpu_threads = atoi(next("0")); threads_set = true; }
+        else if (a == "--rng")          g_rng = next("mt19937");
+        else if (a == "--rng-cuda-blocks") g_rng_cuda_blocks = (uint32_t)std::max(0, atoi(next("0")));
+    }
+    if (g_rng != "mt19937" && g_rng != "torch-cuda") {
+        fprintf(stderr, "--rng / SA3_RNG must be mt19937 or torch-cuda\n");
+        return 1;
     }
     if (port < 1 || port > 65535) {
         fprintf(stderr, "--port must be between 1 and 65535\n");
@@ -2096,6 +2098,8 @@ int main(int argc, char** argv) {
             g_t5_encoding.empty() ? "auto" : g_t5_encoding.c_str(),
             g_models_dir.c_str(), adir.c_str(), sldir.c_str(), pdir.c_str(), aidir.c_str(),
             g_web_dir.empty() ? "(none)" : g_web_dir.c_str());
+    if (g_rng != "mt19937")
+        fprintf(stderr, "[sa3-server] default noise: %s, grid cap %u\n", g_rng.c_str(), g_rng_cuda_blocks);
     if (!svr.listen(host.c_str(), port)) {
         fprintf(stderr, "[sa3-server] failed to bind %s:%d\n", host.c_str(), port);
         return 1;

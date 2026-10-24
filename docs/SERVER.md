@@ -289,7 +289,11 @@ seed then gives the same noise as the PyTorch service, which is what A/B listeni
 `tools/compare_remote_parity.py` need. Past `256 * cap` latent values (about 20 s of
 canvas on an RTX 5070 Laptop) the layout depends on the GPU, so set `rng_cuda_blocks` to
 that GPU's `multi_processor_count * (max_threads_per_multi_processor // 256)`;
-`tools/dump_remote_parity.py` records it in its manifest.
+`tools/dump_remote_parity.py` records it in its manifest. `--rng` / `SA3_RNG` and
+`--rng-cuda-blocks` / `SA3_RNG_CUDA_BLOCKS` set the default for requests that name neither,
+so a client that switches between this server and a PyTorch one (gary4juce) gets the same
+clip for the same seed without sending anything new. A DGX Spark is 288; an RTX 5070
+Laptop is 216.
 
 `/health.capabilities` advertises `conditioning_duration`, `request_splice` and
 `fixed_prefix`. Hosts should check these before using the controls: older
