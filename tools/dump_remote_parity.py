@@ -49,6 +49,8 @@ def main():
     ap.add_argument("--no-decode", action="store_true")
     ap.add_argument("--no-padding-mask", action="store_true",
                     help="diagnostic: withhold the attention padding mask from the DiT (sa3.cpp has none)")
+    ap.add_argument("--no-clamp", action="store_true",
+                    help="keep the decode unclamped, as the service's loudness path measures its peak")
     ap.add_argument("--decode-latent", default=None,
                     help="skip sampling: decode this latent.npy [io, T] and write audio.npy / torch.wav")
     ap.add_argument("--out", required=True)
@@ -94,7 +96,9 @@ def main():
     def decode(latents):
         pt = pipe.model.pretransform
         z = latents.to(device=next(pt.parameters()).device, dtype=next(pt.parameters()).dtype)
-        audio = pt.decode(z).float().clamp(-1, 1)
+        audio = pt.decode(z).float()
+        if not args.no_clamp:
+            audio = audio.clamp(-1, 1)
         audio = audio[:, :, : int(args.duration * pipe.model.sample_rate)]
         save("audio.npy", audio[0])
         import soundfile as sf
