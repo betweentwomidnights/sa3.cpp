@@ -66,6 +66,7 @@ int main(int argc, char** argv) {
     int encode_chunk_size = 0, encode_overlap = 32;     // outer SAME-L encode tiling; 0 = monolithic
     int decode_chunk_size = 0, decode_overlap = 32;     // outer SAME-L decode tiling; 0 = monolithic
     int frames = 128, steps = 8; long long seed = -1;  // omitted/negative => random (resolved below)
+    std::string rng = "mt19937"; unsigned rng_cuda_blocks = 0;
     int cpu_threads = 0;
     bool frames_set = false, duration_set = false, threads_set = false;
     double duration_sec = 0.0;
@@ -96,6 +97,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--steps")  && i+1 < argc) steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--threads") && i+1 < argc) { cpu_threads = atoi(argv[++i]); threads_set = true; }
         else if (!strcmp(argv[i], "--seed")   && i+1 < argc) seed = strtoll(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--rng")    && i+1 < argc) rng = argv[++i];
+        else if (!strcmp(argv[i], "--rng-cuda-blocks") && i+1 < argc) rng_cuda_blocks = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out")    && i+1 < argc) wav_p = argv[++i];
         else if (!strcmp(argv[i], "--init")   && i+1 < argc) init_p = argv[++i];
         else if (!strcmp(argv[i], "--init-noise-level") && i+1 < argc) init_noise_level = (float)atof(argv[++i]);
@@ -255,7 +258,7 @@ int main(int argc, char** argv) {
                         "                     [--ae-encoding ENC  autoencoder precision; default auto, prefers F32]\n"
                         "                     | --tok <f> --t5 <f> --cond <f> --dit <f> --same <f>)\n"
                         "                     --prompt \"...\" [--lora NAME|PATH [--lora-strength S]]... [--lora-envelope SEC:AMT,SEC:AMT... [--lora-envelope-mode velocity|layer]]\n"
-                        "                     [--lane NAME[+NAME...] --lane-envelope SEC:AMT,... [--lane-strength S] [--lane-prompt \"...\"]]... [--lane-isolation B [--lane-isolation-until SIGMA]] [--lane-average-until SIGMA] [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S]\n"
+                        "                     [--lane NAME[+NAME...] --lane-envelope SEC:AMT,... [--lane-strength S] [--lane-prompt \"...\"]]... [--lane-isolation B [--lane-isolation-until SIGMA]] [--lane-average-until SIGMA] [--duration SEC | --frames N] [--steps N] [--threads N] [--seed S] [--rng mt19937|torch-cuda [--rng-cuda-blocks N]]\n"
                         "                     [--dist-shift LogSNR|Flux|Full|None [--dist-shift-params p1,p2,p3,p4]] [--legacy-schedule] [--duration-padding SEC]\n"
                         "                     [--cfg-scale S [--negative-prompt \"...\"] [--cfg-rescale R] [--cfg-interval min,max] [--apg-scale A] [--cfg-norm-threshold T]] [--out song.wav]\n"
                         "                     continuation splice (with --init + --inpaint-start): [--no-splice] [--mask-overlap SEC] [--splice-xfade SEC] [--no-splice-gain-match]\n");
@@ -323,6 +326,8 @@ int main(int argc, char** argv) {
     params.steps             = steps;
     const uint64_t seed_resolved = sa3::pick_seed(seed);   // -1 => random
     params.seed              = seed_resolved;
+    params.rng               = rng;
+    params.rng_cuda_blocks   = rng_cuda_blocks;
     params.init_noise_level  = init_noise_level;
     params.inpaint_start     = inpaint_start;
     params.inpaint_end       = inpaint_end;

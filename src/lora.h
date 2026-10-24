@@ -22,6 +22,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -259,83 +260,163 @@ inline LoraStack apply_loras_graph(GgufModel& base, std::vector<LoraAdapter>& ad
     return LoraStack{};   // weights modified in place; nothing to keep
 }
 
+// One adapter in a host-side chain: its family and scale, and a reader for its factors that
+// returns false when the adapter does not carry the named tensor.
+struct LoraHostTerm {
+    std::string type;
+    int   rank = 0;
+    float alpha = 0.0f, strength = 1.0f;
+    std::function<bool(const std::string& name, std::vector<float>& dst)> read;
+};
+
+// W_eff of one target on the host, in place: w is row-major w[o*in+i] and each term composes
+// over the previous one's result, in order (all 8 adapter families):
+//   delta = B@A  (standard)  or  U@M_xs@V^T  (-xs);  V = W + (alpha/rank)*strength*delta;
+//   then a per-type post-transform (additive / dora-rows / dora-cols / bora). Spec: lora_spec_test.py.
+inline void lora_chain_host(std::vector<float>& w, int in, int out, const std::string& stem,
+                            const std::vector<LoraHostTerm>& terms) {
+    std::vector<float> A, B, U, Vm, M, mv, dl, Vb, mag, magc, inter, coln;
+    auto need = [](const LoraHostTerm& a, const std::string& n, std::vector<float>& dst) {
+        if (!a.read(n, dst)) throw std::runtime_error("[lora] missing tensor: " + n);
+    };
+    for (const LoraHostTerm& a : terms) {
+        if (a.strength == 0.0f) continue;                                 // identity
+        const bool xs = a.read(stem + ".M_xs", M);
+        if (!xs && !a.read(stem + ".lora_A", A)) continue;                // not targeted
+        const float sc = (a.alpha / a.rank) * a.strength;
+
+        dl.assign((size_t)out*in, 0.0f);                                  // delta[o*in + i]
+        if (xs) {                                                         // delta = U @ M_xs @ V^T
+            need(a, stem+".U", U); need(a, stem+".V", Vm);
+            const int rk = a.rank;
+            mv.assign((size_t)rk*in, 0.0f);                               // mv[a,i] = sum_b M[a,b]*V[i,b]
+            for (int aa = 0; aa < rk; aa++) for (int i = 0; i < in; i++) {
+                float s = 0; const float* Mr = &M[(size_t)aa*rk]; const float* Vi = &Vm[(size_t)i*rk];
+                for (int b = 0; b < rk; b++) s += Mr[b]*Vi[b]; mv[(size_t)aa*in+i] = s;
+            }
+            for (int o = 0; o < out; o++) { const float* Uo = &U[(size_t)o*rk]; float* dlo = &dl[(size_t)o*in];
+                for (int aa = 0; aa < rk; aa++) { const float u = Uo[aa]; const float* mva = &mv[(size_t)aa*in];
+                    for (int i = 0; i < in; i++) dlo[i] += u*mva[i]; } }
+        } else {                                                          // delta = B @ A
+            need(a, stem+".lora_B", B);
+            const int rk = a.rank;
+            for (int o = 0; o < out; o++) { const float* Bo = &B[(size_t)o*rk]; float* dlo = &dl[(size_t)o*in];
+                for (int r = 0; r < rk; r++) { const float b = Bo[r]; const float* Ar = &A[(size_t)r*in];
+                    for (int i = 0; i < in; i++) dlo[i] += b*Ar[i]; } }
+        }
+        Vb.resize((size_t)out*in);
+        for (size_t k = 0; k < Vb.size(); k++) Vb[k] = w[k] + sc*dl[k];   // V = W + sc*delta
+
+        const std::string& ty = a.type;
+        if (ty == "lora" || ty == "lora-xs") {                            // additive
+            w.swap(Vb);
+        } else if (ty == "dora-rows" || ty == "dora-rows-xs") {           // row norm + magnitude[out]
+            need(a, stem+".magnitude", mag);
+            for (int o = 0; o < out; o++) { const float* Vo = &Vb[(size_t)o*in]; float* wo = &w[(size_t)o*in];
+                double s = 0; for (int i = 0; i < in; i++) s += (double)Vo[i]*Vo[i];
+                const float inv = mag[o]/(float)(std::sqrt(s)+1e-12);
+                for (int i = 0; i < in; i++) wo[i] = Vo[i]*inv; }
+        } else if (ty == "dora-cols" || ty == "dora-cols-xs") {           // col norm + magnitude[in]
+            need(a, stem+".magnitude", mag);
+            coln.assign(in, 0.0);
+            for (int o = 0; o < out; o++) for (int i = 0; i < in; i++) coln[i] += Vb[(size_t)o*in+i]*Vb[(size_t)o*in+i];
+            for (int i = 0; i < in; i++) coln[i] = std::sqrt(coln[i]) + 1e-12f;
+            for (int o = 0; o < out; o++) for (int i = 0; i < in; i++) w[(size_t)o*in+i] = mag[i]*Vb[(size_t)o*in+i]/coln[i];
+        } else if (ty == "bora" || ty == "bora-xs") {                     // row-norm*mag_r, then col-norm*mag_c
+            need(a, stem+".magnitude_r", mag); need(a, stem+".magnitude_c", magc);
+            inter.resize((size_t)out*in);
+            for (int o = 0; o < out; o++) { const float* Vo = &Vb[(size_t)o*in];
+                double s = 0; for (int i = 0; i < in; i++) s += (double)Vo[i]*Vo[i];
+                const float invr = mag[o]/(float)(std::sqrt(s)+1e-12);
+                for (int i = 0; i < in; i++) inter[(size_t)o*in+i] = Vo[i]*invr; }
+            coln.assign(in, 0.0);
+            for (int o = 0; o < out; o++) for (int i = 0; i < in; i++) coln[i] += inter[(size_t)o*in+i]*inter[(size_t)o*in+i];
+            for (int i = 0; i < in; i++) coln[i] = std::sqrt(coln[i]) + 1e-12f;
+            for (int o = 0; o < out; o++) for (int i = 0; i < in; i++) w[(size_t)o*in+i] = magc[i]*inter[(size_t)o*in+i]/coln[i];
+        } else {
+            throw std::runtime_error("[lora] unknown adapter_type '" + ty + "'");
+        }
+    }
+}
+
+inline std::vector<LoraHostTerm> lora_host_terms(std::vector<LoraAdapter>& adapters) {
+    std::vector<LoraHostTerm> terms;
+    for (auto& a : adapters)
+        terms.push_back({a.type, a.rank, a.alpha, a.strength,
+                         [&a](const std::string& n, std::vector<float>& dst) {
+                             if (!a.gguf.has(n)) return false;
+                             read_to_f32(a.gguf.get(n), dst);
+                             return true;
+                         }});
+    return terms;
+}
+
 // Host fallback: compute W_eff per target with plain loops (all 8 adapter families), in place.
 inline LoraStack apply_loras_host(GgufModel& base, std::vector<LoraAdapter>& adapters,
                                   const std::vector<std::string>& targets) {
-    // compute W_eff per target (host), chaining adapters in order. Buffers reused across targets.
-    // W is the running effective weight, row-major w[o*in+i]. For each adapter:
-    //   delta = B@A  (standard)  or  U@M_xs@V^T  (-xs);  V = W + (alpha/rank)*strength*delta;
-    //   then a per-type post-transform (additive / dora-rows / dora-cols / bora). Spec: lora_spec_test.py.
-    std::vector<float> w, A, B, U, Vm, M, mv, dl, Vb, mag, magc, inter, coln;
-    auto getv = [&](GgufModel& g, const std::string& n, std::vector<float>& dst){ read_to_f32(g.get(n), dst); };
-    for (size_t ti = 0; ti < targets.size(); ti++) {
-        const std::string& wname = targets[ti];
-        std::string stem = wname.substr(0, wname.size()-7);
+    const std::vector<LoraHostTerm> terms = lora_host_terms(adapters);
+    std::vector<float> w;
+    for (const std::string& wname : targets) {
+        const std::string stem = wname.substr(0, wname.size()-7);
         ggml_tensor* W0 = base.tensors[wname];
-        const int in = (int)W0->ne[0], out = (int)W0->ne[1];
         read_to_f32(W0, w);                                                  // w[o*in + i] (handles f16 base)
-
-        for (auto& a : adapters) {
-            const bool xs  = a.gguf.has(stem + ".M_xs");
-            const bool std_= a.gguf.has(stem + ".lora_A");
-            if ((!xs && !std_) || a.strength == 0.0f) continue;               // not targeted / identity
-            const float sc = (a.alpha / a.rank) * a.strength;
-
-            dl.assign((size_t)out*in, 0.0f);                                  // delta[o*in + i]
-            if (xs) {                                                         // delta = U @ M_xs @ V^T
-                getv(a.gguf, stem+".U", U); getv(a.gguf, stem+".V", Vm); getv(a.gguf, stem+".M_xs", M);
-                const int rk = a.rank;
-                mv.assign((size_t)rk*in, 0.0f);                               // mv[a,i] = sum_b M[a,b]*V[i,b]
-                for (int aa = 0; aa < rk; aa++) for (int i = 0; i < in; i++) {
-                    float s = 0; const float* Mr = &M[(size_t)aa*rk]; const float* Vi = &Vm[(size_t)i*rk];
-                    for (int b = 0; b < rk; b++) s += Mr[b]*Vi[b]; mv[(size_t)aa*in+i] = s;
-                }
-                for (int o = 0; o < out; o++) { const float* Uo = &U[(size_t)o*rk]; float* dlo = &dl[(size_t)o*in];
-                    for (int aa = 0; aa < rk; aa++) { const float u = Uo[aa]; const float* mva = &mv[(size_t)aa*in];
-                        for (int i = 0; i < in; i++) dlo[i] += u*mva[i]; } }
-            } else {                                                          // delta = B @ A
-                getv(a.gguf, stem+".lora_A", A); getv(a.gguf, stem+".lora_B", B);
-                const int rk = a.rank;
-                for (int o = 0; o < out; o++) { const float* Bo = &B[(size_t)o*rk]; float* dlo = &dl[(size_t)o*in];
-                    for (int r = 0; r < rk; r++) { const float b = Bo[r]; const float* Ar = &A[(size_t)r*in];
-                        for (int i = 0; i < in; i++) dlo[i] += b*Ar[i]; } }
-            }
-            Vb.resize((size_t)out*in);
-            for (size_t k = 0; k < Vb.size(); k++) Vb[k] = w[k] + sc*dl[k];   // V = W + sc*delta
-
-            const std::string& ty = a.type;
-            if (ty == "lora" || ty == "lora-xs") {                            // additive
-                w.swap(Vb);
-            } else if (ty == "dora-rows" || ty == "dora-rows-xs") {           // row norm + magnitude[out]
-                getv(a.gguf, stem+".magnitude", mag);
-                for (int o = 0; o < out; o++) { const float* Vo = &Vb[(size_t)o*in]; float* wo = &w[(size_t)o*in];
-                    double s = 0; for (int i = 0; i < in; i++) s += (double)Vo[i]*Vo[i];
-                    const float inv = mag[o]/(float)(std::sqrt(s)+1e-12);
-                    for (int i = 0; i < in; i++) wo[i] = Vo[i]*inv; }
-            } else if (ty == "dora-cols" || ty == "dora-cols-xs") {           // col norm + magnitude[in]
-                getv(a.gguf, stem+".magnitude", mag);
-                coln.assign(in, 0.0);
-                for (int o = 0; o < out; o++) for (int i = 0; i < in; i++) coln[i] += Vb[(size_t)o*in+i]*Vb[(size_t)o*in+i];
-                for (int i = 0; i < in; i++) coln[i] = std::sqrt(coln[i]) + 1e-12f;
-                for (int o = 0; o < out; o++) for (int i = 0; i < in; i++) w[(size_t)o*in+i] = mag[i]*Vb[(size_t)o*in+i]/coln[i];
-            } else if (ty == "bora" || ty == "bora-xs") {                     // row-norm*mag_r, then col-norm*mag_c
-                getv(a.gguf, stem+".magnitude_r", mag); getv(a.gguf, stem+".magnitude_c", magc);
-                inter.resize((size_t)out*in);
-                for (int o = 0; o < out; o++) { const float* Vo = &Vb[(size_t)o*in];
-                    double s = 0; for (int i = 0; i < in; i++) s += (double)Vo[i]*Vo[i];
-                    const float invr = mag[o]/(float)(std::sqrt(s)+1e-12);
-                    for (int i = 0; i < in; i++) inter[(size_t)o*in+i] = Vo[i]*invr; }
-                coln.assign(in, 0.0);
-                for (int o = 0; o < out; o++) for (int i = 0; i < in; i++) coln[i] += inter[(size_t)o*in+i]*inter[(size_t)o*in+i];
-                for (int i = 0; i < in; i++) coln[i] = std::sqrt(coln[i]) + 1e-12f;
-                for (int o = 0; o < out; o++) for (int i = 0; i < in; i++) w[(size_t)o*in+i] = magc[i]*inter[(size_t)o*in+i]/coln[i];
-            } else {
-                throw std::runtime_error("[lora] unknown adapter_type '" + ty + "'");
-            }
-        }
+        lora_chain_host(w, (int)W0->ne[0], (int)W0->ne[1], stem, terms);
         write_from_f32(W0, w);                                               // write W_eff back over W0 (in place)
     }
     return LoraStack{};
+}
+
+// Adapt a weight that lives outside the adapters' own base gguf -- the seconds_total
+// conditioner's projection "te.secs", which stable_audio_3 adapts alongside the DiT -- straight
+// from the adapter files, reading only that target's tensors. w is row-major [out, in]. Returns
+// whether any file carried the target; files converted before such targets were kept carry none
+// and leave w as it was.
+inline bool lora_apply_host_from_files(const std::vector<std::pair<std::string, float>>& files,
+                                       const std::string& stem, std::vector<float>& w, int in, int out) {
+    std::vector<gguf_context*> open;
+    auto close_all = [&]() { for (gguf_context* g : open) gguf_free(g); };
+    std::vector<LoraHostTerm> terms;
+    try {
+        for (const auto& fs : files) {
+            gguf_init_params gp = { /*no_alloc=*/true, /*ctx=*/nullptr };
+            gguf_context* g = gguf_init_from_file(fs.first.c_str(), gp);
+            if (!g) throw std::runtime_error("[lora] failed to open " + fs.first);
+            open.push_back(g);
+            if (gguf_find_tensor(g, (stem + ".lora_A").c_str()) < 0 &&
+                gguf_find_tensor(g, (stem + ".M_xs").c_str()) < 0) continue;
+            const int ti = gguf_find_key(g, "lora.adapter_type");
+            const int ri = gguf_find_key(g, "lora.rank"), ai = gguf_find_key(g, "lora.alpha");
+            if (ri < 0 || ai < 0) throw std::runtime_error("[lora] " + fs.first + " has no lora.rank/lora.alpha");
+            const std::string path = fs.first;
+            LoraHostTerm t{ti < 0 ? "lora" : gguf_get_val_str(g, ti), (int)gguf_get_val_u32(g, ri),
+                           gguf_get_val_f32(g, ai), fs.second,
+                           [g, path](const std::string& n, std::vector<float>& dst) {
+                               const int64_t id = gguf_find_tensor(g, n.c_str());
+                               if (id < 0) return false;
+                               if (gguf_get_tensor_type(g, id) != GGML_TYPE_F32)
+                                   throw std::runtime_error("[lora] " + n + " in " + path + " is not f32");
+                               const size_t bytes = gguf_get_tensor_size(g, id);
+                               dst.resize(bytes / sizeof(float));
+                               std::ifstream f(std::filesystem::path(path), std::ios::binary);
+                               f.seekg((std::streamoff)(gguf_get_data_offset(g) + gguf_get_tensor_offset(g, id)));
+                               f.read(reinterpret_cast<char*>(dst.data()), (std::streamsize)bytes);
+                               if (!f) throw std::runtime_error("[lora] short read of " + n + " in " + path);
+                               return true;
+                           }};
+            if (t.type == "dora") {                  // legacy name: the magnitude's length says which
+                std::vector<float> m;
+                const bool cols = t.read(stem + ".magnitude", m) && (int)m.size() == in && in != out;
+                t.type = cols ? "dora-cols" : "dora-rows";
+            }
+            terms.push_back(std::move(t));
+        }
+        if (!terms.empty()) lora_chain_host(w, in, out, stem, terms);
+    } catch (...) {
+        close_all();
+        throw;
+    }
+    close_all();
+    return !terms.empty();
 }
 
 // An adapter targets `wname` only if its factors have the base weight's shape.

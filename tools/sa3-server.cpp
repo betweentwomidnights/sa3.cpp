@@ -1,6 +1,6 @@
 // sa3-server: a small HTTP server over the shared sa3 Pipeline — a PROOF OF CONCEPT that mirrors
 // gary4local's async job model, so a gary4juce-style client can drive it as a drop-in (SA3 on :8006).
-//   POST /generate {prompt, duration, steps, seed, negative_prompt, cfg_*, dist_shift,
+//   POST /generate {prompt, duration, steps, seed, rng, rng_cuda_blocks, negative_prompt, cfg_*, dist_shift,
 //                   duration_padding_sec, loras[], lora_envelope[[sec,amount]], lora_envelope_mode,
 //                   lora_lanes[{loras[], envelope[[sec,amount]], prompt}], lane_isolation(_until),
 //                   lane_average_until,
@@ -1015,6 +1015,12 @@ bool parse_generate_request(yyjson_val* root, const std::string& adir,
         ? yyjson_get_uint(seed_value)
         : sa3::pick_seed(seed_value && yyjson_is_sint(seed_value) ? yyjson_get_sint(seed_value) : -1);
     params.seed             = seed_resolved;
+    params.rng              = S("rng", "mt19937");             // "torch-cuda": stable_audio_3's noise
+    if (params.rng != "mt19937" && params.rng != "torch-cuda") {
+        perr = "rng must be mt19937 or torch-cuda";
+        return false;
+    }
+    params.rng_cuda_blocks  = (uint32_t)std::max(0, I("rng_cuda_blocks", 0));
     params.keep_models      = B("keep_models", false);        // FRUGAL default
     params.init_noise_level = (float)D("init_noise_level", 0.85);
     params.legacy_schedule  = B("legacy_schedule", false);

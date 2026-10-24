@@ -81,6 +81,7 @@ def build_inverse():
     for i in range(64):                      # generous; medium is 24
         for rest in per_layer:
             record(f"{TR}layers.{i}.{rest}")
+    inv["te.secs"] = "conditioners.seconds_total.embedder.embedding.1"   # convert_lora.SECONDS_*
     return inv
 
 

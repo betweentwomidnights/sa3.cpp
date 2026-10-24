@@ -24,10 +24,17 @@ PARAM_RE = re.compile(r"^(?P<mod>.+)\.parametrizations\.weight\.0\.(?P<kind>lora
                       r"magnitude_r|magnitude_c|U|V|M_xs)$")
 
 
+# stable_audio_3 attaches DiT adapters to model.conditioner too; the seconds_total projection is the
+# one conditioner weight sa3.cpp computes itself (from the conditioner gguf's te.secs), so it is kept.
+SECONDS_MODULE, SECONDS_BASE = "conditioners.seconds_total.embedder.embedding.1", "te.secs"
+
+
 def base_name(module):
-    """LoRA module name -> base DiT weight name (without .weight), or None if not a DiT weight."""
+    """LoRA module name -> base weight name (without .weight), or None if sa3.cpp has no such weight."""
+    if module == SECONDS_MODULE:
+        return SECONDS_BASE
     if not module.startswith("model."):
-        return None                                  # e.g. conditioners.* — not in the DiT gguf
+        return None                                  # other conditioners.* (T5Gemma) — not adapted
     full = "model.model." + module[len("model."):] + ".weight"
     n = dit_rename(full)
     return n[:-len(".weight")] if n and n.endswith(".weight") else None
@@ -69,7 +76,7 @@ def main():
     w.add_uint32("lora.n_targets", n_mapped)
 
     w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
-    print(f"wrote {out}  ({n_mapped} targets mapped, {n_skipped} non-DiT skipped) "
+    print(f"wrote {out}  ({n_mapped} targets mapped, {n_skipped} unmapped skipped) "
           f"type={cfg.get('adapter_type')} rank={cfg['rank']} alpha={cfg['alpha']}")
     print(f"  e.g. {mapped_names[0]} .. {mapped_names[-1]}")
 

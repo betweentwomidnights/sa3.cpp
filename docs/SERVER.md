@@ -108,6 +108,8 @@ completed audio once and immediately remove that job from server memory. complet
   "duration": 12,
   "steps": 8,
   "seed": -1,                      // default: random; use any non-negative value to reproduce a run
+  "rng": "mt19937",                // "torch-cuda": the noise stable_audio_3 draws on a CUDA GPU for this seed
+  "rng_cuda_blocks": 0,            // torch-cuda: that GPU's grid cap (see "seeds" below); 0 = uncapped
   "loras": [{"name": "kev", "strength": 1.0}, {"name": "keygen", "strength": 0.8}],
   "keep_models": false,          // default: frugal (free after each gen, reload next) — vst/daw-safe
 
@@ -279,6 +281,15 @@ and resampling remains native. HTTP seeds are parsed without narrowing them to
 a signed 32-bit integer; non-negative integer seeds are retained for recall,
 and negative/omitted seeds still request a random seed. The native RNG remains
 32-bit internally, as documented in `rng.h`.
+
+`"rng": "torch-cuda"` replaces the native RNG with the draws `torch.manual_seed(seed)`
+gives stable_audio_3 on a CUDA GPU (Philox, as PyTorch's grid-stride normal kernel lays it
+out), in its order: the initial latent, the fixed-prefix noise, then one per step. The same
+seed then gives the same noise as the PyTorch service, which is what A/B listening and
+`tools/compare_remote_parity.py` need. Past `256 * cap` latent values (about 20 s of
+canvas on an RTX 5070 Laptop) the layout depends on the GPU, so set `rng_cuda_blocks` to
+that GPU's `multi_processor_count * (max_threads_per_multi_processor // 256)`;
+`tools/dump_remote_parity.py` records it in its manifest.
 
 `/health.capabilities` advertises `conditioning_duration`, `request_splice` and
 `fixed_prefix`. Hosts should check these before using the controls: older

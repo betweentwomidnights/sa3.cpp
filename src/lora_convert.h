@@ -86,9 +86,12 @@ inline std::string dit_rename(const std::string& k) {
     return "";
 }
 
-// LoRA module name -> base DiT weight stem (without ".weight"), or "" if not a DiT weight
-// (e.g. conditioners.* — not in the DiT gguf). Mirrors convert_lora.py base_name().
+// LoRA module name -> base weight stem (without ".weight"), or "" if sa3.cpp has no such weight.
+// stable_audio_3 attaches DiT adapters to model.conditioner too: the seconds_total projection is
+// kept as "te.secs" (the pipeline adapts it where it computes it); the T5Gemma conditioner is not
+// adapted. Mirrors convert_lora.py base_name().
 inline std::string lora_base_name(const std::string& module) {
+    if (module == "conditioners.seconds_total.embedder.embedding.1") return "te.secs";
     static const std::string M = "model.";
     if (module.rfind(M, 0) != 0) return "";
     const std::string full = "model.model." + module.substr(M.size()) + ".weight";
@@ -252,7 +255,7 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
             std::string module, kind;
             if (!lora_parse_key(kname, module, kind)) continue;   // unrecognized key -> skip (like the python)
             const std::string base = ae ? ae_lora_base_name(module, target) : lora_base_name(module);
-            if (base.empty()) continue;                            // non-DiT (conditioners.*) -> skip
+            if (base.empty()) continue;                            // no sa3.cpp weight (T5Gemma conditioner) -> skip
             yyjson_val* t = yyjson_obj_iter_get_val(key);
             yyjson_val* vd = yyjson_obj_get(t, "dtype");
             const std::string dtype = vd ? yyjson_get_str(vd) : "?";
