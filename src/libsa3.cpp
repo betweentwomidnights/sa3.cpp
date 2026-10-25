@@ -763,7 +763,7 @@ sa3_status_v1 v1_generate_body(sa3_context* context,
             const std::string name = adapter_names[i];
             std::string path = std::filesystem::exists(name)
                              ? name
-                             : sa3::resolve_one(context->adapters_dir, "lora-" + name + "-", ".gguf");
+                             : sa3::resolve_lora_file(context->adapters_dir, name);
             if (path.empty())
                 return fail_v1(error, SA3_STATUS_IO_ERROR_V1, "unknown adapter '" + name + "'");
             p.loras.push_back({path, adapter_strengths[i]});

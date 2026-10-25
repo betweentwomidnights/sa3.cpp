@@ -36,6 +36,7 @@
 #include "audio_post.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <functional>
 #include <limits>
@@ -141,6 +142,16 @@ inline Text2MusicDuration text2music_duration(int target_n_samp, int aligned_fra
         return { (int)std::max<int64_t>(1, frames), (float)target_n_samp / 44100.0f };
     }
     return { aligned_frames, (float)aligned_frames * (float)samples_per_frame / 44100.0f };
+}
+
+// The text2music latent canvas, sized as stable_audio_3's _adapt_sample_size does:
+// int((seconds_total + padding) * sr) samples, rounded up to whole latent frames and then to the
+// encoder's chunk alignment of 2 frames (SAME-S needs an even length anyway). torch.randn draws
+// exactly this shape, so --rng torch-cuda reproduces the reference's noise only on this canvas.
+inline int text2music_canvas_frames(float seconds_total, float padding_sec, int samples_per_frame) {
+    const int64_t samples = (int64_t)(((double)seconds_total + (double)padding_sec) * 44100.0);
+    const int64_t frames = (samples + samples_per_frame - 1) / samples_per_frame;
+    return (int)((frames + 1) / 2 * 2);
 }
 
 struct TransformDuration {
@@ -276,6 +287,41 @@ inline void profile_log(bool enabled, const char* label, double seconds) {
     if (enabled) fprintf(stderr, "[sa3-profile] %-18s %8.3f ms\n", label, seconds * 1000.0);
 }
 
+// Stage-by-stage comparison against stable_audio_3 (tools/compare_remote_parity.py), as raw f32
+// with latents time-major [T, io]. SA3_PARITY_DUMP=<dir> writes cross.f32 / global.f32 (DiT
+// conditioning), noise0.f32 (the initial latent), sigmas.f32, step<i>_x.f32 / step<i>_v.f32 (the
+// state the DiT sees at step i and the velocity it returns, after CFG) and latent.f32 (what the
+// decoder gets). SA3_PARITY_FEED=<dir> replaces any of cross, global, step<i>_x and latent with
+// the same-named file where one exists, so each stage can be run on the reference's own inputs.
+struct ParityIo {
+    std::string dump, feed;
+    ParityIo() {
+        if (const char* d = getenv("SA3_PARITY_DUMP")) dump = d;
+        if (const char* f = getenv("SA3_PARITY_FEED")) feed = f;
+    }
+    void put(const std::string& name, const float* p, size_t n) const {
+        if (dump.empty()) return;
+        FILE* f = fopen((dump + "/" + name).c_str(), "wb");
+        if (!f) throw std::runtime_error("SA3_PARITY_DUMP: cannot write " + dump + "/" + name);
+        fwrite(p, sizeof(float), n, f);
+        fclose(f);
+    }
+    bool get(const std::string& name, float* p, size_t n) const {
+        if (feed.empty()) return false;
+        FILE* f = fopen((feed + "/" + name).c_str(), "rb");
+        if (!f) return false;
+        fseek(f, 0, SEEK_END);
+        const long bytes = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        const bool ok = bytes == (long)(n * sizeof(float)) && fread(p, sizeof(float), n, f) == n;
+        fclose(f);
+        if (!ok) throw std::runtime_error("SA3_PARITY_FEED: " + name + " holds " + std::to_string(bytes / 4) +
+                                         " floats, expected " + std::to_string(n));
+        printf("parity: fed %s\n", name.c_str());
+        return true;
+    }
+};
+
 inline std::vector<float> tensor_to_host(const GgufModel& M, const std::string& name) {
     ggml_tensor* t = M.get(name);
     std::vector<float> b(ggml_nelements(t));
@@ -377,6 +423,44 @@ inline std::string resolve_one(const std::string& dir, const std::string& prefix
         }
     }
     return found;
+}
+
+// A trailing token of an adapter file name that is not part of the adapter's name: an encoding,
+// "lora", or a version (v2, v3...). lora-koan-v2-f32.gguf is "koan"; lora-koan-27-2-f32.gguf is
+// "koan-27-2". sa3-server's /loras names files by this rule.
+inline bool lora_name_suffix_token(const std::string& token) {
+    std::string t;
+    for (char ch : token) t += (char)std::tolower((unsigned char)ch);
+    static const char* const tags[] = {"lora", "f32", "f16", "q8_0", "q6_k", "q5_k_m", "q4_k_m"};
+    for (const char* tag : tags) if (t == tag) return true;
+    return t.size() >= 2 && t[0] == 'v' && std::isdigit((unsigned char)t[1]);
+}
+
+// The adapter file a bare --lora / loras[] name means: the first lora-<name>[-<suffix>...].gguf
+// whose every suffix token is a lora_name_suffix_token, which is the file /loras lists under that
+// name. Only when no file is named exactly that does it fall back to the first lora-<name>-*.gguf.
+// A plain prefix match let "koan" pick lora-koan-27-2-f32.gguf, which sorts first.
+inline std::string resolve_lora_file(const std::string& dir, const std::string& name) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (name.empty() || !fs::is_directory(dir, ec)) return "";
+    const std::string prefix = "lora-" + name, ext = ".gguf";
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        const std::string n = e.path().filename().string();
+        if (n.size() < prefix.size() + ext.size() || n.compare(0, prefix.size(), prefix) != 0 ||
+            n.compare(n.size() - ext.size(), ext.size(), ext) != 0) continue;
+        std::string rest = n.substr(prefix.size(), n.size() - prefix.size() - ext.size());
+        if (!rest.empty() && rest[0] != '-') continue;            // lora-koanx-... is another name
+        bool exact = true;
+        for (size_t i = 0; exact && i < rest.size();) {
+            const size_t j = rest.find('-', i + 1);
+            const std::string tok = rest.substr(i + 1, (j == std::string::npos ? rest.size() : j) - i - 1);
+            exact = lora_name_suffix_token(tok);
+            i = j == std::string::npos ? rest.size() : j;
+        }
+        if (exact) return e.path().string();
+    }
+    return resolve_one(dir, prefix + "-", ext);
 }
 
 // The five gguf paths a generation needs. Resolve by the naming convention (--model / download_models.py)
@@ -655,12 +739,25 @@ inline void throw_if_cancelled(const std::function<bool()>& should_cancel) {
         throw std::runtime_error("generation cancelled");
 }
 
+// torch-cuda noise's default grid cap: the DGX Spark (GB10, 48 SMs x 6 blocks) that serves
+// gary4juce's remote SA3. Found from that backend's own output (docs/TORCH_PARITY.md).
+inline constexpr uint32_t kDefaultRngCudaBlocks = 288;
+
 // One generation request. Defaults reproduce the CLI's text2music defaults.
 struct GenParams {
     std::string prompt;
     int      frames = 128;             // output length in latent frames (EVEN for SAME-S); 128 ~= 12 s
     int      steps  = 8;
     uint64_t seed   = 0;
+    // Noise source. "torch-cuda" (the default) draws what stable_audio_3 draws on a CUDA GPU for the
+    // same seed (sa3::TorchCudaRandn), in the same order: the initial latent, the fixed-prefix noise,
+    // then one randn_like per step. It is computed on the host, so every backend gets the same
+    // noise. rng_cuda_blocks is the matched GPU's grid cap, which only matters once a latent holds
+    // more than 256 * cap values (0 = uncapped); the default is the DGX Spark serving gary4juce's
+    // remote SA3, so a local run of a seed reproduces that backend's clip. "mt19937" is sa3.cpp's
+    // own older noise.
+    std::string rng = "torch-cuda";
+    uint32_t rng_cuda_blocks = kDefaultRngCudaBlocks;
 
     // audio2audio / inpaint (optional). init_audio is planar [init_n_samp, init_n_ch] at any rate —
     // generate() resamples to the model's 44.1 kHz if init_sample_rate differs (the caller just passes
@@ -1024,6 +1121,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         params.conditioning_seconds_total > (double)std::numeric_limits<int>::max() / 44100.0 ||
         !std::isfinite(params.inpaint_padding_sec) || params.inpaint_padding_sec < 0.0f)
         throw std::invalid_argument("conditioning_seconds_total and inpaint_padding_sec must be finite and non-negative");
+    if (params.rng != "mt19937" && params.rng != "torch-cuda")
+        throw std::invalid_argument("rng must be mt19937 or torch-cuda");
     if (params.fixed_prefix && (!has_init || !inpaint || !std::isfinite(inpaint_start) || inpaint_start < 0.0f))
         throw std::invalid_argument("fixed_prefix requires init audio and a non-negative inpaint_start");
     auto release_all_for_frugal_cancel = [&]() {
@@ -1178,9 +1277,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         : resolved_schedule_frames;
     int pad_frames = 0;
     if (!has_init && duration_padding_sec > 0.0f) {
-        const int mult = sc.chunk ? 2 : 1;                      // SAME-S needs an even latent length
-        int pf = (int)(duration_padding_sec * 44100.0f / (float)samples_per_frame + 0.5f);
-        pad_frames = ((pf + mult - 1) / mult) * mult;
+        const int canvas = sa3::text2music_canvas_frames(conditioned_secs, duration_padding_sec, samples_per_frame);
+        pad_frames = std::max(0, canvas - eff_frames);
     }
     const int T = eff_frames + pad_frames;
     const int cond_dim = tc.dim, ctx_len = max_len + 1;
@@ -1268,6 +1366,16 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     std::vector<float> ef; expo_features(snorm, ef, sdim, 0.5f, 10000.0f);
     std::vector<float> sw = tensor_to_host(CD(), "te.secs.weight");
     std::vector<float> sb = tensor_to_host(CD(), "te.secs.bias");
+    {
+        // stable_audio_3 adapts the seconds_total conditioner's projection along with the DiT
+        // (koan carries a DoRA on it), and that projection is computed here. The request's DiT
+        // adapters apply at their strengths; lane adapters stay on the DiT.
+        std::vector<std::pair<std::string,float>> dit_files;
+        for (auto& ls : params.loras)
+            if (sa3::lora_target_of(ls.first.c_str()) == "dit") dit_files.push_back(ls);
+        if (sa3::lora_apply_host_from_files(dit_files, "te.secs", sw, sdim, cond_dim))
+            printf("lora: seconds_total conditioner adapted\n");
+    }
     std::vector<float> secs_embed(cond_dim);
     for (int d = 0; d < cond_dim; d++) {
         float acc = sb[d];
@@ -1312,6 +1420,11 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         FILE* f2 = fopen((std::string(dc_dir)+"/gen_global.f32").c_str(), "wb");
         fwrite(globb.data(), sizeof(float), globb.size(), f2); fclose(f2);
     }
+    const ParityIo parity;
+    parity.get("cross.f32", crossb.data(), crossb.size());
+    parity.get("global.f32", globb.data(), globb.size());
+    parity.put("cross.f32", crossb.data(), crossb.size());
+    parity.put("global.f32", globb.data(), globb.size());
     profile_log(prof, "conditioning", wall_time_s() - t0);
 
     // ---------- schedule (SA3 distribution shift; default = LogSNR rate=0) ----------
@@ -1526,17 +1639,35 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     }
 
     // ---------- noise (audio2audio: noise = init*(1-sigma_max) + noise*sigma_max) ----------
-    sa3::Rng rng(seed);
-    std::vector<float> host_x(N); rng.fill_normal(host_x.data(), N);
-    std::vector<float> stepnoise((size_t)steps*N); rng.fill_normal(stepnoise.data(), stepnoise.size());
+    std::vector<float> host_x(N);
+    std::vector<float> stepnoise((size_t)steps*N);
     std::vector<float> prefix_noise((size_t)prefix_tokens * dc.io);
+    if (params.rng == "torch-cuda") {
+        // torch draws [io, T] in C order; the latent here is time-major [T, io]
+        sa3::TorchCudaRandn trng(seed, params.rng_cuda_blocks);
+        std::vector<float> cm(N);
+        auto draw = [&](float* dst, int frames) {
+            trng.fill(cm.data(), N);
+            for (int t = 0; t < frames; t++)
+                for (int c = 0; c < dc.io; c++) dst[(size_t)t*dc.io + c] = cm[(size_t)c*T + t];
+        };
+        draw(host_x.data(), T);
+        if (params.fixed_prefix) draw(prefix_noise.data(), prefix_tokens);   // randn_like(prefix data)
+        for (int i = 0; i < steps; i++) draw(stepnoise.data() + (size_t)i*N, T);
+    } else {
+        sa3::Rng rng(seed);
+        rng.fill_normal(host_x.data(), N);
+        rng.fill_normal(stepnoise.data(), stepnoise.size());
+        if (params.fixed_prefix) rng.fill_normal(prefix_noise.data(), prefix_noise.size());
+    }
     if (params.fixed_prefix) {
-        rng.fill_normal(prefix_noise.data(), prefix_noise.size());
         sa3::sampling::rf_impose_prefix(host_x.data(), z_init.data(), prefix_noise.data(),
                                         prefix_noise.size(), sigmas.front());
     }
     if (has_init && !inpaint)
         for (int j = 0; j < N; j++) host_x[j] = z_init[j]*(1.0f - sigma_max) + host_x[j]*sigma_max;
+    parity.put("noise0.f32", host_x.data(), host_x.size());
+    parity.put("sigmas.f32", sigmas.data(), sigmas.size());
 
     // ---------- inpaint: build local_add_cond = [mask(1) | z_init*mask(256)] ----------
     std::vector<float> localb;
@@ -1551,12 +1682,15 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         }
         printf("inpaint: regenerating frames [%d,%d) of %d (%.2f-%.2fs), keeping the rest\n",
                f0, f1, T, f0 * (float)ds / 44100.0f, f1 * (float)ds / 44100.0f);
-    } else if (dc.local_dim > 0 && getenv("SA3_LOCAL_ZEROS")) {
-        // Diagnostic (SA3_LOCAL_ZEROS=1): run the local-cond block with an all-zero
-        // [mask | masked_input] like the reference trainer/sampler do for plain generation,
-        // instead of skipping the block. Mask 0 = "generate everything".
+    } else if (dc.local_dim > 0 && !(getenv("SA3_LOCAL_ZEROS") && !strcmp(getenv("SA3_LOCAL_ZEROS"), "0"))) {
+        // Run the local-cond block on an all-zero [mask | masked_input] (mask 0 = "generate
+        // everything"), as stable_audio_3's generate() always does when nothing is inpainted. Zero
+        // in is not zero out: each block's MLP still adds W2·silu(b1) + b2, and an adapter's DoRA
+        // on those layers, to every frame. Skipping the block took the DiT off the distribution
+        // it was trained on: per-step velocity against stable_audio_3 was 8-12% off on the base
+        // model and with koan, 1.5-5% with it (docs/TORCH_PARITY.md). SA3_LOCAL_ZEROS=0 skips it,
+        // for A/B against older output.
         localb.assign((size_t)dc.local_dim * T, 0.0f);
-        printf("local-cond: feeding zeros (SA3_LOCAL_ZEROS)\n");
     }
 
     // Free T5 (and AE if it was loaded for init audio) before DiT sampling.
@@ -1831,6 +1965,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         if (local) ggml_backend_tensor_set(local, localb.data(), 0, localb.size()*sizeof(float));
         set_env();
         set_lanes(false);
+        parity.get("step" + std::to_string(i) + "_x.f32", host_x.data(), host_x.size());
         ggml_backend_tensor_set(x_in,  host_x.data(), 0, N*sizeof(float));
         expo_features(sigmas[i], tf, dc.time_dim, dc.time_min_freq, dc.time_max_freq);
         ggml_backend_tensor_set(tfeat, tf.data(), 0, tf.size()*sizeof(float));
@@ -1866,6 +2001,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
                              cfg_scale, apg_scale, cfg_rescale, cfg_norm_threshold);
             v_use = vcfg.data();
         }
+        parity.put("step" + std::to_string(i) + "_x.f32", host_x.data(), host_x.size());
+        parity.put("step" + std::to_string(i) + "_v.f32", v_use, (size_t)N);
         sa3::sampling::rf_pingpong_step(host_x.data(), v_use,
                                         stepnoise.data() + (size_t)i*N, (size_t)N,
                                         tcur, tnext);
@@ -1899,6 +2036,8 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     ensure_ae_loras(AE);
     throw_if_cancelled(params.should_cancel);
 
+    parity.get("latent.f32", host_x.data(), host_x.size());
+    parity.put("latent.f32", host_x.data(), host_x.size());
     LoudnessMeta loudness_meta = make_loudness_meta(params.loudness);
     apply_latent_loudness(host_x, params.loudness, loudness_meta);
     if (params.should_cancel && params.should_cancel())
