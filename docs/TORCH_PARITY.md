@@ -6,12 +6,14 @@ a time with identical inputs.
 
 ## Same seed, same noise
 
-`--rng torch-cuda` (CLI) or `"rng": "torch-cuda"` (server) draws what `torch.manual_seed(seed)`
-gives stable_audio_3 on a CUDA GPU, in its order: `torch.randn([1, 256, T])` for the initial
-latent, then one `randn_like` per ping-pong step. PyTorch's normal kernel is a grid-stride
-loop, so once a canvas holds more than `256 * cap` values (about 20 s on an RTX 5070 Laptop)
-the layout depends on the GPU: pass `--rng-cuda-blocks` with that GPU's
-`multi_processor_count * (max_threads_per_multi_processor // 256)`. The text2music canvas is
+The default noise, `--rng torch-cuda` (CLI) / `"rng": "torch-cuda"` (server), draws what
+`torch.manual_seed(seed)` gives stable_audio_3 on a CUDA GPU, in its order:
+`torch.randn([1, 256, T])` for the initial latent, then one `randn_like` per ping-pong step.
+It runs on the host, so every sa3.cpp backend (CUDA, Vulkan, Metal, CPU) gets the same noise.
+PyTorch's normal kernel is a grid-stride loop, so once a canvas holds more than `256 * cap`
+values the layout depends on the PyTorch side's GPU: `--rng-cuda-blocks` is that GPU's
+`multi_processor_count * (max_threads_per_multi_processor // 256)`, by default 288 for the DGX
+Spark that serves gary4juce's remote SA3 (216 for the RTX 5070 Laptop used below). The text2music canvas is
 sized as `_adapt_sample_size` sizes it (`int((seconds + 6) * 44100)` samples, rounded up to
 whole frames and then to 2), so the noise tensor has the reference's shape.
 

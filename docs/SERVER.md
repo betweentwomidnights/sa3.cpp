@@ -108,8 +108,8 @@ completed audio once and immediately remove that job from server memory. complet
   "duration": 12,
   "steps": 8,
   "seed": -1,                      // default: random; use any non-negative value to reproduce a run
-  "rng": "mt19937",                // "torch-cuda": the noise stable_audio_3 draws on a CUDA GPU for this seed
-  "rng_cuda_blocks": 0,            // torch-cuda: that GPU's grid cap (see "seeds" below); 0 = uncapped
+  "rng": "torch-cuda",             // default: the noise stable_audio_3 draws on a CUDA GPU for this seed; "mt19937": sa3.cpp's older noise
+  "rng_cuda_blocks": 288,          // torch-cuda: that GPU's grid cap (see "seeds" below); default the DGX Spark's, 0 = uncapped
   "loras": [{"name": "kev", "strength": 1.0}, {"name": "keygen", "strength": 0.8}],
   "keep_models": false,          // default: frugal (free after each gen, reload next) — vst/daw-safe
 
@@ -279,21 +279,20 @@ The completed job reports the actual `conditioning_seconds_total` and
 Mono init WAVs are duplicated to the model's stereo channels inside the pipeline,
 and resampling remains native. HTTP seeds are parsed without narrowing them to
 a signed 32-bit integer; non-negative integer seeds are retained for recall,
-and negative/omitted seeds still request a random seed. The native RNG remains
-32-bit internally, as documented in `rng.h`.
+and negative/omitted seeds still request a random seed.
 
-`"rng": "torch-cuda"` replaces the native RNG with the draws `torch.manual_seed(seed)`
-gives stable_audio_3 on a CUDA GPU (Philox, as PyTorch's grid-stride normal kernel lays it
-out), in its order: the initial latent, the fixed-prefix noise, then one per step. The same
-seed then gives the same noise as the PyTorch service, which is what A/B listening and
-`tools/compare_remote_parity.py` need. Past `256 * cap` latent values (about 20 s of
-canvas on an RTX 5070 Laptop) the layout depends on the GPU, so set `rng_cuda_blocks` to
-that GPU's `multi_processor_count * (max_threads_per_multi_processor // 256)`;
-`tools/dump_remote_parity.py` records it in its manifest. `--rng` / `SA3_RNG` and
-`--rng-cuda-blocks` / `SA3_RNG_CUDA_BLOCKS` set the default for requests that name neither,
-so a client that switches between this server and a PyTorch one (gary4juce) gets the same
-clip for the same seed without sending anything new. A DGX Spark is 288; an RTX 5070
-Laptop is 216.
+The noise is `"rng": "torch-cuda"` by default: the draws `torch.manual_seed(seed)` gives
+stable_audio_3 on a CUDA GPU (Philox, as PyTorch's grid-stride normal kernel lays it out), in
+its order: the initial latent, the fixed-prefix noise, then one per step. They are computed on
+the host, so CUDA, Vulkan, Metal and CPU builds all get the same noise, and a seed gives the
+same clip as the PyTorch service up to each backend's arithmetic. Past `256 * cap` latent
+values (about 27 s of canvas at a cap of 288) the layout depends on the PyTorch side's GPU; `rng_cuda_blocks`
+is that GPU's `multi_processor_count * (max_threads_per_multi_processor // 256)` and defaults
+to 288, the DGX Spark that serves gary4juce's remote SA3, so gary4juce's remote/local switch
+gives the same clip for the same seed. `tools/dump_remote_parity.py` records the cap of the GPU
+it runs on (an RTX 5070 Laptop is 216). `--rng` / `SA3_RNG` and `--rng-cuda-blocks` /
+`SA3_RNG_CUDA_BLOCKS` change the server-wide default; `"rng": "mt19937"` is sa3.cpp's older
+32-bit noise, as documented in `rng.h`.
 
 `/health.capabilities` advertises `conditioning_duration`, `request_splice` and
 `fixed_prefix`. Hosts should check these before using the controls: older

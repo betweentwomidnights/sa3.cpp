@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
     int encode_chunk_size = 0, encode_overlap = 32;     // outer SAME-L encode tiling; 0 = monolithic
     int decode_chunk_size = 0, decode_overlap = 32;     // outer SAME-L decode tiling; 0 = monolithic
     int frames = 128, steps = 8; long long seed = -1;  // omitted/negative => random (resolved below)
-    std::string rng = "mt19937"; unsigned rng_cuda_blocks = 0;
+    std::string rng = "torch-cuda"; unsigned rng_cuda_blocks = sa3::kDefaultRngCudaBlocks;
     int cpu_threads = 0;
     bool frames_set = false, duration_set = false, threads_set = false;
     double duration_sec = 0.0;

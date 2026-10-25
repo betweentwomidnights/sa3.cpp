@@ -739,18 +739,25 @@ inline void throw_if_cancelled(const std::function<bool()>& should_cancel) {
         throw std::runtime_error("generation cancelled");
 }
 
+// torch-cuda noise's default grid cap: the DGX Spark (GB10, 48 SMs x 6 blocks) that serves
+// gary4juce's remote SA3. Found from that backend's own output (docs/TORCH_PARITY.md).
+inline constexpr uint32_t kDefaultRngCudaBlocks = 288;
+
 // One generation request. Defaults reproduce the CLI's text2music defaults.
 struct GenParams {
     std::string prompt;
     int      frames = 128;             // output length in latent frames (EVEN for SAME-S); 128 ~= 12 s
     int      steps  = 8;
     uint64_t seed   = 0;
-    // Noise source. "mt19937" is sa3.cpp's own; "torch-cuda" draws what stable_audio_3 draws on a
-    // CUDA GPU for the same seed (sa3::TorchCudaRandn), in the same order: the initial latent, the
-    // fixed-prefix noise, then one randn_like per step. rng_cuda_blocks is that GPU's grid cap,
-    // which only matters once a latent holds more than 256 * cap values (0 = uncapped).
-    std::string rng = "mt19937";
-    uint32_t rng_cuda_blocks = 0;
+    // Noise source. "torch-cuda" (the default) draws what stable_audio_3 draws on a CUDA GPU for the
+    // same seed (sa3::TorchCudaRandn), in the same order: the initial latent, the fixed-prefix noise,
+    // then one randn_like per step. It is computed on the host, so every backend gets the same
+    // noise. rng_cuda_blocks is the matched GPU's grid cap, which only matters once a latent holds
+    // more than 256 * cap values (0 = uncapped); the default is the DGX Spark serving gary4juce's
+    // remote SA3, so a local run of a seed reproduces that backend's clip. "mt19937" is sa3.cpp's
+    // own older noise.
+    std::string rng = "torch-cuda";
+    uint32_t rng_cuda_blocks = kDefaultRngCudaBlocks;
 
     // audio2audio / inpaint (optional). init_audio is planar [init_n_samp, init_n_ch] at any rate —
     // generate() resamples to the model's 44.1 kHz if init_sample_rate differs (the caller just passes
