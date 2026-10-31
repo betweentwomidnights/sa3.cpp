@@ -478,8 +478,9 @@ std::vector<LoraEntry> scan_loras(const std::string& adapters_dir,
         if (!e.is_regular_file(ec)) continue;
         if (lower_ascii(e.path().extension().string()) != ".gguf") continue;
         std::string name = infer_lora_name_from_filename(e.path());
-        if (name.empty()) continue;
+        if (name.empty() && !fs::exists(e.path().string() + ".json", ec)) continue;
         LoraEntry lora = inspect_lora(name, e.path().string());
+        if (lora.name.empty()) continue;
         const std::string key = lower_ascii(lora.name);
         if (lora.target == "dit" &&
             ((!lora.base_model.empty() && lower_ascii(lora.base_model) != variant &&
@@ -695,6 +696,162 @@ std::string new_session_id() {
 
 bool valid_model_variant(const std::string& variant) {
     return variant == "medium" || variant == "small-music" || variant == "small-sfx";
+}
+
+// Import a browser-selected adapter and its optional prompt pool as one operation. Stream
+// weights to a private staging directory; validate everything before publishing any file.
+void import_lora(const httplib::Request& req, httplib::Response& res,
+                 const httplib::ContentReader& reader, const std::string& adir, const std::string& pdir) {
+    namespace fs = std::filesystem;
+    const auto fail = [&](int status, const std::string& error) {
+        res.status = status; res.set_content(json_err(error), "application/json");
+    };
+    const std::string name = req.get_param_value("name");
+    if (name.empty() || name.size() > 64 || name[0] < 'a' || name[0] > 'z' || name == "defaults" ||
+        name.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_-") != std::string::npos) {
+        fail(400, "name must start with a lowercase letter and contain only a-z, 0-9, _ or - (not defaults)"); return;
+    }
+    // Device names remain reserved even with an extension on Windows.
+    if (name == "con" || name == "prn" || name == "aux" || name == "nul" ||
+        (name.size() == 4 && (starts_with(name, "com") || starts_with(name, "lpt")) &&
+         name[3] >= '1' && name[3] <= '9')) {
+        fail(400, "reserved adapter name"); return;
+    }
+    constexpr size_t max_prompts = 1024 * 1024;
+    if (req.has_header("Content-Length") &&
+        std::strtoull(req.get_header_value("Content-Length").c_str(), nullptr, 10) > k_max_upload_bytes + max_prompts + 65536) {
+        fail(413, "import exceeds upload limit"); return;
+    }
+    if (!req.is_multipart_form_data()) { fail(400, "multipart form data required"); return; }
+    std::error_code ec;
+    fs::create_directories(adir, ec);
+    if (ec) { fail(500, "cannot create adapters directory"); return; }
+    const fs::path stage = fs::path(adir) / (".import-" + new_session_id());
+    if (!fs::create_directory(stage, ec)) { fail(500, "cannot create import staging directory"); return; }
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ignored; fs::remove_all(path, ignored); }
+    } cleanup{stage};
+    const fs::path weights = stage / "adapter.gguf", captions = stage / "prompts.json";
+    std::ofstream output;
+    std::string part, error;
+    std::set<std::string> parts;
+    size_t bytes = 0;
+    int error_status = 400;
+    const bool complete = reader([&](const httplib::FormData& file) {
+        if (output.is_open()) { output.close(); if (!output) { error = "cannot write import"; error_status = 500; return false; } }
+        part = file.name; bytes = 0;
+        if ((part != "file" && part != "prompts") || !parts.insert(part).second) {
+            error = "expected one file and optionally one prompts part"; return false;
+        }
+        if (!ends_with(lower_ascii(file.filename), part == "file" ? ".gguf" : ".json")) {
+            error = part == "file" ? "adapter must be a .gguf file" : "dice captions must be a .json file"; return false;
+        }
+        // The supplied filenames never become filesystem paths.
+        output.open(part == "file" ? weights : captions, std::ios::binary);
+        if (!output) { error = "cannot write import"; error_status = 500; return false; }
+        return true;
+    }, [&](const char* data, size_t length) {
+        const size_t limit = part == "file" ? k_max_upload_bytes : max_prompts;
+        if (length > limit - bytes) { error = "import exceeds upload limit"; error_status = 413; return false; }
+        output.write(data, length); bytes += length;
+        if (!output) { error = "cannot write import"; error_status = 500; return false; }
+        return true;
+    });
+    if (output.is_open()) { output.close(); if (!output && error.empty()) { error = "cannot write import"; error_status = 500; } }
+    if (!error.empty()) { fail(error_status, error); return; }
+    if (!complete || !parts.count("file")) { fail(400, "incomplete adapter upload"); return; }
+
+    gguf_init_params params{}; params.no_alloc = true;
+    std::unique_ptr<gguf_context, decltype(&gguf_free)> metadata(gguf_init_from_file(weights.string().c_str(), params), gguf_free);
+    if (!metadata) { fail(400, "invalid GGUF adapter"); return; }
+    const auto string_value = [&](const char* key) -> std::string {
+        const int64_t index = gguf_find_key(metadata.get(), key);
+        if (index < 0) return "";
+        if (gguf_get_kv_type(metadata.get(), index) != GGUF_TYPE_STRING) { error = "invalid adapter metadata"; return ""; }
+        return gguf_get_val_str(metadata.get(), index);
+    };
+    const std::string architecture = string_value("general.architecture");
+    std::string target = string_value("lora.target");
+    const std::string model = string_value("lora.base_model");
+    string_value("lora.adapter_type");
+    const int64_t rank = gguf_find_key(metadata.get(), "lora.rank"), alpha = gguf_find_key(metadata.get(), "lora.alpha");
+    if (target.empty()) target = "dit";
+    if (!error.empty() || architecture != "sa3-lora" ||
+        (target != "dit" && target != "encoder" && target != "decoder") ||
+        rank < 0 || alpha < 0 || gguf_get_kv_type(metadata.get(), rank) != GGUF_TYPE_UINT32 ||
+        gguf_get_kv_type(metadata.get(), alpha) != GGUF_TYPE_FLOAT32 || gguf_get_n_tensors(metadata.get()) == 0) {
+        fail(400, "GGUF must contain an sa3-lora adapter with valid target, rank and alpha metadata"); return;
+    }
+    if (!gguf_get_val_u32(metadata.get(), rank) || !std::isfinite(gguf_get_val_f32(metadata.get(), alpha))) {
+        fail(400, "adapter rank must be positive and alpha must be finite"); return;
+    }
+    const uintmax_t size = fs::file_size(weights, ec);
+    const size_t offset = gguf_get_data_offset(metadata.get());
+    for (int64_t i = 0; i < gguf_get_n_tensors(metadata.get()); ++i) {
+        const size_t start = gguf_get_tensor_offset(metadata.get(), i), length = gguf_get_tensor_size(metadata.get(), i);
+        if (offset > size || start > size - offset || length > size - offset - start) {
+            fail(400, "truncated GGUF tensor data"); return;
+        }
+    }
+    metadata.reset();
+
+    size_t prompt_count = 0;
+    if (parts.count("prompts")) {
+        std::string text;
+        read_text_file(captions, text);
+        std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> doc(yyjson_read(text.data(), text.size(), 0), yyjson_doc_free);
+        yyjson_val* dice_obj = doc ? yyjson_obj_get(yyjson_doc_get_root(doc.get()), "dice") : nullptr;
+        bool valid = dice_obj && yyjson_is_obj(dice_obj);
+        if (valid) {
+            yyjson_obj_iter iter; yyjson_obj_iter_init(dice_obj, &iter);
+            while (yyjson_val* key = yyjson_obj_iter_next(&iter)) {
+                yyjson_val* values = yyjson_obj_iter_get_val(key);
+                if (!yyjson_is_arr(values)) { valid = false; break; }
+                yyjson_arr_iter array; yyjson_arr_iter_init(values, &array);
+                while (yyjson_val* value = yyjson_arr_iter_next(&array))
+                    if (!yyjson_is_str(value)) { valid = false; break; }
+                if (!valid) break;
+            }
+        }
+        if (!valid) { fail(400, "dice JSON must contain a dice object of string arrays"); return; }
+        DiceMap dice;
+        if (!load_dice_file(captions, dice)) { fail(400, "dice JSON must contain a dice object of prompt arrays"); return; }
+        for (const auto& bucket : dice) prompt_count += bucket.second.size();
+        if (!prompt_count) { fail(400, "dice JSON must contain at least one nonempty prompt"); return; }
+    }
+    // Serialize publication and refuse collisions, including adapters from other model families.
+    static std::mutex import_mutex;
+    std::lock_guard<std::mutex> lock(import_mutex);
+    const fs::path dest = fs::path(adir) / ("lora-" + name + ".gguf"), registry = dest.string() + ".json";
+    const fs::path pool = fs::path(pdir) / (name + ".json");
+    if (fs::exists(dest, ec) || fs::exists(registry, ec) || fs::exists(pool, ec) || !resolve_lora_path(adir, name).empty()) {
+        fail(409, "adapter name or dice-caption pool already exists; choose another name"); return;
+    }
+    for (const auto& file : fs::directory_iterator(adir)) {
+        if (file.path().extension() == ".gguf" &&
+            lower_ascii(inspect_lora(infer_lora_name_from_filename(file.path()), file.path().string()).name) == name) {
+            fail(409, "adapter name already exists; choose another name"); return;
+        }
+    }
+    // Preserve the chosen name even when suffix inference would strip e.g. v2 or f32.
+    { std::ofstream sidecar(stage / "registry.json"); sidecar << "{\"name\":\"" << name << "\"}";
+      sidecar.close(); if (!sidecar) { fail(500, "cannot write adapter registry"); return; } }
+    bool pool_written = false, registry_written = false;
+    if (parts.count("prompts")) {
+        fs::create_directories(pdir, ec);
+        if (!ec) pool_written = fs::copy_file(captions, pool, fs::copy_options::none, ec);
+    }
+    if (!ec) { fs::rename(stage / "registry.json", registry, ec); registry_written = !ec; }
+    if (!ec) fs::rename(weights, dest, ec); // Publish weights last, so discovery sees the complete import.
+    if (ec) {
+        std::error_code ignored;
+        if (registry_written) fs::remove(registry, ignored);
+        if (pool_written) fs::remove(pool, ignored);
+        fail(500, "cannot install adapter and dice captions"); return;
+    }
+    res.set_content("{\"success\":true,\"name\":\"" + name + "\",\"target\":\"" + target +
+                    "\",\"base_model\":\"" + json_escape(model) + "\",\"prompt_count\":" + std::to_string(prompt_count) + "}", "application/json");
 }
 bool valid_model_encoding(const std::string& encoding) {
     return encoding == "f16" || encoding == "f32" || encoding == "q4_k_m" ||
@@ -1393,6 +1550,7 @@ int main(int argc, char** argv) {
     const std::string aidir = g_audio_in_dir;
 
     httplib::Server svr;
+    svr.set_payload_max_length(k_max_upload_bytes + 2 * 1024 * 1024);
 
     if (train_port < 0 || train_port > 65535 || (train_port > 0 && train_port == port)) {
         fprintf(stderr, "--train-port must be a different valid port\n");
@@ -1778,6 +1936,11 @@ int main(int argc, char** argv) {
     });
     svr.Get("/lanes.js", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(embedded_web::lanes_js, "application/javascript");
+    });
+
+    svr.Post("/loras/import", [&adir, &pdir](const httplib::Request& req, httplib::Response& res,
+                                           const httplib::ContentReader& reader) {
+        import_lora(req, res, reader, adir, pdir);
     });
 
     svr.Get("/loras", [&adir, &sldir](const httplib::Request&, httplib::Response& res) {

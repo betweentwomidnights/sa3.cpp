@@ -474,6 +474,10 @@ if(BUILD_TESTING)
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sa3_server_request_test.py"
                          "$<TARGET_FILE:sa3-server>")
         set_tests_properties(sa3-server-request-test PROPERTIES LABELS "non-gpu;server")
+        add_test(NAME sa3-server-lora-import-test
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sa3_server_lora_import_test.py"
+                         "$<TARGET_FILE:sa3-server>")
+        set_tests_properties(sa3-server-lora-import-test PROPERTIES LABELS "non-gpu;server;lora")
         add_test(NAME sa3-model-artifacts-test
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_artifacts_test.py")
         add_test(NAME sa3-web-assets-current

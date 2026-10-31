@@ -201,6 +201,21 @@
   <span id="progress-label"></span>
 </div>
 
+<details class="card" id="lora-import">
+  <summary style="cursor:pointer;font-size:0.85rem">Import LoRA</summary>
+  <p class="muted" style="margin:8px 0">Choose a GGUF adapter and optionally its dice-caption JSON. It will be available in the lane menus immediately.</p>
+  <form id="lora-import-form" class="row">
+    <div class="col"><label for="lora-import-name">Name</label>
+      <input id="lora-import-name" required maxlength="64" pattern="[a-z][a-z0-9_-]*" placeholder="adapter-name" title="Start with a lowercase letter; use lowercase letters, numbers, hyphens or underscores."></div>
+    <div class="col grow"><label for="lora-import-file">GGUF adapter (up to 256 MiB)</label>
+      <input id="lora-import-file" type="file" accept=".gguf" required></div>
+    <div class="col grow"><label for="lora-import-prompts">Dice captions (optional JSON, up to 1 MiB)</label>
+      <input id="lora-import-prompts" type="file" accept=".json,application/json"></div>
+    <button id="lora-import-submit" type="submit">Import</button>
+  </form>
+  <p id="lora-import-status" class="muted" role="status" aria-live="polite" style="margin-top:8px"></p>
+</details>
+
 <div class="card" id="timeline">
   <div class="tl-row">
     <div class="tl-head"><b>Take</b><span class="muted" id="take-info">no take yet</span>

@@ -92,8 +92,44 @@ async function connect() {
     $("#decoder").value = decoders.some((l) => l.name === state.decoder) ? state.decoder : "";
     if (!state.lanes.length && loras.length) { state.lanes.push(newLane()); save(); }
     renderLanes();
+    return true;
   } catch (e) {
     st.textContent = "✗ server unreachable"; st.className = "err";
+    return false;
+  }
+}
+
+async function importLora(event) {
+  event.preventDefault();
+  const form = $("#lora-import-form"), status = $("#lora-import-status");
+  const name = $("#lora-import-name").value.trim();
+  const file = $("#lora-import-file").files[0], prompts = $("#lora-import-prompts").files[0];
+  if (!file) return;
+  status.className = "muted";
+  try {
+    if (file.size > 256 * 1024 * 1024) throw new Error("The GGUF adapter must be at most 256 MiB.");
+    if (prompts && prompts.size > 1024 * 1024) throw new Error("Dice captions must be at most 1 MiB.");
+    for (const control of form.elements) control.disabled = true;
+    status.textContent = `Importing ${name}…`;
+    const body = new FormData();
+    body.append("file", file);
+    if (prompts) body.append("prompts", prompts);
+    const response = await fetch(`/loras/import?name=${encodeURIComponent(name)}`, { method: "POST", body });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) throw new Error(result.error || `Import failed: HTTP ${response.status}`);
+    form.reset();
+    const refreshed = await connect();
+    const available = loras.some((l) => l.name === name);
+    status.textContent = `Imported ${name}${result.prompt_count ? ` with ${result.prompt_count} dice captions` : ""}. ` +
+      (!refreshed ? "Reconnect to refresh the lane menus." : available ? "Choose it in a lane’s LoRA menu." :
+        decoders.some((l) => l.name === name) ? "Choose it under Decoder correction." :
+        result.target !== "dit" ? `This ${result.target} adapter does not appear in automation lanes.` :
+        `It is for ${result.base_model || result.target}; choose a compatible model to use it.`);
+  } catch (e) {
+    status.className = "err";
+    status.textContent = e.message;
+  } finally {
+    for (const control of form.elements) control.disabled = false;
   }
 }
 
@@ -676,6 +712,7 @@ function init() {
     $(id).addEventListener("input", () => { readForm(); barsInfo(); advState(); drawAll(); save(); });
   }
   $("#gen").onclick = generate;
+  $("#lora-import-form").onsubmit = importLora;
   $("#seed-dice").onclick = () => { state.seed = randomSeed(); writeForm(); save(); };
   $("#adv-reset").onclick = () => { Object.assign(state, ADV_DEFAULTS); writeForm(); save(); };
   $("#fit-bars").onclick = () => {
