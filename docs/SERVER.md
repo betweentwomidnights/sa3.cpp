@@ -80,6 +80,7 @@ it binds to `127.0.0.1` by default (local only). The model loads lazily on the f
 | method | path | body / result |
 |---|---|---|
 | `GET`  | `/loras`    | `{success, loras:[{index,name,path,target,base_model}], adapters_dir, model_loaded}` |
+| `POST` | `/loras/import?name=billie` | multipart `file` (GGUF, max 256 MiB) and optional `prompts` (dice JSON, max 1 MiB) → `{success,name,target,base_model,prompt_count}` |
 | `GET`  | `/prompts`  | prompt dice pools, optionally blended with `?lora=name` or `?lora=a,b` |
 | `GET`  | `/health`   | `{status, model, encoding, t5_encoding, loaded}` (does not wait for generation) |
 | `POST` | `/generate` | JSON request (below) → **`{success, session_id, seed}`** immediately; generation runs in the background |
@@ -316,6 +317,18 @@ splice smoke exercises both modes. This capability is on the compatibility
 branch and is not in the published v0.1.1 release.
 
 ## lora and prompt discovery
+
+The Automation tab's **Import LoRA** panel accepts a name, a `.gguf` adapter, and an
+optional dice-caption `.json` file. The server installs them in `--adapters-dir`
+(defaults to the models directory) and `--prompts-dir` under the chosen name,
+then refreshes the lane menus without a restart. Names use lowercase letters,
+numbers, underscores and hyphens, starting with a letter. Existing adapter names
+and caption pools are refused; choose another name to keep both versions.
+The JSON must contain a `dice` object whose values are arrays of prompt strings,
+with at least one nonempty prompt. Source filenames need not match the chosen name.
+GGUF metadata and tensor data are checked before installation; only adapters compatible
+with the selected model appear in its lane menus. Convert `.ckpt` or `.safetensors`
+adapters to GGUF before importing.
 
 `GET /loras` scans the adapters directory and returns GGUF adapter names and targets
 (`dit`, `decoder`, or `encoder`) that can be passed back in a generation request.

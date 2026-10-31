@@ -2102,6 +2102,21 @@ inline const std::string lanes_html =
   <span id="progress-label"></span>
 </div>
 
+<details class="card" id="lora-import">
+  <summary style="cursor:pointer;font-size:0.85rem">Import LoRA</summary>
+  <p class="muted" style="margin:8px 0">Choose a GGUF adapter and optionally its dice-caption JSON. It will be available in the lane menus immediately.</p>
+  <form id="lora-import-form" class="row">
+    <div class="col"><label for="lora-import-name">Name</label>
+      <input id="lora-import-name" required maxlength="64" pattern="[a-z][a-z0-9_-]*" placeholder="adapter-name" title="Start with a lowercase letter; use lowercase letters, numbers, hyphens or underscores."></div>
+    <div class="col grow"><label for="lora-import-file">GGUF adapter (up to 256 MiB)</label>
+      <input id="lora-import-file" type="file" accept=".gguf" required></div>
+    <div class="col grow"><label for="lora-import-prompts">Dice captions (optional JSON, up to 1 MiB)</label>
+      <input id="lora-import-prompts" type="file" accept=".json,application/json"></div>
+    <button id="lora-import-submit" type="submit">Import</button>
+  </form>
+  <p id="lora-import-status" class="muted" role="status" aria-live="polite" style="margin-top:8px"></p>
+</details>
+
 <div class="card" id="timeline">
   <div class="tl-row">
     <div class="tl-head"><b>Take</b><span class="muted" id="take-info">no take yet</span>
@@ -2237,8 +2252,44 @@ async function connect() {
     $("#decoder").value = decoders.some((l) => l.name === state.decoder) ? state.decoder : "";
     if (!state.lanes.length && loras.length) { state.lanes.push(newLane()); save(); }
     renderLanes();
+    return true;
   } catch (e) {
     st.textContent = "✗ server unreachable"; st.className = "err";
+    return false;
+  }
+}
+
+async function importLora(event) {
+  event.preventDefault();
+  const form = $("#lora-import-form"), status = $("#lora-import-status");
+  const name = $("#lora-import-name").value.trim();
+  const file = $("#lora-import-file").files[0], prompts = $("#lora-import-prompts").files[0];
+  if (!file) return;
+  status.className = "muted";
+  try {
+    if (file.size > 256 * 1024 * 1024) throw new Error("The GGUF adapter must be at most 256 MiB.");
+    if (prompts && prompts.size > 1024 * 1024) throw new Error("Dice captions must be at most 1 MiB.");
+    for (const control of form.elements) control.disabled = true;
+    status.textContent = `Importing ${name}…`;
+    const body = new FormData();
+    body.append("file", file);
+    if (prompts) body.append("prompts", prompts);
+    const response = await fetch(`/loras/import?name=${encodeURIComponent(name)}`, { method: "POST", body });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) throw new Error(result.error || `Import failed: HTTP ${response.status}`);
+    form.reset();
+    const refreshed = await connect();
+    const available = loras.some((l) => l.name === name);
+    status.textContent = `Imported ${name}${result.prompt_count ? ` with ${result.prompt_count} dice captions` : ""}. ` +
+      (!refreshed ? "Reconnect to refresh the lane menus." : available ? "Choose it in a lane’s LoRA menu." :
+        decoders.some((l) => l.name === name) ? "Choose it under Decoder correction." :
+        result.target !== "dit" ? `This ${result.target} adapter does not appear in automation lanes.` :
+        `It is for ${result.base_model || result.target}; choose a compatible model to use it.`);
+  } catch (e) {
+    status.className = "err";
+    status.textContent = e.message;
+  } finally {
+    for (const control of form.elements) control.disabled = false;
   }
 }
 
@@ -2275,7 +2326,8 @@ function writeForm() {
   $("#prompt").value = state.prompt;
   $("#negative").value = state.negative;
   $("#duration").value = state.duration;
-  $("#steps").value = state.steps;
+  $("#steps").value = state.st)sa3web") +
+    std::string(R"sa3web(eps;
   $("#cfg").value = state.cfg;
   $("#seed").value = state.seed;
   $("#seed-lock").checked = state.seedLock;
@@ -2317,8 +2369,7 @@ function withMusic(p) {
   return s;
 }
 
-// ─── lanes ────────────────────────────────────────────────────────────────)sa3web") +
-    std::string(R"sa3web(──
+// ─── lanes ──────────────────────────────────────────────────────────────────
 
 function newLane() {
   const used = new Set(state.lanes.map((l) => l.color));
@@ -2360,7 +2411,8 @@ function renderLanes() {
         </div>
         <textarea data-k="prompt" rows="1" placeholder="lane prompt (empty = base prompt)">${esc(lane.prompt)}</textarea>
         <div class="presets">
-          <button class="tiny" data-act="dice" title="in-distribution prompt for this LoRA">🎲</button>
+          <button class="tiny" data-act="dice" title="in-distri)sa3web") +
+    std::string(R"sa3web(bution prompt for this LoRA">🎲</button>
           ${Object.keys(PRESETS).map((p) => `<button class="tiny" data-preset="${p}" title="preset">${p}</button>`).join("")}
         </div>
       </div>
@@ -2398,8 +2450,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 
 const PAD = 6;                         // px inside each canvas, left/right
 function xOf(cv, t) { return PAD + (t / state.duration) * (cv.clientWidth - 2 * PAD); }
-function)sa3web") +
-    std::string(R"sa3web( tOf(cv, x) { return Math.min(state.duration, Math.max(0, (x - PAD) / (cv.clientWidth - 2 * PAD) * state.duration)); }
+function tOf(cv, x) { return Math.min(state.duration, Math.max(0, (x - PAD) / (cv.clientWidth - 2 * PAD) * state.duration)); }
 const TOP = 8, BOT = 8;
 function yOf(cv, a, max) { return TOP + (1 - a / max) * (cv.clientHeight - TOP - BOT); }
 function aOf(cv, y, max) { return Math.min(max, Math.max(0, (1 - (y - TOP) / (cv.clientHeight - TOP - BOT)) * max)); }
@@ -2447,7 +2498,8 @@ function drawGrid(g, cv, withLabels) {
       const x = Math.round(xOf(cv, t)) + 0.5;
       g.strokeStyle = bar ? "#ffffff22" : "#ffffff0b";
       g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
-      if (withLabels && bar && x + 26 < cv.clientWidth) { g.fillStyle = "#b6a5a5"; g.fillText(`${b / 4 + 1}`, x + 2, 10); }
+      if (withLabels && bar && x + 26 < cv.clientWidth) { g.fillStyle = "#b6a5a5"; g.fillText(`${b )sa3web") +
+    std::string(R"sa3web(/ 4 + 1}`, x + 2, 10); }
     }
     return;
   }
@@ -2495,8 +2547,7 @@ function fftMag(re, im) {          // in-place radix-2, returns nothing; re/im l
       let cr = 1, ci = 0;
       for (let k = 0; k < len / 2; k++) {
         const a = i + k, b = a + len / 2;
-        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[)sa3web") +
-    std::string(R"sa3web(b] * cr;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
         re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
         const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
       }
@@ -2541,7 +2592,8 @@ function spectrogram(mono, sr) {
 
 function drawWaveCanvas() {
   const cv = $("#wave"), g = prep(cv);
-  if (current && view === "spec" && current.spec) {
+  if (current && view === "spec" &)sa3web") +
+    std::string(R"sa3web(& current.spec) {
     const x0 = xOf(cv, 0), x1 = xOf(cv, Math.min(current.dur, state.duration));
     g.imageSmoothingEnabled = true;
     g.drawImage(current.spec, 0, 0, Math.round(SPEC_COLS * Math.min(1, state.duration / current.dur)), SPEC_ROWS,
@@ -2581,8 +2633,7 @@ function drawLane(cv, lane, hover) {
   envPath(g, cv, lane, lane.max);
   g.strokeStyle = lane.color; g.lineWidth = 2; g.stroke();
   lane.points.forEach((p, i) => {
- )sa3web") +
-    std::string(R"sa3web(   g.beginPath(); g.arc(xOf(cv, p[0]), yOf(cv, p[1], lane.max), i === hover ? 6 : 4, 0, Math.PI * 2);
+    g.beginPath(); g.arc(xOf(cv, p[0]), yOf(cv, p[1], lane.max), i === hover ? 6 : 4, 0, Math.PI * 2);
     g.fillStyle = i === hover ? "#fff" : lane.color; g.fill();
   });
   drawPlayhead(g, cv);
@@ -2626,7 +2677,8 @@ function attachLaneEditor(cv, tip, lane) {
   cv.addEventListener("pointermove", (e) => {
     const [x, y] = pos(e);
     let [t, a] = snap(tOf(cv, x), aOf(cv, y, lane.max), e);
-    if (drag && drag.kind === "point") {
+    )sa3web") +
+    std::string(R"sa3web(if (drag && drag.kind === "point") {
       const P = lane.points, i = drag.i;
       const lo = i > 0 ? P[i - 1][0] : 0, hi = i < P.length - 1 ? P[i + 1][0] : state.duration;
       t = Math.min(hi, Math.max(lo, t));
@@ -2664,8 +2716,7 @@ function attachLaneEditor(cv, tip, lane) {
   cv.addEventListener("contextmenu", del);
 }
 
-// ─── generation ───────────────────────────────────────────────────────)sa3web") +
-    std::string(R"sa3web(──────
+// ─── generation ─────────────────────────────────────────────────────────────
 
 function showError(msg) { $("#error").textContent = msg || ""; }
 
@@ -2719,7 +2770,8 @@ function poll(id, body, snapshot, t0) {
     try {
       const r = await apiGet(`/poll_status/${id}`);
       bar.style.width = `${r.progress || 0}%`;
-      lbl.textContent = r.status === "completed" ? "done" : `${r.status} ${r.step ?? ""}/${r.total_steps ?? ""}`;
+      lbl.textContent = r.status === "completed" ? "done" : `${r.status} ${r.s)sa3web") +
+    std::string(R"sa3web(tep ?? ""}/${r.total_steps ?? ""}`;
       if (r.status === "completed" && r.audio_data) {
         done();
         await addTake(r.audio_data, body, snapshot, (r.meta && r.meta.seed) ?? body.seed, (performance.now() - t0) / 1000);
@@ -2759,8 +2811,7 @@ function setCurrent(take, autoplay) {
   const keepAt = current && a.src && !a.paused ? a.currentTime : null;
   current = take;
   a.src = take.url;
-  if (keepAt != null) a.addEventListener("loadedmetadata", () => { a.current)sa3web") +
-    std::string(R"sa3web(Time = Math.min(keepAt, take.dur); }, { once: true });
+  if (keepAt != null) a.addEventListener("loadedmetadata", () => { a.currentTime = Math.min(keepAt, take.dur); }, { once: true });
   if (autoplay || keepAt != null) a.play().catch(() => {});
   const names = take.lanes.filter((l) => l.lora).map((l) => l.lora).join(" + ") || "base only";
   $("#take-info").textContent = `#${take.id} · seed ${take.seed} · ${names}`;
@@ -2791,7 +2842,8 @@ function renderTakes() {
       <span class="meta">${t.snapshot.bpm ? `${t.snapshot.bpm}bpm · ` : ""}${t.request.lane_isolation ? `iso ${t.request.lane_isolation}@${t.request.lane_isolation_until}` : "no iso"}${t.request.lane_average_until ? ` · shared@${t.request.lane_average_until}` : ""}${t.request.loras.length ? ` · ${esc(t.request.loras[0].name)}` : ""} · seed ${t.seed} · ${t.secs.toFixed(1)}s</span>
       <a class="tiny" href="${t.url}" download="${esc(takeFileName(t))}" title="download ${esc(takeFileName(t))}" onclick="event.stopPropagation()">⬇</a>
       <button class="tiny" title="restore this take's settings into the editor">↺</button>`;
-    div.onclick = () => setCurrent(t, true);
+    div.)sa3web") +
+    std::string(R"sa3web(onclick = () => setCurrent(t, true);
     div.querySelector("button").onclick = (e) => {
       e.stopPropagation();
       Object.assign(state, JSON.parse(JSON.stringify(t.snapshot)));
@@ -2827,6 +2879,7 @@ function init() {
     $(id).addEventListener("input", () => { readForm(); barsInfo(); advState(); drawAll(); save(); });
   }
   $("#gen").onclick = generate;
+  $("#lora-import-form").onsubmit = importLora;
   $("#seed-dice").onclick = () => { state.seed = randomSeed(); writeForm(); save(); };
   $("#adv-reset").onclick = () => { Object.assign(state, ADV_DEFAULTS); writeForm(); save(); };
   $("#fit-bars").onclick = () => {
@@ -2839,8 +2892,7 @@ function init() {
   };
   $("#add-lane").onclick = () => { if (state.lanes.length < MAX_LANES) { state.lanes.push(newLane()); renderLanes(); save(); } };
   $("#play").onclick = togglePlay;
-  $("#view").)sa3web") +
-    std::string(R"sa3web(onclick = () => { view = view === "spec" ? "wave" : "spec"; $("#view").textContent = view === "spec" ? "show waveform" : "show spectrogram"; drawAll(); };
+  $("#view").onclick = () => { view = view === "spec" ? "wave" : "spec"; $("#view").textContent = view === "spec" ? "show waveform" : "show spectrogram"; drawAll(); };
   $("#stop").onclick = () => { const a = $("#audio"); a.pause(); a.currentTime = 0; drawAll(); };
   $("#wave").addEventListener("pointerdown", (e) => {
     if (!current) return;
