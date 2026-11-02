@@ -93,6 +93,50 @@ registries so it never offers a SAME-L adapter to SAME-S or a DiT adapter to the
 Safetensors conversion is part of the V1 table because all current hosts import adapters. A null or
 empty JSON sidecar means that conversion reads configuration from safetensors metadata.
 
+`adapter_info` reads an adapter's target from its file, without loading tensors or a model, so a
+frontend can tell which adapters a menu should offer. It takes a path, not a registry name.
+
+## Automation lanes
+
+`sa3_request_v1.lanes` draws strength curves over the output timeline. It is the same feature as the
+server's `lora_lanes`, described in [SERVER.md](SERVER.md#lora-automation-lanes-lora_lanes-lora_envelope),
+and it is available to Generate, Transform, and Continue on SA3 variants. SAT variants return
+`INVALID_ARGUMENT`.
+
+```c
+if (!api->lane_init) { /* this library predates lanes and would ignore the fields */ }
+
+const float curve[] = {0.0f, 0.0f, 20.0f, 1.0f};  /* (seconds, amount) pairs */
+sa3_adapter_v1 adapter;  /* size set, adapter_init called, path_or_name set */
+sa3_lane_v1 lane;
+memset(&lane, 0, sizeof lane);
+lane.size = sizeof lane;
+api->lane_init(&lane);
+lane.adapters = &adapter;
+lane.adapter_count = 1;
+lane.envelope = curve;
+lane.envelope_point_count = 2;
+request.lanes = &lane;
+request.lane_count = 1;
+```
+
+A library that predates lanes ignores the appended request fields rather than failing, so a host
+that links dynamically checks `api->lane_init` first. `lane_init` and `adapter_info` consume reserved
+table slots, which read as NULL from an older library.
+
+The request's adapters run in every pass and a lane's run only in its own. Decoder adapters belong in
+the request; a lane adapter must pass `adapter_info`'s `supports_lanes`, or `generate` fails with
+`MODEL_ERROR` once it reaches that adapter. A lane with a prompt and no adapters automates the
+prompt. Limits are `SA3_MAX_LANES_V1` and `SA3_MAX_LANE_POINTS_V1`, and a request past them, or with a
+non-finite value or an amount outside `[0, 100]`, returns `INVALID_ARGUMENT` before anything loads.
+
+`request_init` sets the recommended blend: `lane_average_until` 0.9, `lane_isolation` 1,
+`lane_isolation_until` 0. On the default LogSNR schedule the arrangement forms from each lane's average
+over the first half of the steps, and then the curves apply with gentle isolation through the last
+step. Sigma thresholds are schedule-dependent: 0.9 covers 2 of 8 steps on Full and 1 of 8 on None.
+With Transform, sampling starts at the noise level, so at 0.5 the averaging never runs. The server and
+CLI keep their own defaults, which leave isolation and averaging off.
+
 ## Consumer coverage
 
 The frozen V1 boundary is exercised by these consumers:

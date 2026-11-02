@@ -217,7 +217,8 @@ counters that: while the step's sigma is above `"lane_isolation_until"` (default
 frames mostly attend to frames in the same phase while the structure forms; the later steps attend
 fully and smooth the joins. On a base -> keygen step at 10 s (3 seeds, 8 steps), the keygen half
 reached 0.40 of the full adapter's timbre without isolation and 0.79-0.86 with λ ≥ 3; isolating only
-the first 1-3 steps did nothing. Default 0 (off).
+the first 1-3 steps did nothing. Default 0 (off). `"lane_isolation_until": 0` does not turn isolation
+off: every step's sigma is above 0, so it runs through the last step.
 
 `"lane_average_until": σ` (CLI `--lane-average-until`) is the opposite trade: while the step's sigma
 is above it, every lane plays at its curve's average over the clip, so the take settles on one
@@ -227,7 +228,11 @@ Default 0 (off).
 The studio's **Automation** tab (`/#lanes`, or the bare editor at `/lanes`) draws lanes over the
 current take's spectrogram or waveform and keeps a list of takes to compare. Its BPM and key fields
 are appended to the base prompt and every lane prompt, it shares the decoder correction chosen in
-the Models tab, and the blending options above sit under Advanced.
+the Models tab, and the blending options above sit under Advanced. It defaults to
+`lane_average_until` 0.9, `lane_isolation` 1 and `lane_isolation_until` 0: on 8 steps, the first 4 form
+the arrangement from each lane's average, and the last 4 apply the curves with gentle isolation. The
+API and CLI defaults above do not change, so a request that omits these fields leaves both off. The
+[C ABI](C_ABI_V1.md#automation-lanes) initializes to the same blend as the tab.
 
 ## loudness safety
 

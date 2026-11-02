@@ -67,6 +67,42 @@ inline std::string lora_target_of(const char* path) {
     return t;
 }
 
+// Read just `lora.adapter_type`, resolving a legacy "dora" the way load_lora does but from tensor
+// shapes alone, so a host can ask what an adapter is without loading it.
+inline std::string lora_family_of(const char* path) {
+    ggml_context* ctx = nullptr;
+    gguf_init_params gp = { /*no_alloc=*/true, /*ctx=*/&ctx };
+    gguf_context* g = gguf_init_from_file(path, gp);
+    if (!g) throw std::runtime_error("[lora] failed to open " + std::string(path));
+    const auto release = [&]() { gguf_free(g); if (ctx) ggml_free(ctx); };
+    try {
+        const int i = gguf_find_key(g, "lora.adapter_type");
+        std::string type = i < 0 ? "lora" : gguf_get_val_str(g, i);
+        if (type == "dora") {
+            std::vector<LegacyDoraShape> shapes;
+            const std::string suffix = ".magnitude";
+            for (int k = 0; k < (int)gguf_get_n_tensors(g); k++) {
+                const std::string name = gguf_get_tensor_name(g, k);
+                if (name.size() < suffix.size() ||
+                    name.compare(name.size()-suffix.size(), suffix.size(), suffix) != 0) continue;
+                const std::string stem = name.substr(0, name.size()-suffix.size());
+                ggml_tensor* A = ggml_get_tensor(ctx, (stem + ".lora_A").c_str());
+                ggml_tensor* B = ggml_get_tensor(ctx, (stem + ".lora_B").c_str());
+                ggml_tensor* m = ggml_get_tensor(ctx, name.c_str());
+                if (!A || !B || !m) continue;
+                shapes.push_back({A->ne[0], B->ne[1], ggml_nelements(m),
+                                  m->ne[0] == 1 && m->ne[1] > 1 ? 1 : -1});
+            }
+            type = resolve_legacy_dora(shapes);
+        }
+        release();
+        return type;
+    } catch (...) {
+        release();
+        throw;
+    }
+}
+
 inline LoraAdapter load_lora(const char* path, float strength = 1.0f, ggml_backend_t backend = nullptr) {
     LoraAdapter a;
     a.gguf = load_gguf(path, backend);   // load onto the base's backend so the GPU apply graph can read it

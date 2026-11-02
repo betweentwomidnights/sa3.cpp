@@ -26,6 +26,8 @@
  *   SA3_BASELINE_DEVICE    "cpu" for a reproducible run; unset uses the default backend
  *   SA3_BASELINE_SECONDS   output length, default 4.0 — 1.0 keeps a CPU run tolerable
  *   SA3_BASELINE_STEPS     sampling steps, default 4 — 2 likewise
+ *   SA3_BASELINE_LANES     set to add the automation lane scenarios; the adapter argument must then
+ *                          be a DiT adapter. Off by default so earlier captures still diff clean.
  *
  * The optional adapter argument should be a gguf for the medium/SAME-L family; pass none to skip
  * that scenario. The whole set runs in about 100s on CPU at SECONDS=1.0 STEPS=2.
@@ -187,6 +189,32 @@ int main(int argc, char** argv) {
     bad.input_audio = view; bad.transform_noise_level = 5.0f;
     printf("[bad-noise]     status %d: %s\n", api->generate(ctx, &bad, &out, &err), err.message);
 
+    /* ---- Automation lanes. An all-zero curve is dropped, so it must hash the same as [generate]. ---- */
+    const int with_lanes = getenv("SA3_BASELINE_LANES") != NULL;
+    const float ramp_up[4] = {0.0f, 0.0f, (float)g_seconds, 1.0f};
+    if (with_lanes) {
+        const float silent[2] = {0.0f, 0.0f};
+        sa3_lane_v1 lane; memset(&lane, 0, sizeof lane); lane.size = sizeof lane; api->lane_init(&lane);
+        lane.prompt = "bright glockenspiel melody";
+        lane.envelope = silent; lane.envelope_point_count = 1;
+        sa3_request_v1 z = g;
+        z.lanes = &lane; z.lane_count = 1;
+        memset(&out, 0, sizeof out); out.size = sizeof out; api->result_init(&out);
+        report("lanes-zero-curve", api->generate(ctx, &z, &out, &err), &out);
+        api->result_free(&out);
+
+        lane.envelope = ramp_up; lane.envelope_point_count = 2;
+        memset(&out, 0, sizeof out); out.size = sizeof out; api->result_init(&out);
+        report("lanes-prompt", api->generate(ctx, &z, &out, &err), &out);
+        api->result_free(&out);
+
+        sa3_request_v1 lc = c;
+        lc.lanes = &lane; lc.lane_count = 1;
+        memset(&out, 0, sizeof out); out.size = sizeof out; api->result_init(&out);
+        report("lanes-continue", api->generate(ctx, &lc, &out, &err), &out);
+        api->result_free(&out);
+    }
+
     api->context_destroy(ctx);
 
     /* ---- Adapter array, on the family the decoder adapter belongs to ---- */
@@ -203,6 +231,20 @@ int main(int argc, char** argv) {
         memset(&out, 0, sizeof out); out.size = sizeof out; api->result_init(&out);
         report("adapter-0.75", api->generate(ctx, &a, &out, &err), &out);
         api->result_free(&out);
+        if (with_lanes) {
+            sa3_lane_v1 lane; memset(&lane, 0, sizeof lane); lane.size = sizeof lane; api->lane_init(&lane);
+            lane.adapters = entries; lane.adapter_count = 1;
+            lane.envelope = ramp_up; lane.envelope_point_count = 2;
+            sa3_request_v1 la = a;
+            la.adapters = NULL; la.adapter_count = 0;
+            la.lanes = &lane; la.lane_count = 1;
+            memset(&out, 0, sizeof out); out.size = sizeof out; api->result_init(&out);
+            report("lanes-adapter", api->generate(ctx, &la, &out, &err), &out);
+            api->result_free(&out);
+            sa3_adapter_info_v1 info; memset(&info, 0, sizeof info); info.size = sizeof info;
+            printf("[adapter-info] status %d target %d supports_lanes %d\n",
+                   api->adapter_info(adapter, &info, &err), info.target, info.supports_lanes);
+        }
         api->context_destroy(ctx);
     }
     return 0;

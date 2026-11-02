@@ -133,6 +133,43 @@ typedef struct {
     float strength;
 } sa3_adapter_v1;
 
+#define SA3_MAX_LANES_V1 8u
+#define SA3_MAX_LANE_POINTS_V1 256u
+
+/* One automation lane: its own DiT pass per sampling step, blended into the take by a curve. The
+ * request's DiT adapters run in every pass; these run only in this lane's. A lane with no adapters
+ * and its own prompt automates the prompt. Lanes that can never differ from the base pass are
+ * dropped: an all-zero curve, or no adapters and no prompt of its own.
+ *
+ * envelope holds envelope_point_count (seconds, amount) pairs. Seconds are on the output timeline,
+ * so with Continue time 0 is the start of the source. Amounts are in [0, 100] and multiply the
+ * adapters' strengths: with strength 1, the curve is the strength. Linear between points, held flat
+ * past either end. request.lane_stride must be sizeof(sa3_lane_v1). */
+typedef struct {
+    uint32_t size;
+    const sa3_adapter_v1* adapters;
+    uint32_t adapter_count;
+    uint32_t adapter_stride;
+    const float* envelope;
+    uint32_t envelope_point_count;
+    const char* prompt; /* NULL or empty: the request's prompt */
+} sa3_lane_v1;
+
+typedef int32_t sa3_adapter_target_v1;
+enum {
+    SA3_ADAPTER_TARGET_DIT_V1     = 0,
+    SA3_ADAPTER_TARGET_DECODER_V1 = 1,
+    SA3_ADAPTER_TARGET_ENCODER_V1 = 2
+};
+
+/* Read from the adapter file's metadata by adapter_info; no tensor data or model is loaded.
+ * supports_lanes is nonzero for a DiT adapter of a family the lane passes can run. */
+typedef struct {
+    uint32_t size;
+    sa3_adapter_target_v1 target;
+    int32_t supports_lanes;
+} sa3_adapter_info_v1;
+
 typedef struct {
     uint32_t size;
     int32_t peak_normalize;
@@ -223,6 +260,22 @@ typedef struct {
     /* SA3 variants only. Zero (default) follows the upstream shift of the already-scaled
      * init-noise schedule; one selects the former C++ shift-then-scale schedule. */
     uint32_t legacy_schedule;
+
+    /* Automation lanes, SA3 variants only. Check api->lane_init first: a library without it
+     * ignores these fields. The three blend settings apply only when lanes are present and compare
+     * against the step's sigma, which runs from 1 (pure noise) to 0 (finished). request_init sets
+     * the recommended blend: the arrangement forms from each lane's average, then the curves apply
+     * with gentle isolation.
+     *   lane_average_until: above this sigma every lane plays at its average. 0 = never.
+     *   lane_isolation: how strongly frames hear only frames with a similar lane mix. 0 = off.
+     *   lane_isolation_until: isolation runs above this sigma, except during averaging. 0 = through
+     *   the final step; it does not turn isolation off. */
+    const sa3_lane_v1* lanes;
+    uint32_t lane_count;
+    uint32_t lane_stride;
+    float lane_isolation;
+    float lane_isolation_until;
+    float lane_average_until;
 } sa3_request_v1;
 
 /* Library-owned planar float audio plus generation metadata. Set size before
@@ -289,7 +342,13 @@ typedef struct sa3_api_v1 {
     sa3_status_v1 (SA3_CALL *convert_lora)(const sa3_lora_convert_v1* options,
                                            sa3_error_v1* error);
 
-    sa3_reserved_function_v1 reserved[16];
+    /* These consume reserved slots, so they read as NULL from a library that predates lanes. */
+    void (SA3_CALL *lane_init)(sa3_lane_v1* lane);
+    sa3_status_v1 (SA3_CALL *adapter_info)(const char* path,
+                                           sa3_adapter_info_v1* info,
+                                           sa3_error_v1* error);
+
+    sa3_reserved_function_v1 reserved[14];
 } sa3_api_v1;
 
 /* Frozen V1 prefixes. Where a type is appendable, these expressions must continue to name the
@@ -319,6 +378,15 @@ typedef struct sa3_api_v1 {
 #define SA3_REQUEST_V1_LEGACY_SCHEDULE_SIZE \
     ((uint32_t)(offsetof(sa3_request_v1, legacy_schedule) + \
                 sizeof(((sa3_request_v1*)0)->legacy_schedule)))
+/* A request at least this large carries the automation lanes and their blend settings. */
+#define SA3_REQUEST_V1_LANES_SIZE \
+    ((uint32_t)(offsetof(sa3_request_v1, lane_average_until) + \
+                sizeof(((sa3_request_v1*)0)->lane_average_until)))
+#define SA3_LANE_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_lane_v1, prompt) + sizeof(((sa3_lane_v1*)0)->prompt)))
+#define SA3_ADAPTER_INFO_V1_MIN_SIZE \
+    ((uint32_t)(offsetof(sa3_adapter_info_v1, supports_lanes) + \
+                sizeof(((sa3_adapter_info_v1*)0)->supports_lanes)))
 #define SA3_RESULT_V1_MIN_SIZE \
     ((uint32_t)(offsetof(sa3_result_v1, mask_overlap_seconds) + sizeof(((sa3_result_v1*)0)->mask_overlap_seconds)))
 #define SA3_LORA_CONVERT_V1_MIN_SIZE \

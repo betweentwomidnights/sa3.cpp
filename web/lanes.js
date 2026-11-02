@@ -7,12 +7,13 @@ const COLORS = ["#e2a03b", "#4fb3d9", "#b07be0", "#6cc58b", "#e5677f", "#d6d65a"
 const MAX_LANES = 8;
 const LANE_H = 96;
 const STORE_KEY = "sa3-lanes-editor-v1";
+const ADV_DEFAULTS = { mode: "velocity", iso: 1, isoUntil: 0, avgUntil: 0.9 };
 
 const state = {
   prompt: "keygen music, crunchy square leads, tight chip drums",
   negative: "",
-  duration: 20, steps: 8, cfg: 1, seed: 1234, seedLock: false, mode: "velocity", iso: 4, isoUntil: 0.9,
-  bpm: "", key: "", decoder: "auto", avgUntil: 0,
+  duration: 20, steps: 8, cfg: 1, seed: 1234, seedLock: false, mode: "velocity", iso: 1, isoUntil: 0,
+  bpm: "", key: "", decoder: "auto", avgUntil: 0.9,
   lanes: [],
 };
 let loras = [];          // DiT adapters from /loras
@@ -32,6 +33,8 @@ function save() {
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+    // A save still holding the former defaults never chose them, so it follows the current ones.
+    if (s && s.iso === 4 && s.isoUntil === 0.9 && !s.avgUntil) Object.assign(s, ADV_DEFAULTS);
     if (s && Array.isArray(s.lanes)) Object.assign(state, s);
   } catch { /* ignore */ }
   for (const l of state.lanes) nextLaneId = Math.max(nextLaneId, (l.id || 0) + 1);
@@ -171,21 +174,37 @@ function writeForm() {
   $("#seed").value = state.seed;
   $("#seed-lock").checked = state.seedLock;
   $("#mode").value = state.mode;
-  $("#iso").value = state.iso ?? 4;
+  $("#iso").value = state.iso ?? ADV_DEFAULTS.iso;
   $("#bpm").value = state.bpm ?? "";
-  $("#avg-until").value = state.avgUntil ?? 0;
+  $("#avg-until").value = state.avgUntil ?? ADV_DEFAULTS.avgUntil;
   advState();
   $("#key").value = state.key ?? "";
   if (state.decoder !== "auto") $("#decoder").value = state.decoder;
   barsInfo();
-  $("#iso-until").value = state.isoUntil ?? 0.9;
+  $("#iso-until").value = state.isoUntil ?? ADV_DEFAULTS.isoUntil;
 }
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
-const ADV_DEFAULTS = { mode: "velocity", iso: 4, isoUntil: 0.9, avgUntil: 0 };
 function advState() {   // "custom" on the collapsed Advanced header when anything differs from the defaults
   const custom = Object.entries(ADV_DEFAULTS).some(([k, v]) => state[k] !== v);
   $("#adv-state").textContent = custom ? "· custom settings" : "· defaults";
   if (custom) $("#advanced").open = true;
+  $("#blend-info").textContent = blendSummary();
+}
+// The LogSNR schedule this page's requests run on (make_sa3_schedule in sa3_pipeline.h).
+const sigmaAt = (i, steps) => (i === 0 ? 1 : 1 / (1 + Math.exp(2 - (1 - i / steps) * 8.2)));
+// Which steps each setting covers, because a σ threshold says little until it's read against them.
+function blendSummary() {
+  const groups = [];
+  for (let i = 0; i < state.steps; i++) {
+    const s = sigmaAt(i, state.steps);
+    const what = state.mode !== "velocity" ? "your curves"
+      : state.avgUntil > 0 && s > state.avgUntil ? "every lane at its average"
+      : state.iso > 0 && s > state.isoUntil ? "your curves, with isolation" : "your curves";
+    const last = groups[groups.length - 1];
+    if (last && last.what === what) last.to = i + 1;
+    else groups.push({ from: i + 1, to: i + 1, what });
+  }
+  return groups.map((g) => `${g.from === g.to ? `Step ${g.from}` : `Steps ${g.from}-${g.to}`}: ${g.what}`).join(" · ");
 }
 
 // ─── tempo / key ────────────────────────────────────────────────────────────

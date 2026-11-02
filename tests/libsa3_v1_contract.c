@@ -167,6 +167,140 @@ int main(void) {
     request.adapter_count = 0;
     request.adapter_stride = sizeof(sa3_adapter_v1);
 
+    /* Lanes. The table slots are how a host detects support, so they are pinned non-null. The
+     * initializer sets the recommended blend, and only for a caller whose struct has those fields. */
+    CHECK(api->lane_init != NULL);
+    CHECK(api->adapter_info != NULL);
+    CHECK(api->reserved[0] == NULL);
+    CHECK(SA3_REQUEST_V1_LEGACY_SCHEDULE_SIZE < SA3_REQUEST_V1_LANES_SIZE);
+    CHECK(SA3_REQUEST_V1_LANES_SIZE <= sizeof(request));
+    CHECK(request.lanes == NULL);
+    CHECK(request.lane_count == 0);
+    CHECK(request.lane_stride == sizeof(sa3_lane_v1));
+    CHECK(request.lane_isolation == 1.0f);
+    CHECK(request.lane_isolation_until == 0.0f);
+    CHECK(request.lane_average_until == 0.9f);
+    {
+        sa3_request_v1 older;
+        memset(&older, 0xA5, sizeof(older));
+        older.size = SA3_REQUEST_V1_LEGACY_SCHEDULE_SIZE;
+        api->request_init(&older);
+        CHECK(older.steps == 8);
+        CHECK(older.lane_stride == UINT32_C(0xA5A5A5A5));
+    }
+
+    sa3_lane_v1 lane;
+    memset(&lane, 0xA5, sizeof(lane));
+    lane.size = sizeof(lane);
+    api->lane_init(&lane);
+    CHECK(lane.size == sizeof(lane));
+    CHECK(lane.adapters == NULL);
+    CHECK(lane.adapter_count == 0);
+    CHECK(lane.adapter_stride == sizeof(sa3_adapter_v1));
+    CHECK(lane.envelope == NULL);
+    CHECK(lane.envelope_point_count == 0);
+    CHECK(lane.prompt == NULL);
+    {
+        struct future_lane {
+            sa3_lane_v1 known;
+            uint64_t future_tail;
+        } future_lane;
+        memset(&future_lane, 0xA5, sizeof(future_lane));
+        future_lane.known.size = sizeof(future_lane);
+        api->lane_init(&future_lane.known);
+        CHECK(future_lane.future_tail == UINT64_C(0xA5A5A5A5A5A5A5A5));
+    }
+
+    /* As with adapters, a fake context is safe because lane validation returns first. */
+    {
+        const float ok_points[4] = {0.0f, 0.0f, 10.0f, 1.0f};
+        const float nan_point[2] = {0.0f, NAN};
+        const float hot_point[2] = {0.0f, 101.0f};
+        sa3_context* fake = (sa3_context*)(uintptr_t)1;
+        struct padded_lane {
+            sa3_lane_v1 lane;
+            unsigned char padding[sizeof(sa3_lane_v1)];
+        } padded_lanes[2];
+        memset(padded_lanes, 0, sizeof(padded_lanes));
+        padded_lanes[0].lane = lane;
+        padded_lanes[0].lane.envelope = ok_points;
+        padded_lanes[0].lane.envelope_point_count = 2;
+        padded_lanes[0].lane.prompt = "first";
+        {
+            /* A decoy at the tightly-packed offset would pass; the walker must step over it. */
+            sa3_lane_v1 tightly_packed_decoy = padded_lanes[0].lane;
+            memcpy(padded_lanes[0].padding, &tightly_packed_decoy, sizeof(tightly_packed_decoy));
+        }
+        padded_lanes[1].lane = lane;
+        request.lanes = &padded_lanes[0].lane;
+        request.lane_count = 2;
+        request.lane_stride = sizeof(struct padded_lane);
+        CHECK(api->generate(fake, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+        CHECK(strstr(error.message, "lane entry 1") != NULL);
+        CHECK(strstr(error.message, "envelope point") != NULL);
+
+        padded_lanes[1].lane.envelope = nan_point;
+        padded_lanes[1].lane.envelope_point_count = 1;
+        CHECK(api->generate(fake, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+        CHECK(strstr(error.message, "finite") != NULL);
+
+        padded_lanes[1].lane.envelope = hot_point;
+        CHECK(api->generate(fake, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+        CHECK(strstr(error.message, "[0, 100]") != NULL);
+
+        padded_lanes[1].lane.envelope_point_count = SA3_MAX_LANE_POINTS_V1 + 1;
+        CHECK(api->generate(fake, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+        CHECK(strstr(error.message, "256") != NULL);
+
+        {
+            sa3_adapter_v1 bad_adapter;
+            memset(&bad_adapter, 0, sizeof(bad_adapter));
+            bad_adapter.size = sizeof(bad_adapter);
+            bad_adapter.path_or_name = "bad";
+            bad_adapter.strength = NAN;
+            padded_lanes[1].lane.envelope = ok_points;
+            padded_lanes[1].lane.envelope_point_count = 2;
+            padded_lanes[1].lane.adapters = &bad_adapter;
+            padded_lanes[1].lane.adapter_count = 1;
+            CHECK(api->generate(fake, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+            CHECK(strstr(error.message, "lane entry 1 adapter entry 0") != NULL);
+            CHECK(strstr(error.message, "strength") != NULL);
+            padded_lanes[1].lane.adapters = NULL;
+            padded_lanes[1].lane.adapter_count = 0;
+        }
+
+        request.lane_isolation = -1.0f;
+        CHECK(api->generate(fake, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+        CHECK(strstr(error.message, "lane_isolation") != NULL);
+        request.lane_isolation = 1.0f;
+        request.lane_average_until = NAN;
+        CHECK(api->generate(fake, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+        CHECK(strstr(error.message, "lane_average_until") != NULL);
+        request.lane_average_until = 0.9f;
+
+        request.lane_count = SA3_MAX_LANES_V1 + 1;
+        CHECK(api->generate(fake, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+        CHECK(strstr(error.message, "8 lanes") != NULL);
+
+        request.lane_count = 1;
+        request.lane_stride = sizeof(sa3_lane_v1) - 1;
+        CHECK(api->generate(fake, &request, &result, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+        CHECK(strstr(error.message, "lane array") != NULL);
+    }
+    request.lanes = NULL;
+    request.lane_count = 0;
+    request.lane_stride = sizeof(sa3_lane_v1);
+
+    {
+        sa3_adapter_info_v1 info;
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        CHECK(api->adapter_info(NULL, &info, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+        CHECK(api->adapter_info("x.gguf", NULL, &error) == SA3_STATUS_INVALID_ARGUMENT_V1);
+        CHECK(api->adapter_info("/nonexistent-sa3-adapter-for-the-contract-test.gguf", &info, &error)
+              == SA3_STATUS_IO_ERROR_V1);
+    }
+
     api->result_free(&result);
     api->result_free(&result);
     CHECK(result.size == sizeof(result));
