@@ -60,7 +60,10 @@ bool has_v1_size(const T* value, uint32_t minimum_size) {
 
 /// Both tables publish this. Bumped when the exported surface changes, which is now only ever a
 /// V1 table growing -- the legacy entry points it used to sit beside are gone.
-const char* SA3_CALL v1_runtime_version(void) { return "sa3.cpp libsa3 8 (ABI 1)"; }
+const char* SA3_CALL v1_runtime_version(void) { return "sa3.cpp libsa3 9 (ABI 1)"; }
+
+static_assert(SA3_MAX_LANES_V1 == sa3::kMaxLanes, "lane limit must match the pipeline");
+static_assert(SA3_MAX_LANE_POINTS_V1 == sa3::kMaxEnvelopePoints, "lane point limit must match the pipeline");
 
 void SA3_CALL v1_error_init(sa3_error_v1* error) {
     init_v1_struct(error);
@@ -132,11 +135,22 @@ void SA3_CALL v1_request_init(sa3_request_v1* request) {
     request->continuation.gain_match = 1;
     request->encode_overlap = 32;
     request->decode_overlap = 32;
+    if (request->size >= SA3_REQUEST_V1_LANES_SIZE) {
+        request->lane_stride = sizeof(sa3_lane_v1);
+        request->lane_isolation = 1.0f;
+        request->lane_isolation_until = 0.0f;
+        request->lane_average_until = 0.9f;
+    }
 }
 
 void SA3_CALL v1_adapter_init(sa3_adapter_v1* adapter) {
     init_v1_struct(adapter);
     if (adapter && adapter->size >= SA3_ADAPTER_V1_MIN_SIZE) adapter->strength = 1.0f;
+}
+
+void SA3_CALL v1_lane_init(sa3_lane_v1* lane) {
+    init_v1_struct(lane);
+    if (lane && lane->size >= SA3_LANE_V1_MIN_SIZE) lane->adapter_stride = sizeof(sa3_adapter_v1);
 }
 
 void SA3_CALL v1_loudness_init(sa3_loudness_v1* loudness) {
@@ -417,6 +431,8 @@ sa3_status_v1 generate_sat_v1(sa3_context* context, const sa3_request_v1* reques
                        "SAT variants support only the generate operation");
     if (request->adapter_count > 0)
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "SAT variants do not support adapters");
+    if (has_v1_size(request, SA3_REQUEST_V1_LANES_SIZE) && request->lane_count > 0)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "SAT variants do not support automation lanes");
     if (request->steps < 2)
         return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
                        "SAT V-prediction sampling requires at least two steps");
@@ -535,6 +551,73 @@ sa3_status_v1 generate_sat_v1(sa3_context* context, const sa3_request_v1* reques
     return SA3_STATUS_OK_V1;
 }
 #endif
+
+using V1AdapterList = std::vector<std::pair<std::string, float>>;
+
+/// Walks a strided adapter array into (name, strength) pairs. `what` names it in diagnostics.
+sa3_status_v1 v1_read_adapters(const sa3_adapter_v1* adapters, uint32_t count, uint32_t stride,
+                               const std::string& what, V1AdapterList& out, sa3_error_v1* error) {
+    if (count == 0) return SA3_STATUS_OK_V1;
+    if (!adapters || stride < SA3_ADAPTER_V1_MIN_SIZE ||
+        count > (uint32_t)std::numeric_limits<int>::max() ||
+        count > std::numeric_limits<size_t>::max() / stride)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid " + what + " array");
+    out.reserve(count);
+    const auto* bytes = reinterpret_cast<const unsigned char*>(adapters);
+    for (uint32_t i = 0; i < count; ++i) {
+        sa3_adapter_v1 adapter{};
+        std::memcpy(&adapter, bytes + (size_t)i * stride, std::min<size_t>(stride, sizeof(adapter)));
+        const std::string entry = what + " entry " + std::to_string(i);
+        if (adapter.size < SA3_ADAPTER_V1_MIN_SIZE || adapter.size > stride)
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, entry + " has an invalid size");
+        if (!adapter.path_or_name || !*adapter.path_or_name)
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, entry + " has an empty path or name");
+        if (!std::isfinite(adapter.strength))
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, entry + " has a non-finite strength");
+        out.push_back({adapter.path_or_name, adapter.strength});
+    }
+    return SA3_STATUS_OK_V1;
+}
+
+/// Reads and validates the request's lanes, leaving their adapters as unresolved names. Touches
+/// neither the context nor any file.
+sa3_status_v1 v1_read_lanes(const sa3_request_v1* request, sa3::GenParams& lanes, sa3_error_v1* error) {
+    if (!has_v1_size(request, SA3_REQUEST_V1_LANES_SIZE) || request->lane_count == 0)
+        return SA3_STATUS_OK_V1;
+    if (request->lane_count > SA3_MAX_LANES_V1)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "at most 8 lanes");
+    if (!request->lanes || request->lane_stride < SA3_LANE_V1_MIN_SIZE)
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid lane array");
+    const auto* bytes = reinterpret_cast<const unsigned char*>(request->lanes);
+    for (uint32_t i = 0; i < request->lane_count; ++i) {
+        sa3_lane_v1 lane{};
+        std::memcpy(&lane, bytes + (size_t)i * request->lane_stride,
+                    std::min<size_t>(request->lane_stride, sizeof(lane)));
+        const std::string entry = "lane entry " + std::to_string(i);
+        if (lane.size < SA3_LANE_V1_MIN_SIZE || lane.size > request->lane_stride)
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, entry + " has an invalid size");
+        if (lane.envelope_point_count == 0 || !lane.envelope)
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, entry + " needs at least one envelope point");
+        if (lane.envelope_point_count > SA3_MAX_LANE_POINTS_V1)
+            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, entry + " has more than 256 envelope points");
+        sa3::GenParams::LoraLane out;
+        if (const sa3_status_v1 status = v1_read_adapters(lane.adapters, lane.adapter_count, lane.adapter_stride,
+                                                          entry + " adapter", out.loras, error);
+            status != SA3_STATUS_OK_V1)
+            return status;
+        out.envelope.reserve(lane.envelope_point_count);
+        for (uint32_t k = 0; k < lane.envelope_point_count; ++k)
+            out.envelope.push_back({lane.envelope[2 * k], lane.envelope[2 * k + 1]});
+        if (lane.prompt) out.prompt = lane.prompt;
+        lanes.lora_lanes.push_back(std::move(out));
+    }
+    lanes.lane_isolation = request->lane_isolation;
+    lanes.lane_isolation_until = request->lane_isolation_until;
+    lanes.lane_average_until = request->lane_average_until;
+    if (const std::string why = sa3::lora_lanes_error(lanes); !why.empty())
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, why);
+    return SA3_STATUS_OK_V1;
+}
 
 sa3_status_v1 v1_generate_body(sa3_context* context,
                                     const sa3_request_v1* request,
@@ -659,36 +742,18 @@ sa3_status_v1 v1_generate_body(sa3_context* context,
         input_samples = planar_input.data();
     }
 
-    std::vector<const char*> adapter_names;
-    std::vector<float> adapter_strengths;
-    if (request->adapter_count > 0) {
-        if (!request->adapters || request->adapter_stride < SA3_ADAPTER_V1_MIN_SIZE ||
-            request->adapter_count > (uint32_t)std::numeric_limits<int>::max() ||
-            request->adapter_count > std::numeric_limits<size_t>::max() / request->adapter_stride)
-            return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "invalid adapter array");
-        try {
-            adapter_names.reserve(request->adapter_count);
-            adapter_strengths.reserve(request->adapter_count);
-            const auto* bytes = reinterpret_cast<const unsigned char*>(request->adapters);
-            for (uint32_t i = 0; i < request->adapter_count; ++i) {
-                sa3_adapter_v1 adapter{};
-                std::memcpy(&adapter, bytes + (size_t)i * request->adapter_stride,
-                            std::min<size_t>(request->adapter_stride, sizeof(adapter)));
-                if (adapter.size < SA3_ADAPTER_V1_MIN_SIZE || adapter.size > request->adapter_stride)
-                    return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
-                                   "adapter entry " + std::to_string(i) + " has an invalid size");
-                if (!adapter.path_or_name || !*adapter.path_or_name)
-                    return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
-                                   "adapter entry " + std::to_string(i) + " has an empty path or name");
-                if (!std::isfinite(adapter.strength))
-                    return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1,
-                                   "adapter entry " + std::to_string(i) + " has a non-finite strength");
-                adapter_names.push_back(adapter.path_or_name);
-                adapter_strengths.push_back(adapter.strength);
-            }
-        } catch (const std::bad_alloc&) {
-            return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory preparing adapters");
-        }
+    V1AdapterList adapter_list;
+    sa3::GenParams lane_params;   // only the lane fields are used
+    try {
+        if (const sa3_status_v1 status = v1_read_adapters(request->adapters, request->adapter_count,
+                                                          request->adapter_stride, "adapter", adapter_list, error);
+            status != SA3_STATUS_OK_V1)
+            return status;
+        if (const sa3_status_v1 status = v1_read_lanes(request, lane_params, error);
+            status != SA3_STATUS_OK_V1)
+            return status;
+    } catch (const std::bad_alloc&) {
+        return fail_v1(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory preparing adapters");
     }
 
     // Request arguments are fully validated before the opaque context is first dereferenced.
@@ -759,18 +824,29 @@ sa3_status_v1 v1_generate_body(sa3_context* context,
 
     // A bare name resolves against adapters_dir; an existing path is taken as given.
     try {
-        for (size_t i = 0; i < adapter_names.size(); ++i) {
-            const std::string name = adapter_names[i];
-            std::string path = std::filesystem::exists(name)
-                             ? name
-                             : sa3::resolve_lora_file(context->adapters_dir, name);
-            if (path.empty())
-                return fail_v1(error, SA3_STATUS_IO_ERROR_V1, "unknown adapter '" + name + "'");
-            p.loras.push_back({path, adapter_strengths[i]});
+        const auto resolve = [&](const V1AdapterList& names, V1AdapterList& out) {
+            for (const auto& [name, strength] : names) {
+                std::string path = std::filesystem::exists(name)
+                                 ? name
+                                 : sa3::resolve_lora_file(context->adapters_dir, name);
+                if (path.empty())
+                    throw std::runtime_error("unknown adapter '" + name + "'");
+                out.push_back({path, strength});
+            }
+        };
+        resolve(adapter_list, p.loras);
+        for (auto& lane : lane_params.lora_lanes) {
+            V1AdapterList paths;
+            resolve(lane.loras, paths);
+            lane.loras = std::move(paths);
         }
     } catch (const std::exception& e) {
         return fail_v1(error, SA3_STATUS_IO_ERROR_V1, e.what());
     }
+    p.lora_lanes = std::move(lane_params.lora_lanes);
+    p.lane_isolation = lane_params.lane_isolation;
+    p.lane_isolation_until = lane_params.lane_isolation_until;
+    p.lane_average_until = lane_params.lane_average_until;
 
     if (request->on_progress) {
         V1CallbackBridge* b = &bridge;
@@ -836,6 +912,27 @@ sa3_status_v1 SA3_CALL v1_convert_lora(const sa3_lora_convert_v1* options,
         return fail_v1_literal(error, SA3_STATUS_IO_ERROR_V1, e.what());
     } catch (...) {
         return fail_v1_literal(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error converting LoRA");
+    }
+}
+
+sa3_status_v1 SA3_CALL v1_adapter_info(const char* path, sa3_adapter_info_v1* info,
+                                       sa3_error_v1* error) {
+    clear_v1_error(error);
+    if (!path || !*path || !has_v1_size(info, SA3_ADAPTER_INFO_V1_MIN_SIZE))
+        return fail_v1(error, SA3_STATUS_INVALID_ARGUMENT_V1, "an adapter path and full info struct are required");
+    try {
+        const std::string target = sa3::lora_target_of(path);
+        info->target = target == "decoder" ? SA3_ADAPTER_TARGET_DECODER_V1
+                     : target == "encoder" ? SA3_ADAPTER_TARGET_ENCODER_V1
+                                           : SA3_ADAPTER_TARGET_DIT_V1;
+        info->supports_lanes = target == "dit" && sa3::functional_lora_family_ok(sa3::lora_family_of(path)) ? 1 : 0;
+        return SA3_STATUS_OK_V1;
+    } catch (const std::bad_alloc&) {
+        return fail_v1_literal(error, SA3_STATUS_OUT_OF_MEMORY_V1, "out of memory reading adapter");
+    } catch (const std::exception& e) {
+        return fail_v1_literal(error, SA3_STATUS_IO_ERROR_V1, e.what());
+    } catch (...) {
+        return fail_v1_literal(error, SA3_STATUS_INTERNAL_ERROR_V1, "unknown error reading adapter");
     }
 }
 
@@ -1164,6 +1261,8 @@ const sa3_api_v1 k_api_v1 = {
     v1_generate,
     v1_result_free,
     v1_convert_lora,
+    v1_lane_init,
+    v1_adapter_info,
     {nullptr}
 };
 
