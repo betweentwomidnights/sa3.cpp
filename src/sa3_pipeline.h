@@ -1129,7 +1129,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         if (!keep_models) {
             TE.free();
             DIT.free();
-            AE.free();
+            AE.free(); ae_applied_.clear();
             if (CD_) CD_->free();
             dit_loras_.clear(); dit_merged_ = false;
             dit_functional_.free(); dit_adapters_.clear(); free_dit_passes();
@@ -2171,7 +2171,7 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     profile_log(prof, "dec_total", wall_time_s() - t_dec_total);
 
     if (!keep_models) {
-        AE.free();
+        AE.free(); ae_applied_.clear();
         if (CD_) CD_->free();
         nets_resident_ = false;      // frugal: free everything -> reload next call
     } else {

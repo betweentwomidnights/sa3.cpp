@@ -200,6 +200,10 @@ diff before.txt after.txt
 The runtime version is written to stderr as provenance. That keeps an intentional version bump out
 of the behavioral diff while still recording which library produced each run.
 
+Setting `SA3_BASELINE_DECODER_ADAPTER` to a SAME-L decoder adapter adds a check that the same request
+hashes alike across repeated frugal and resident renders on one context, and the tool exits 2 if it
+doesn't. A frugal render frees the autoencoder, so its adapter has to be applied again on the next one.
+
 Anything that re-points how a request reaches the pipeline is a change no compiler can check: a
 wrong field is a different take, not a build error. This is what catches that.
 
