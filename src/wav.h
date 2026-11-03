@@ -75,7 +75,11 @@ inline void write_wav_planar_strided(const std::string& path, const float* data,
 
     const uint32_t data_bytes = (uint32_t)inter.size() * sizeof(int16_t);
     const uint32_t byte_rate  = sample_rate * n_ch * 2;
+#ifdef _WIN32
+    FILE* f = _wfopen(std::filesystem::u8path(path).c_str(), L"wb");
+#else
     FILE* f = fopen(path.c_str(), "wb");
+#endif
     auto u32 = [&](uint32_t v){ fwrite(&v, 4, 1, f); };
     auto u16 = [&](uint16_t v){ fwrite(&v, 2, 1, f); };
     fwrite("RIFF", 1, 4, f); u32(36 + data_bytes); fwrite("WAVE", 1, 4, f);

@@ -5,7 +5,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
+#include <vector>
 
 static int fails = 0;
 
@@ -36,6 +38,24 @@ int main() {
     expect_file(d, "bare", "lora-bare.gguf");
     expect_file(d, "solo", "lora-solo-take3-f32.gguf");      // no exact file: the old prefix match
     expect_file(d, "missing", "");
+
+    // ABI paths are UTF-8. The snowman is outside every Western Windows code page.
+    const std::string accented = sa3::path_utf8(dir) + "/caf\xC3\xA9 \xE2\x98\x83";
+    fs::create_directories(sa3::utf8_path(accented));
+    const std::string file = "lora-caf\xC3\xA9-f32.gguf";
+    std::ofstream(sa3::utf8_path(accented + "/" + file)) << "x";
+    const std::string got = sa3::resolve_lora_file(accented, "caf\xC3\xA9");
+    if (got.empty() || !fs::exists(sa3::utf8_path(got)) || sa3::path_utf8(sa3::utf8_path(got).filename()) != file) {
+        std::fprintf(stderr, "FAIL: accented adapter resolved to '%s'\n", got.c_str());
+        ++fails;
+    }
+    const std::map<std::string, std::vector<float>> norms{{"block", {1.f, 2.f}}};
+    sa3::normcache::save(got, norms);
+    std::map<std::string, std::vector<float>> loaded;
+    if (!sa3::normcache::load(got, loaded) || loaded != norms) {
+        std::fprintf(stderr, "FAIL: norm cache did not round trip beside an accented adapter\n");
+        ++fails;
+    }
 
     fs::remove_all(dir);
     if (fails) { std::fprintf(stderr, "%d failure(s)\n", fails); return 1; }

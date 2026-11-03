@@ -4,7 +4,8 @@
  * option structs through the returned table, and keep all library-owned audio
  * paired with result_free. Public data structs are size tagged. Top-level structs,
  * callback payloads, and strided array entries may grow by appending fields; types
- * embedded by value in another public struct are frozen for ABI V1.
+ * embedded by value in another public struct are frozen for ABI V1. Paths are UTF-8
+ * on every platform, including Windows.
  */
 #ifndef LIBSA3_V1_H
 #define LIBSA3_V1_H

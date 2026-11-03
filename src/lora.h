@@ -16,6 +16,7 @@
 #include "lora_legacy.h"
 #include "ggml.h"
 #include "gguf_model.h"
+#include "utf8_path.h"
 
 #include <algorithm>
 #include <cmath>
@@ -433,7 +434,7 @@ inline bool lora_apply_host_from_files(const std::vector<std::pair<std::string, 
                                    throw std::runtime_error("[lora] " + n + " in " + path + " is not f32");
                                const size_t bytes = gguf_get_tensor_size(g, id);
                                dst.resize(bytes / sizeof(float));
-                               std::ifstream f(std::filesystem::path(path), std::ios::binary);
+                               std::ifstream f(utf8_path(path), std::ios::binary);
                                f.seekg((std::streamoff)(gguf_get_data_offset(g) + gguf_get_tensor_offset(g, id)));
                                f.read(reinterpret_cast<char*>(dst.data()), (std::streamsize)bytes);
                                if (!f) throw std::runtime_error("[lora] short read of " + n + " in " + path);
@@ -569,9 +570,9 @@ inline std::string path_for(const std::string& model_path) { return model_path +
 
 inline bool load(const std::string& model_path, std::map<std::string, std::vector<float>>& out) {
     std::error_code ec;
-    const uintmax_t model_sz = std::filesystem::file_size(model_path, ec);
+    const uintmax_t model_sz = std::filesystem::file_size(utf8_path(model_path), ec);
     if (ec) return false;
-    std::ifstream f(path_for(model_path), std::ios::binary);
+    std::ifstream f(utf8_path(path_for(model_path)), std::ios::binary);
     if (!f) return false;
     char magic[8] = {0};
     uint64_t src_sz = 0, n = 0;
@@ -599,13 +600,13 @@ inline bool load(const std::string& model_path, std::map<std::string, std::vecto
 
 inline void save(const std::string& model_path, const std::map<std::string, std::vector<float>>& in) {
     std::error_code ec;
-    const uintmax_t model_sz = std::filesystem::file_size(model_path, ec);
+    const uintmax_t model_sz = std::filesystem::file_size(utf8_path(model_path), ec);
     if (ec) return;
     // Write to a temp then rename, so a killed run cannot leave a half-written cache that
     // would later be read as valid.
     const std::string tmp = path_for(model_path) + ".tmp";
     {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        std::ofstream f(utf8_path(tmp), std::ios::binary | std::ios::trunc);
         if (!f) return;
         const uint64_t src_sz = (uint64_t)model_sz, n = in.size();
         f.write("SA3NORM1", 8);
@@ -619,10 +620,10 @@ inline void save(const std::string& model_path, const std::map<std::string, std:
             f.write((const char*)&cnt, 8);
             f.write((const char*)kv.second.data(), (std::streamsize)(cnt*sizeof(float)));
         }
-        if (!f) { f.close(); std::filesystem::remove(tmp, ec); return; }
+        if (!f) { f.close(); std::filesystem::remove(utf8_path(tmp), ec); return; }
     }
-    std::filesystem::rename(tmp, path_for(model_path), ec);
-    if (ec) std::filesystem::remove(tmp, ec);
+    std::filesystem::rename(utf8_path(tmp), utf8_path(path_for(model_path)), ec);
+    if (ec) std::filesystem::remove(utf8_path(tmp), ec);
 }
 
 } // namespace normcache
