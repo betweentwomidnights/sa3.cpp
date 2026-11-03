@@ -28,6 +28,8 @@
  *   SA3_BASELINE_STEPS     sampling steps, default 4 — 2 likewise
  *   SA3_BASELINE_LANES     set to add the automation lane scenarios; the adapter argument must then
  *                          be a DiT adapter. Off by default so earlier captures still diff clean.
+ *   SA3_BASELINE_DECODER_ADAPTER  a SAME-L decoder adapter; renders it repeatedly on one context in
+ *                          both residency modes, which must all hash alike, and exits 2 if not.
  *
  * The optional adapter argument should be a gguf for the medium/SAME-L family; pass none to skip
  * that scenario. The whole set runs in about 100s on CPU at SECONDS=1.0 STEPS=2.
@@ -246,6 +248,35 @@ int main(int argc, char** argv) {
                    api->adapter_info(adapter, &info, &err), info.target, info.supports_lanes);
         }
         api->context_destroy(ctx);
+    }
+
+    /* ---- An autoencoder is freed and reloaded between frugal renders; its adapter must come back ---- */
+    const char* decoder = getenv("SA3_BASELINE_DECODER_ADAPTER");
+    if (decoder) {
+        ctx = open_ctx("medium", "q4_k_m", "q4_k_m");
+        sa3_adapter_v1 entry; memset(&entry, 0, sizeof entry);
+        entry.size = sizeof entry; api->adapter_init(&entry); entry.path_or_name = decoder;
+        const sa3_residency_v1 order[4] = {SA3_RESIDENCY_FRUGAL_V1, SA3_RESIDENCY_FRUGAL_V1,
+                                           SA3_RESIDENCY_RESIDENT_V1, SA3_RESIDENCY_FRUGAL_V1};
+        uint64_t first = 0;
+        int repeatable = 1;
+        for (int i = 0; i < 4; i++) {
+            sa3_request_v1 d; memset(&d, 0, sizeof d); d.size = sizeof d; api->request_init(&d);
+            d.operation = SA3_OPERATION_GENERATE_V1;
+            d.prompt = "warm analog house groove"; d.duration_seconds = g_seconds; d.steps = g_steps; d.seed = 3;
+            d.residency = order[i];
+            d.adapters = &entry; d.adapter_count = 1; d.adapter_stride = (uint32_t)sizeof(sa3_adapter_v1);
+            memset(&out, 0, sizeof out); out.size = sizeof out; api->result_init(&out);
+            const sa3_status_v1 st = api->generate(ctx, &d, &out, &err);
+            const uint64_t h = st == SA3_STATUS_OK_V1 ? hash_audio(&out) : 0;
+            printf("[decoder-adapter-%d] status %d residency %d audio_fnv1a %016llx\n", i, st, order[i], (unsigned long long)h);
+            if (i == 0) first = h;
+            if (st != SA3_STATUS_OK_V1 || h != first) repeatable = 0;
+            api->result_free(&out);
+        }
+        api->context_destroy(ctx);
+        printf("[decoder-adapter] repeatable %d\n", repeatable);
+        if (!repeatable) return 2;
     }
     return 0;
 }
