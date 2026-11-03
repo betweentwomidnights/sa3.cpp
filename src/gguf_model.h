@@ -311,7 +311,7 @@ inline GgufModel load_gguf(const char* path, ggml_backend_t backend = nullptr) {
     m.gguf = gguf_init_from_file(path, gp);
     if (!m.gguf) throw gguf_error("failed to open " + std::string(path));
 
-    std::unique_ptr<FILE, int(*)(FILE*)> f(fopen(path, "rb"), fclose);
+    std::unique_ptr<FILE, int(*)(FILE*)> f(ggml_fopen(path, "rb"), fclose);
     if (!f) throw gguf_error("cannot read " + std::string(path));
     const uint64_t data_off = (uint64_t)gguf_get_data_offset(m.gguf);
     uint64_t file_size = 0;

@@ -412,14 +412,15 @@ inline std::string resolve_one(const std::string& dir, const std::string& prefix
     namespace fs = std::filesystem;
     std::string found; std::error_code ec;
     if (ambiguous) *ambiguous = false;
-    if (!fs::is_directory(dir, ec)) return found;
-    for (const auto& e : fs::directory_iterator(dir, ec)) {
-        const std::string n = e.path().filename().string();
+    const fs::path root = utf8_path(dir);
+    if (!fs::is_directory(root, ec)) return found;
+    for (const auto& e : fs::directory_iterator(root, ec)) {
+        const std::string n = path_utf8(e.path().filename());
         if (n.size() >= prefix.size() + suffix.size()
             && n.compare(0, prefix.size(), prefix) == 0
             && n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0) {
             if (!found.empty()) { if (ambiguous) *ambiguous = true; return found; }
-            found = e.path().string();
+            found = path_utf8(e.path());
         }
     }
     return found;
@@ -443,10 +444,11 @@ inline bool lora_name_suffix_token(const std::string& token) {
 inline std::string resolve_lora_file(const std::string& dir, const std::string& name) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    if (name.empty() || !fs::is_directory(dir, ec)) return "";
+    const fs::path root = utf8_path(dir);
+    if (name.empty() || !fs::is_directory(root, ec)) return "";
     const std::string prefix = "lora-" + name, ext = ".gguf";
-    for (const auto& e : fs::directory_iterator(dir, ec)) {
-        const std::string n = e.path().filename().string();
+    for (const auto& e : fs::directory_iterator(root, ec)) {
+        const std::string n = path_utf8(e.path().filename());
         if (n.size() < prefix.size() + ext.size() || n.compare(0, prefix.size(), prefix) != 0 ||
             n.compare(n.size() - ext.size(), ext.size(), ext) != 0) continue;
         std::string rest = n.substr(prefix.size(), n.size() - prefix.size() - ext.size());
@@ -458,7 +460,7 @@ inline std::string resolve_lora_file(const std::string& dir, const std::string& 
             exact = lora_name_suffix_token(tok);
             i = j == std::string::npos ? rest.size() : j;
         }
-        if (exact) return e.path().string();
+        if (exact) return path_utf8(e.path());
     }
     return resolve_one(dir, prefix + "-", ext);
 }

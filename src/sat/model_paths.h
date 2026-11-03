@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pipeline.h"
+#include "../utf8_path.h"
 
 #include <algorithm>
 #include <cctype>
@@ -154,18 +155,18 @@ inline bool resolve_sat_large_model(const std::string& models_dir,
         if (error) *error = "unknown SAT model or encoding (models: stable-audio-open-1.0, foundation-1, foundation-1.2-keybeds, foundation-1.2-samples; encodings: f16, q8_0, q5_k_m, q4_k_m)";
         return false;
     }
-    const std::filesystem::path root(models_dir);
-    paths->dit = (root / dit).string();
-    paths->t5 = (root / t5).string();
-    paths->autoencoder = (root / ae).string();
+    const std::filesystem::path root = utf8_path(models_dir);
+    paths->dit = path_utf8(root / dit);
+    paths->t5 = path_utf8(root / t5);
+    paths->autoencoder = path_utf8(root / ae);
     for (const auto& path : {paths->dit, paths->t5, paths->autoencoder}) {
-        if (!std::filesystem::is_regular_file(path)) {
+        if (!std::filesystem::is_regular_file(utf8_path(path))) {
             if (error) *error = "missing " + path + " (run: python tools/download_models.py --sat --sat-model " + name + ")";
             return false;
         }
     }
     const std::filesystem::path encoder = root / sat_oobleck_encoder_relative_path();
-    paths->encoder = std::filesystem::is_regular_file(encoder) ? encoder.string() : std::string();
+    paths->encoder = std::filesystem::is_regular_file(encoder) ? path_utf8(encoder) : std::string();
     return true;
 }
 
@@ -184,12 +185,12 @@ inline bool resolve_saos_model(const std::string& models_dir,
         if (error) *error = "unknown SAT model or encoding (models: arc, kickbass, jerry-grunge; encodings: f16, q8_0, q5_k_m, q4_k_m)";
         return false;
     }
-    const std::filesystem::path root(models_dir);
-    paths->dit = (root / std::filesystem::path(dit)).string();
-    paths->t5 = (root / std::filesystem::path(t5)).string();
-    paths->autoencoder = (root / std::filesystem::path(ae)).string();
+    const std::filesystem::path root = utf8_path(models_dir);
+    paths->dit = path_utf8(root / std::filesystem::path(dit));
+    paths->t5 = path_utf8(root / std::filesystem::path(t5));
+    paths->autoencoder = path_utf8(root / std::filesystem::path(ae));
     for (const auto& path : {paths->dit, paths->t5, paths->autoencoder}) {
-        if (!std::filesystem::is_regular_file(path)) {
+        if (!std::filesystem::is_regular_file(utf8_path(path))) {
             if (error) *error = "missing " + path +
                 " (download SAOS with --saos-variant " + canonical_saos_variant(variant) +
                 " --encoding " + normalize_encoding(dit_encoding) +

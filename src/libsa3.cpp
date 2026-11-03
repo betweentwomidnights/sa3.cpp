@@ -826,7 +826,7 @@ sa3_status_v1 v1_generate_body(sa3_context* context,
     try {
         const auto resolve = [&](const V1AdapterList& names, V1AdapterList& out) {
             for (const auto& [name, strength] : names) {
-                std::string path = std::filesystem::exists(name)
+                std::string path = std::filesystem::exists(sa3::utf8_path(name))
                                  ? name
                                  : sa3::resolve_lora_file(context->adapters_dir, name);
                 if (path.empty())

@@ -13,6 +13,7 @@
 #include "ggml.h"
 #include "gguf.h"
 #include "lora_legacy.h"
+#include "utf8_path.h"
 #include "yyjson.h"
 
 #include <cstdint>
@@ -177,7 +178,7 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
         if (yyjson_val* v = yyjson_obj_get(root, "target"); v && yyjson_is_str(v)) target = yyjson_get_str(v);
     };
     if (!from_metadata) {
-        std::ifstream f(json_path, std::ios::binary);
+        std::ifstream f(utf8_path(json_path), std::ios::binary);
         if (!f) { err = "cannot open " + json_path; return false; }
         std::string js((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         yyjson_doc* doc = yyjson_read(js.data(), js.size(), 0);
@@ -189,7 +190,7 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
     // --- safetensors: read whole file, parse the JSON header, then the F32 tensor blobs ---
     std::vector<uint8_t> buf;
     {
-        std::ifstream f(safetensors_path, std::ios::binary | std::ios::ate);
+        std::ifstream f(utf8_path(safetensors_path), std::ios::binary | std::ios::ate);
         if (!f) { err = "cannot open " + safetensors_path; return false; }
         const std::streamsize sz = f.tellg();
         if (sz < 8) { err = "truncated safetensors: " + safetensors_path; return false; }
