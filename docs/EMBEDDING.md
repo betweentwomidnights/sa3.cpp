@@ -239,6 +239,10 @@ so a plugin only ever shares ggml with a build of the same code. Copy `*ggml*.dl
 needs shared ggml libraries (not `SA3_STATIC`) and git, to read the ggml commit; the release packages for
 gary4local leave it off and keep `ggml.dll`.
 
+A plugin build also turns on `SA3_TRIM_SOURCE_PATHS`, so the source folder doesn't end up in the libraries through
+ggml's asserts. An assert then names `\ggml\src\ggml-alloc.c` rather than the full path. Pass
+`-DSA3_TRIM_SOURCE_PATHS=OFF` to keep full paths while debugging.
+
 **models:** the DAW's working directory is unknown, so don't rely on the `"models"` default — pass an absolute
 `sa3_context_config_v1.models_dir` (bundle the ggufs, resolve the path at runtime,
 or read an env var like `SA3_MODELS_DIR`).

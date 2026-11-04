@@ -190,6 +190,24 @@ elseif(DEFINED SA3_COMPUTED_GGML_PREFIX AND GGML_LIBRARY_PREFIX STREQUAL SA3_COM
     set(GGML_LIBRARY_PREFIX "" CACHE STRING "prefix for ggml's shared library file names" FORCE)
     unset(SA3_COMPUTED_GGML_PREFIX CACHE)
 endif()
+
+# ggml's asserts print __FILE__, so a library otherwise carries the absolute path of the folder it
+# was built in, including inside ggml-cuda's device code. Plugin builds ship to other people, so they
+# trim it by default. Off elsewhere, where a full path in an assert is what a developer wants.
+option(SA3_TRIM_SOURCE_PATHS "Remove this source folder from paths compiled into the libraries" ${SA3_PRIVATE_GGML})
+if(SA3_TRIM_SOURCE_PATHS)
+    file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}" _sa3_native_source_dir)
+    add_compile_options(
+        "$<$<COMPILE_LANG_AND_ID:C,MSVC>:/d1trimfile:${_sa3_native_source_dir}>"
+        "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/d1trimfile:${_sa3_native_source_dir}>"
+        "$<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.>"
+        "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.>")
+    if(MSVC)
+        add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/d1trimfile:${_sa3_native_source_dir}>")
+    else()
+        add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.>")
+    endif()
+endif()
 add_subdirectory(ggml)
 
 # src/ is header-driven (acestep style); add library/tool targets here as phases land.
