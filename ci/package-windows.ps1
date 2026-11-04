@@ -21,6 +21,11 @@
 #   ci\package-windows.ps1 -Version v0.1.0 [-BuildDir build-dist] [-OutDir dist] [-SkipTests] [-CudaRuntime]
 #   ci\package-windows.ps1 -Version v0.1.0 -CpuOnly   # local packaging smoke check
 #   ci\package-windows.ps1 -Version v0.1.0 -CudaArch native  # local GPU smoke check
+#   ci\package-windows.ps1 -Version v0.1.0 -PrebuiltCuda ggml-cuda-bundle
+#
+# -PrebuiltCuda packages the ggml-cuda.dll and CUDA runtime that
+# ci\build-ggml-cuda.ps1 produced, instead of compiling them and needing the
+# toolkit. Backends load at run time, so nothing else in the build refers to it.
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$BuildDir = "build-dist",
@@ -29,6 +34,7 @@ param(
     [switch]$CpuOnly,
     [switch]$CudaRuntime,
     [string]$CudaArch = "",
+    [string]$PrebuiltCuda = "",
     [int]$Jobs = 4
 )
 
@@ -266,16 +272,26 @@ if ($cmake) {
     }
 }
 if (-not $cmake) { Fail "CMake was not found on PATH or in Visual Studio 2022" }
-if (-not $CpuOnly -and -not $env:CUDA_PATH) { Fail "CUDA_PATH is not set; install the CUDA Toolkit" }
+if (-not $CpuOnly -and -not $PrebuiltCuda -and -not $env:CUDA_PATH) { Fail "CUDA_PATH is not set; install the CUDA Toolkit" }
 if (-not $CpuOnly -and -not $env:VULKAN_SDK) { Fail "VULKAN_SDK is not set; install the Vulkan SDK" }
 if ($CpuOnly -and $CudaArch) { Fail "-CudaArch cannot be used with -CpuOnly" }
 if ($CpuOnly -and $CudaRuntime) { Fail "-CudaRuntime requires a GPU build" }
+if ($PrebuiltCuda -and ($CpuOnly -or $CudaArch -or $CudaRuntime)) { Fail "-PrebuiltCuda cannot be used with -CpuOnly, -CudaArch, or -CudaRuntime" }
 if ($CudaArch -and $BuildDir -eq "build-dist") { Fail "-CudaArch needs a separate -BuildDir to keep the portable release cache clean" }
 if ($Jobs -lt 1) { Fail "-Jobs must be positive" }
 
 # version.json ships with a full toolkit install; a trimmed CI install may only
 # have the versioned folder, which is named for the same release (v12.8).
-if (-not $CpuOnly) {
+if ($PrebuiltCuda) {
+    $bundleInfoFile = Join-Path $PrebuiltCuda "BUNDLE-INFO.json"
+    if (-not (Test-Path $bundleInfoFile)) { Fail "$bundleInfoFile is missing" }
+    $bundle = Get-Content $bundleInfoFile -Raw | ConvertFrom-Json
+    $ggmlPin = (git -C ggml rev-parse HEAD).Trim()
+    if ($bundle.ggml_commit -ne $ggmlPin) { Fail "the ggml-cuda bundle is for ggml $($bundle.ggml_commit), not the pinned $ggmlPin" }
+    $cudaVersion = $bundle.cuda
+    $cudaMajorMinor = ($cudaVersion -split "\.")[0..1] -join "."
+    $cudaMajor = ($cudaVersion -split "\.")[0]
+} elseif (-not $CpuOnly) {
     $versionJson = Join-Path $env:CUDA_PATH "version.json"
     if (Test-Path $versionJson) {
         $cudaVersion = (Get-Content $versionJson -Raw | ConvertFrom-Json).cuda.version
@@ -291,13 +307,14 @@ Write-Host "sa3.cpp    $(git rev-parse --short HEAD)"
 Write-Host "ggml       $(git -C ggml rev-parse HEAD)"
 Write-Host "version    $Version"
 if (-not $CpuOnly) {
-    Write-Host "cuda       $cudaVersion ($env:CUDA_PATH)"
+    Write-Host "cuda       $cudaVersion ($(if ($PrebuiltCuda) { "prebuilt in run $($bundle.run_id)" } else { $env:CUDA_PATH }))"
     Write-Host "vulkan     $env:VULKAN_SDK"
 }
 
 # --- build ------------------------------------------------------------------
 
 $gpuBuild = if ($CpuOnly) { "OFF" } else { "ON" }
+$cudaBuild = if ($PrebuiltCuda) { "OFF" } else { $gpuBuild }
 $configure = @(
     "-S", ".", "-B", $buildPath,
     "-G", "Visual Studio 17 2022", "-A", "x64",
@@ -306,7 +323,7 @@ $configure = @(
     "-DGGML_BACKEND_DL=ON",
     "-DGGML_CPU_ALL_VARIANTS=ON",
     "-DGGML_METAL=OFF",
-    "-DSA3_CUDA=$gpuBuild",
+    "-DSA3_CUDA=$cudaBuild",
     "-DSA3_VULKAN=$gpuBuild",
     "-DSA3_BUILD_TOOLS=ON",
     "-DSA3_BUILD_SAT=ON",
@@ -314,7 +331,7 @@ $configure = @(
 )
 if ($CudaArch) {
     $configure += "-DCMAKE_CUDA_ARCHITECTURES=$CudaArch"
-} elseif (-not $CpuOnly) {
+} elseif (-not $CpuOnly -and -not $PrebuiltCuda) {
     # A prior local smoke build may have cached "native". An ordinary package
     # must restore ggml's portable defaults, even when reusing that build folder.
     $configure += @("-U", "CMAKE_CUDA_ARCHITECTURES")
@@ -322,13 +339,15 @@ if ($CudaArch) {
 Invoke-Checked $cmake $configure
 Invoke-Checked $cmake @("--build", $buildPath, "--config", "Release", "--parallel", "$Jobs")
 
+$bin = Join-Path $buildPath "bin\Release"
+if ($PrebuiltCuda) { Copy-Item (Join-Path $PrebuiltCuda "ggml-cuda.dll") $bin }
+
 # The fixture-free tests run on the CPU backend, which here is loaded
 # dynamically exactly as it will be on a user's machine.
 if (-not $SkipTests) {
     Invoke-Checked $ctest @("--test-dir", $buildPath, "-C", "Release", "--output-on-failure")
 }
 
-$bin = Join-Path $buildPath "bin\Release"
 foreach ($server in "sa3-server.exe", "sat-server.exe") {
     $reported = (& (Join-Path $bin $server) --version).Trim()
     if ("v$reported" -ne $Version) {
@@ -382,6 +401,13 @@ Copy-Item (Join-Path $root "vendor\signalsmith-stretch\LICENSE.txt") (Join-Path 
 Copy-Item (Join-Path $root "vendor\signalsmith-linear\LICENSE.txt") (Join-Path $coreDir "LICENSE-signalsmith-linear.txt")
 $vcRuntime = Get-VcRuntime $buildPath
 foreach ($file in $vcRuntime) { Copy-Item $file $coreDir }
+if ($PrebuiltCuda) {
+    # The same rule Get-VcRuntime applies to everything built here: the runtime
+    # shipped must be at least as new as the compiler, including this DLL's.
+    $bundleMinor = [int](($bundle.msvc_toolset -split "\.")[1])
+    $runtimeMinor = (Get-Item $vcRuntime[0]).VersionInfo.FileMinorPart
+    if ($runtimeMinor -lt $bundleMinor) { Fail "the ggml-cuda bundle needs a 14.$bundleMinor VC runtime; this build ships 14.$runtimeMinor" }
+}
 
 $buildInfo = [ordered]@{
     service     = "sa3"
@@ -397,6 +423,13 @@ $buildInfo = [ordered]@{
     vulkan_sdk  = $(if ($CpuOnly) { $null } else { Split-Path -Leaf $env:VULKAN_SDK })
     msvc_runtime = (Get-Item $vcRuntime[0]).VersionInfo.FileVersion
     built_utc   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+}
+if ($PrebuiltCuda) {
+    # Say where the DLL came from: this run's attestation covers the zip, and the
+    # attestation on the DLL itself belongs to the run named here.
+    $buildInfo.ggml_cuda_built_by_run = $bundle.run_id
+    $buildInfo.ggml_cuda_built_from_commit = $bundle.source_commit
+    $buildInfo.ggml_cuda_msvc_toolset = $bundle.msvc_toolset
 }
 if (-not $CpuOnly) { $buildInfo.backends = @("cuda", "vulkan") }
 [System.IO.File]::WriteAllText(
@@ -427,8 +460,12 @@ if (-not $CpuOnly) {
         "cudart64_$cudaMajor.dll",
         "cublas64_$cudaMajor.dll",
         "cublasLt64_$cudaMajor.dll"
-    ) (Join-Path $env:CUDA_PATH "bin")
-    Copy-Item (Join-Path $env:CUDA_PATH "EULA.txt") (Join-Path $cudartDir "NVIDIA-CUDA-EULA.txt")
+    ) $(if ($PrebuiltCuda) { $PrebuiltCuda } else { Join-Path $env:CUDA_PATH "bin" })
+    if ($PrebuiltCuda) {
+        Copy-Item (Join-Path $PrebuiltCuda "NVIDIA-CUDA-EULA.txt") $cudartDir
+    } else {
+        Copy-Item (Join-Path $env:CUDA_PATH "EULA.txt") (Join-Path $cudartDir "NVIDIA-CUDA-EULA.txt")
+    }
 
     $standaloneDir = Join-Path $stage "standalone"
     New-Item -ItemType Directory -Force $standaloneDir | Out-Null

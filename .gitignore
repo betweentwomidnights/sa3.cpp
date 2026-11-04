@@ -21,6 +21,7 @@ build-dist-short/
 dist/
 dist-native/
 dist-short/
+ggml-cuda-bundle/
 build-audit*/
 # Standalone ggml builds, for running the fork's own test-backend-ops
 build-ggml-tests*/

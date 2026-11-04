@@ -19,24 +19,123 @@ on:
         type: choice
         options: [all, windows, macos]
         default: all
+      rebuild_ggml_cuda:
+        description: compile ggml-cuda even if a build for this ggml pin and toolchain already exists
+        required: false
+        type: boolean
+        default: false
 
 permissions:
+  actions: read
   contents: write
   id-token: write
   attestations: write
 
 jobs:
-  windows:
-    name: windows-x64 (cpu + cuda + vulkan)
+  # Every CUDA architecture ggml's portable default covers takes close to two
+  # hours to compile on a hosted runner, and the result only depends on the ggml
+  # pin and the toolchain. A dry run's build is kept as an attested artifact, and
+  # later runs with the same key, the release included, package that same DLL.
+  windows-cuda:
+    name: windows-x64 ggml-cuda
     # Pinned rather than windows-latest: the CUDA toolkit's MSBuild integration
     # targets Visual Studio 2022, and ci/package-windows.ps1 asks for that
     # generator by name. A runner image moving to a newer Visual Studio should
     # be a change made here on purpose, not one that turns up as a red release.
     runs-on: windows-2022
     if: github.event_name == 'release' || inputs.platforms != 'macos'
-    # Every CUDA architecture ggml's portable default covers is compiled, which
-    # is most of this job's time.
     timeout-minutes: 240
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      SA3_CUDA_VERSION: 12.8.1
+    outputs:
+      artifact: ${{ steps.find.outputs.artifact }}
+      run-id: ${{ steps.find.outputs.run-id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+          submodules: recursive
+
+      # Artifacts rather than actions/cache: a cache from a release branch can't be
+      # restored on a tag, and one unused for 7 days is evicted. Forks can name
+      # artifacts anything, so only this repository's runs count, and the
+      # packaging job still checks the attestation of what it downloads.
+      - name: Look for an existing build
+        id: find
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REBUILD: ${{ inputs.rebuild_ggml_cuda }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+        run: |
+          $artifact = "ggml-cuda-" + (./ci/build-ggml-cuda.ps1 -PrintKey)
+          if ($LASTEXITCODE -ne 0) { throw "could not compute the ggml-cuda key" }
+          "artifact=$artifact" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $runId = ""
+          if ($env:REBUILD -ne 'true') {
+            $found = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts?name=$artifact&per_page=100" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw "could not list artifacts" }
+            $match = $found.artifacts |
+              Where-Object { -not $_.expired -and "$($_.workflow_run.head_repository_id)" -eq $env:REPOSITORY_ID } |
+              Sort-Object created_at -Descending | Select-Object -First 1
+            if ($match) { $runId = "$($match.workflow_run.id)" }
+          }
+          if ($runId) {
+            Write-Host "reusing $artifact from run $runId"
+            "found=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            Write-Host "no build of $artifact to reuse; compiling"
+            $runId = $env:GITHUB_RUN_ID
+          }
+          "run-id=$runId" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # Install the full toolkit on every runner. Caching only the CUDA folder
+      # omits the Visual Studio integration installed outside that folder;
+      # CMake then fails with "No CUDA toolset found" on a cache hit.
+      - name: Install CUDA toolkit
+        if: steps.find.outputs.found != 'true'
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: ${{ env.SA3_CUDA_VERSION }}
+
+      - name: Point at the CUDA toolkit
+        if: steps.find.outputs.found != 'true'
+        shell: pwsh
+        run: |
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8"
+          "CUDA_PATH=$cuda" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$cuda\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Compile ggml-cuda
+        if: steps.find.outputs.found != 'true'
+        shell: pwsh
+        run: ./ci/build-ggml-cuda.ps1 -OutDir ggml-cuda-bundle
+
+      # Dry runs too: this DLL can end up in a later release.
+      - name: Attest the build
+        if: steps.find.outputs.found != 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'ggml-cuda-bundle/*.dll'
+
+      - name: Keep the build
+        if: steps.find.outputs.found != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.find.outputs.artifact }}
+          path: ggml-cuda-bundle/
+          retention-days: 90
+
+  windows:
+    name: windows-x64 (cpu + cuda + vulkan)
+    needs: windows-cuda
+    # Pinned for the same reason as windows-cuda; they must match.
+    runs-on: windows-2022
+    if: github.event_name == 'release' || inputs.platforms != 'macos'
+    timeout-minutes: 90
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
       VULKAN_VERSION: 1.4.350.0
@@ -61,20 +160,24 @@ jobs:
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "packaging $version$(if (-not $env:TAG) { ' (dry run)' })"
 
-      # Install the full toolkit on every runner. Caching only the CUDA folder
-      # omits the Visual Studio integration installed outside that folder;
-      # CMake then fails with "No CUDA toolset found" on a cache hit.
-      - name: Install CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.30
+      - name: Fetch ggml-cuda
+        uses: actions/download-artifact@v4
         with:
-          cuda: '12.8.1'
+          name: ${{ needs.windows-cuda.outputs.artifact }}
+          path: ggml-cuda-bundle
+          run-id: ${{ needs.windows-cuda.outputs.run-id }}
+          github-token: ${{ github.token }}
 
-      - name: Point at the CUDA toolkit
+      - name: Check where ggml-cuda came from
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8"
-          "CUDA_PATH=$cuda" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "$cuda\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          foreach ($dll in Get-ChildItem ggml-cuda-bundle -Filter *.dll) {
+            gh attestation verify $dll.FullName --repo $env:GITHUB_REPOSITORY `
+              --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/release.yml"
+            if ($LASTEXITCODE -ne 0) { throw "$($dll.Name) has no attestation from this repository's release workflow" }
+          }
 
       - name: Cache Vulkan SDK
         id: cache-vulkan
@@ -105,7 +208,7 @@ jobs:
 
       - name: Build, test, and package
         shell: pwsh
-        run: ./ci/package-windows.ps1 -Version $env:VERSION
+        run: ./ci/package-windows.ps1 -Version $env:VERSION -PrebuiltCuda ggml-cuda-bundle
 
       - name: Keep the packages
         uses: actions/upload-artifact@v4
