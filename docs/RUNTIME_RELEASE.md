@@ -84,6 +84,8 @@ local tracked files differed from the commit.
    `gh workflow run release.yml -R betweentwomidnights/sa3.cpp --ref main`.
    CI builds the full portable package and retains the four zips plus
    `SHA256SUMS` as a workflow artifact for 14 days. It creates no release.
+   This is the slow run when the ggml pin or toolchain has changed: see
+   [Reusing ggml-cuda](#reusing-ggml-cuda).
 2. **Install test:** download that artifact, check `SHA256SUMS`, and test the
    standalone zip directly. Build locally with `-CudaRuntime` when testing
    gary4local's `GARY4LOCAL_NATIVE_PACKAGE_DIR` override: that folder then
@@ -100,6 +102,21 @@ local tracked files differed from the commit.
 
 The current gary4local SA3, Stable Audio, and Foundation services still run
 their Python backends; this package prepares the native install path.
+
+### Reusing ggml-cuda
+
+Compiling `ggml-cuda.dll` is over 90% of a Windows build and takes more than an
+hour and a half on a hosted runner. It depends only on the ggml pin and the
+toolchain, so `release.yml` builds it in its own job with
+`ci/build-ggml-cuda.ps1` and keeps the DLL and CUDA runtime for 90 days as an
+artifact named `ggml-cuda-<ggml>-cuda<version>-msvc<toolset>-<script hash>`. A
+later run with the same name packages that build instead of compiling, so a
+release ships the DLL its dry run tested.
+
+Before packaging, the Windows job checks each DLL's attestation against this
+repository's `release.yml`. The zip's attestation covers the zip;
+`BUILD-INFO.json` names the run and commit that built the DLL inside it. Dispatch
+with `rebuild_ggml_cuda` to compile regardless.
 
 ## macOS universal package
 
