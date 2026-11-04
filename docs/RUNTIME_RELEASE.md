@@ -118,6 +118,11 @@ repository's `release.yml`. The zip's attestation covers the zip;
 `BUILD-INFO.json` names the run and commit that built the DLL inside it. Dispatch
 with `rebuild_ggml_cuda` to compile regardless.
 
+The name doesn't cover sa3.cpp's own `CMakeLists.txt`. The script configures
+`ggml/` directly, and its flags match the ones that configuration gives today. If
+you change how `CMakeLists.txt` sets ggml's options, make the same change in the
+script, which also changes the name.
+
 ## macOS universal package
 
 `sa3-<tag>-macos-universal.zip` contains the servers, generation/training tools,
