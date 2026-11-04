@@ -90,8 +90,9 @@ $info = [ordered]@{
     source_commit = (git rev-parse HEAD).Trim()
     run_id       = $env:GITHUB_RUN_ID
 }
+# .NET resolves relative paths against the process directory, not this script's location.
 [System.IO.File]::WriteAllText(
-    (Join-Path $OutDir "BUNDLE-INFO.json"),
+    (Join-Path (Resolve-Path $OutDir).Path "BUNDLE-INFO.json"),
     ($info | ConvertTo-Json) + "`n",
     (New-Object System.Text.UTF8Encoding($false)))
 Get-ChildItem $OutDir | ForEach-Object { Write-Host ("{0,-28} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB)) }
