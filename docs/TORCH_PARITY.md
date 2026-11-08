@@ -65,6 +65,14 @@ PyTorch's own fp16 and fp32 runs differ by 0.9-1.3% per step and 5.3% in the fin
   to the conditioner too, and koan carries a DoRA on the seconds projection. The converters now
   keep it as `te.secs`, and the pipeline applies it where it computes that token. Adapters
   converted before this carry no `te.secs`; convert them again to pick it up.
+- **A negative prompt's padding reached the unconditioned pass.** stable_audio_3's CFG branch
+  replaces the negative prompt's masked tokens with the null embedding
+  (`torch.where(negative_cross_attn_mask, negative, 0)`); the conditioned prompt keeps its
+  padding embedding, because the DiT disables that mask. sa3.cpp padded both. With "low quality"
+  (3 valid tokens of 257) at cfg 2, that put the teacher-forced velocity 9-45% off per step and
+  the final latent 3.4% off, against 0.6-4.5% and 0.24% at cfg 2 without a negative prompt.
+  sa3.cpp now zeroes those rows of the unconditioned conditioning, and the run lands at
+  0.7-4.1% / 0.24% (all with the fp32, no-padding-mask reference described below).
 - The decoder, the squeakfix decoder adapter, F16 vs F32 weights, merged vs functional adapters,
   the schedule and CFG all match.
 - Known remaining differences: the reference masks the 2 headroom frames past
@@ -73,3 +81,29 @@ PyTorch's own fp16 and fp32 runs differ by 0.9-1.3% per step and 5.3% in the fin
   only zeroes their values). The fp16 service also quantizes the normalized seconds to fp16
   before 10 kHz Fourier features, which moves its seconds token by 7.5%; sa3.cpp's f32 value
   matches the fp32 reference.
+
+## Lowering the floor
+
+Against the fp16 service with its padding mask, even the base model differs 6-16% per step on
+the DGX Spark, enough to hide a mistake of a few percent in whatever you are checking. Record
+the reference in fp32 and without the padding mask (`--fp32 --no-padding-mask`) and compare
+teacher-forced: the base model then sits at 0.3-2.9% per step and 0.14% in the final latent.
+
+## Automation lanes (DGX Spark, medium, 10 s, 8 steps)
+
+gary4juce's remote SA3 runs a PyTorch port of the lanes (`lora_lanes.py` in the service), so
+the same request gives the same clip on either side. Compared as above (fp32 reference, no
+padding mask, teacher-forced), with the registry's DoRA adapters converted from their `.ckpt`:
+
+| case | DiT velocity per step | final latent |
+| --- | --- | --- |
+| base model, no adapter (the floor) | 0.34-2.9% | cos 0.999999, rel 0.14% |
+| two lanes, kev 1 → 0 and keygen 0 → 1, cfg 1 | 0.29-1.7% | cos 0.999999, rel 0.12% |
+| shared kev 0.5, a lane with its own prompt, the Automation tab's blend (`lane_average_until` 0.9, `lane_isolation` 1, `lane_isolation_until` 0), cfg 1 | 0.37-4.2% | cos 0.999999, rel 0.15% |
+| the same at cfg 2 with a negative prompt | 0.9-5.3% | cos 0.999994, rel 0.35% |
+
+The lanes move the latent 71% against the same seed without them, so the match isn't the
+curves doing nothing. Every pass in these cases holds one adapter, or the shared adapter followed
+by one that also sorts after it. In a pass with several DoRAs the PyTorch side applies them in
+its load order rather than shared-then-lane, which can differ slightly because DoRA
+renormalizes.

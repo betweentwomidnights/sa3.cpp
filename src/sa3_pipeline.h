@@ -1411,6 +1411,11 @@ inline GenResult Pipeline::generate(const GenParams& params) {
         if (!negative_prompt.empty()) {
             std::vector<int32_t> nids, nattn; tokenize(negative_prompt, nids, nattn);
             uncond_crossb = assemble_cross(t5_encode(nids, nattn), nattn);
+            // stable_audio_3's CFG branch replaces the negative prompt's masked (padding) tokens
+            // with the null embedding: torch.where(negative_cross_attn_mask, negative, 0). The
+            // conditioned branch keeps the padding embedding (its mask is disabled), so only here.
+            for (int p = 0; p < max_len; p++)
+                if (!nattn[p]) memset(&uncond_crossb[(size_t)p*cond_dim], 0, cond_dim*sizeof(float));
             throw_if_cancelled(params.should_cancel);
         } else {
             uncond_crossb.assign((size_t)cond_dim*ctx_len, 0.0f);

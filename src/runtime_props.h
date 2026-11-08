@@ -35,7 +35,7 @@ inline std::string runtime_json_quote(const char* input) {
 // definition. This probe must not initialize ggml, read .env, or bind a port.
 inline const char* sa3_server_capabilities_json() {
     return "{\"fixed_prefix\":true,\"request_splice\":true,"
-           "\"conditioning_duration\":true,\"model_lifecycle\":true}";
+           "\"conditioning_duration\":true,\"model_lifecycle\":true,\"lora_lanes\":true}";
 }
 
 inline std::string sa3_server_control_info_json() {

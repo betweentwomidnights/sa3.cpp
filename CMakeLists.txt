@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sa3_cpp VERSION 0.2.1 LANGUAGES C CXX)
+project(sa3_cpp VERSION 0.2.2 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -599,6 +599,9 @@ if(SA3_BUILD_SAT)
     add_executable(sa3-lib-sat-smoke tools/sa3-lib-sat-smoke.c)
     target_include_directories(sa3-lib-sat-smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(sa3-lib-sat-smoke PRIVATE sa3_shared)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(sa3-lib-sat-smoke PRIVATE m)
+    endif()
 endif()
 
 add_executable(sa3-lib-v1-contract tests/libsa3_v1_contract.c)

@@ -18,7 +18,7 @@ if service == "sa3":
     assert info["schema_version"] == 1 and info["service"] == service
     assert info["version"] == version
     assert all(info["capabilities"].get(key) is True for key in (
-        "fixed_prefix", "request_splice", "conditioning_duration", "model_lifecycle"))
+        "fixed_prefix", "request_splice", "conditioning_duration", "model_lifecycle", "lora_lanes"))
 props = json.loads(output("--props"))
 assert props["success"] is True
 assert props["service"] == service
