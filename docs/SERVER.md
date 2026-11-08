@@ -180,7 +180,8 @@ reloads a clean DiT only when a request's adapter set changes, so strengths can 
 
 ## LoRA automation lanes (`lora_lanes`, `lora_envelope`)
 
-Experimental. An envelope draws an adapter's strength over the output timeline, so one request
+Experimental. `/health.capabilities.lora_lanes` advertises it; a server without that flag
+ignores these fields and renders without automation. An envelope draws an adapter's strength over the output timeline, so one request
 replaces crop -> continue at another strength -> crop. Breakpoints are `[seconds, amount]`, linear
 between points and held flat past either end; `amount` multiplies the adapter's `strength`, so with
 strength 1.0 the curve is the strength. With continuation, time 0 is the start of the kept source.
