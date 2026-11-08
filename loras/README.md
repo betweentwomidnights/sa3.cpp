@@ -11,8 +11,11 @@ adapter files live here. two kinds:
 ## convert an export to a gguf (no python)
 
 ```bash
-sa3-lora-convert --in loras/kev --out models/lora-kev-f32.gguf     # reads kev.safetensors + kev.json
+sa3-lora-convert --in loras/kev --out models/lora-kev-f32.gguf     # reads loras/kev.safetensors + loras/kev.json
 ```
+
+`--in` takes the export's path without its extension, not a folder: for an export kept in
+`loras/kev/`, pass `--in loras/kev/kev`.
 
 `sa3-lora-convert` (and `convert_lora` in the versioned `sa3_api_v1` table) are a C++ port of
 `tools/convert_lora.py`, so a host can convert `.safetensors` adapters **in-process with no Python**. a raw `.ckpt` still needs the python /
