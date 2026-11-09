@@ -2194,19 +2194,21 @@ function load() {
   for (const l of state.lanes) nextLaneId = Math.max(nextLaneId, (l.id || 0) + 1);
 }
 
-// ─── envelope maths (mirrors the C++ sampler: sorted, linear, held flat past the ends) ──
+// ─── envelope maths (mirrors sa3::envelope_amount: sorted by time, linear, held flat past the
+// ends; points that share a time are a jump, in the order given) ──
 
 function amountAt(points, t) {
   if (!points.length) return 0;
-  if (t <= points[0][0]) return points[0][1];
+  if (t < points[0][0]) return points[0][1];
   for (let k = 1; k < points.length; k++) {
-    if (t <= points[k][0]) {
+    if (t < points[k][0]) {
       const [t0, a0] = points[k - 1], [t1, a1] = points[k];
-      return t1 > t0 ? a0 + (t - t0) / (t1 - t0) * (a1 - a0) : a1;
+      return a0 + (t - t0) / (t1 - t0) * (a1 - a0);
     }
   }
   return points[points.length - 1][1];
 }
+// Array.prototype.sort is stable, so points that share a time keep their order.
 const sortPts = (l) => l.points.sort((a, b) => a[0] - b[0]);
 const round = (v, q) => Math.round(v / q) * q;
 
@@ -2237,9 +2239,9 @@ async function connect() {
     const famOf = (l) => { const s = `${l.base_model} ${l.name}`.toLowerCase();
       return s.includes("same-l") || s.includes("squeakfix") ? "same-l" : s.includes("same-s") || s.includes("declora") ? "same-s" : ""; };
     decoders = (r.loras || []).filter((l) => l.target === "decoder" && famOf(l) === fam);
-    // The correction is the studio's (Models tab) setting under the same key, so both views agree;
-    // never chosen anywhere -> squeakfix here, without)sa3web") +
-    std::string(R"sa3web( writing that default back to the studio.
+    // The correct)sa3web") +
+    std::string(R"sa3web(ion is the studio's (Models tab) setting under the same key, so both views agree;
+    // never chosen anywhere -> squeakfix here, without writing that default back to the studio.
     decoderKey = fam ? `sa3-decoder-${fam}` : "";
     let shared = null;
     try { shared = decoderKey ? localStorage.getItem(decoderKey) : null; } catch { /* storage unavailable */ }
@@ -2314,11 +2316,11 @@ function readForm() {
   state.bpm = $("#bpm").value;
   state.avgUntil = Math.min(1, Math.max(0, +$("#avg-until").value || 0));
   state.key = $("#key").value;
-  if (state.decoder !== $("#decoder").value && decoderKey) {
+  if (state.decoder !== $("#decoder").value &&)sa3web") +
+    std::string(R"sa3web( decoderKey) {
     try { localStorage.setItem(decoderKey, $("#decoder").value); } catch { /* storage unavailable */ }
   }
-  state.decoder)sa3web") +
-    std::string(R"sa3web( = $("#decoder").value;
+  state.decoder = $("#decoder").value;
   state.isoUntil = Math.min(1, Math.max(0, +$("#iso-until").value || 0));
 }
 function writeForm() {
@@ -2404,12 +2406,12 @@ const PRESETS = {
   "½": (d) => [[0, 0], [d / 2 - 0.01, 0], [d / 2, 1]],
 };
 
-function renderLanes() {
+functi)sa3web") +
+    std::string(R"sa3web(on renderLanes() {
   const host = $("#lanes");
   host.innerHTML = "";
   state.lanes.forEach((lane, idx) => {
-    const row = document.cre)sa3web") +
-    std::string(R"sa3web(ateElement("div");
+    const row = document.createElement("div");
     row.className = "tl-row";
     const opts = loras.map((l) => `<option value="${esc(l.name)}" ${l.name === lane.lora ? "selected" : ""}>${esc(l.name)}</option>`).join("");
     const missing = lane.lora && !loras.some((l) => l.name === lane.lora) ? `<option selected>${esc(lane.lora)} (missing)</option>` : "";
@@ -2480,13 +2482,13 @@ function prep(cv) {
   g.clearRect(0, 0, w, h);
   return g;
 }
-function resize() {
+function resize)sa3web") +
+    std::string(R"sa3web(() {
   for (const cv of document.querySelectorAll("#timeline canvas")) cv.style.height = cv.dataset.h + "px";
   drawAll();
 }
 
-// ─── draw)sa3web") +
-    std::string(R"sa3web(ing ────────────────────────────────────────────────────────────────
+// ─── drawing ────────────────────────────────────────────────────────────────
 
 function drawWave(g, cv, peaks, dur, alpha) {
   if (!peaks) return;
@@ -2575,11 +2577,11 @@ function spectrogram(mono, sr) {
   const edges = Array.from({ length: SPEC_ROWS + 1 }, (_, r) => fmin * Math.pow(fmax / fmin, r / SPEC_ROWS) * NFFT / sr);
   const db = new Float32Array(SPEC_COLS * SPEC_ROWS);
   const re = new Float32Array(NFFT), im = new Float32Array(NFFT);
-  const hop = Math.max(1, (mono.length - NFFT) / (SPEC_COLS - 1));
+  const hop = Math.max(1, (mono.length - NFFT) / (SPEC_COL)sa3web") +
+    std::string(R"sa3web(S - 1));
   for (let c = 0; c < SPEC_COLS; c++) {
     const o = Math.floor(c * hop);
-    for (let i = 0; i < NFFT; i++) { re[i] = (mono[o )sa3web") +
-    std::string(R"sa3web(+ i] || 0) * win[i]; im[i] = 0; }
+    for (let i = 0; i < NFFT; i++) { re[i] = (mono[o + i] || 0) * win[i]; im[i] = 0; }
     fftMag(re, im);
     for (let r = 0; r < SPEC_ROWS; r++) {
       const b0 = Math.floor(edges[r]), b1 = Math.max(b0 + 1, Math.floor(edges[r + 1]));
@@ -2666,9 +2668,9 @@ function drawAll() {
 function attachLaneEditor(cv, tip, lane) {
   const s = { lane, hover: -1 };
   laneCanvases.set(cv, s);
-  let drag = null;   // {kind: "point", i} | {kind: "draw", t0, t1, samples}
-  const pos = (e) => { const r = cv.getBoundingClientRect(); return)sa3web") +
-    std::string(R"sa3web( [e.clientX - r.left, e.clientY - r.top]; };
+  let d)sa3web") +
+    std::string(R"sa3web(rag = null;   // {kind: "point", i} | {kind: "draw", t0, t1, samples}
+  const pos = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   const hit = (x, y) => lane.points.findIndex((p) => Math.hypot(xOf(cv, p[0]) - x, yOf(cv, p[1], lane.max) - y) < 8);
   const snap = (t, a, e) => e.ctrlKey || e.metaKey ? [round(t, beatSec() || 0.25), round(a, 0.05)] : [round(t, 0.01), round(a, 0.005)];
   const showTip = (x, y, t, a) => {
@@ -2748,10 +2750,10 @@ function buildRequest() {
     lane_isolation: state.mode === "velocity" ? state.iso : 0,
     lane_isolation_until: state.isoUntil,
     lane_average_until: state.mode === "velocity" ? state.avgUntil : 0,
-    lora_lanes: lanes.map((l) => ({
+   )sa3web") +
+    std::string(R"sa3web( lora_lanes: lanes.map((l) => ({
       loras: [{ name: l.lora, strength: l.strength }],
-      envelope: l.points.map((p) => [+p[0].toFixe)sa3web") +
-    std::string(R"sa3web(d(3), +p[1].toFixed(3)]),
+      envelope: l.points.map((p) => [+p[0].toFixed(3), +p[1].toFixed(3)]),
       ...(l.prompt.trim() ? { prompt: withMusic(l.prompt.trim()) } : {}),
     })),
   };
@@ -2838,14 +2840,14 @@ function takeFileName(t) {
   if (t.snapshot.bpm) parts.push(`${t.snapshot.bpm}bpm`);
   parts.push(t.request.lane_isolation ? `iso${t.request.lane_isolation}` : "noiso");
   if (t.request.lane_average_until) parts.push(`shared${t.request.lane_average_until}`);
-  parts.push(`seed${t.seed}`);
+  parts.push(`se)sa3web") +
+    std::string(R"sa3web(ed${t.seed}`);
   return parts.join("_").replace(/[^\w+.-]+/g, "-") + ".wav";
 }
 
 function renderTakes() {
   const host = $("#takes");
-  if)sa3web") +
-    std::string(R"sa3web( (!takes.length) return;
+  if (!takes.length) return;
   host.innerHTML = "";
   for (const t of takes) {
     const div = document.createElement("div");
@@ -2917,9 +2919,9 @@ function init() {
   $("#audio").addEventListener("ended", drawAll);
   document.addEventListener("keydown", (e) => {
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); generate(); }
-    else if (e.code === "Space" && !typing) { e.preventDefault(); )sa3web") +
-    std::string(R"sa3web(togglePlay(); }
+    if (e.key === "E)sa3web") +
+    std::string(R"sa3web(nter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); generate(); }
+    else if (e.code === "Space" && !typing) { e.preventDefault(); togglePlay(); }
   });
   window.addEventListener("resize", resize);
   renderLanes();

@@ -780,9 +780,10 @@ struct GenParams {
     std::vector<std::pair<std::string, float>> loras;   // (gguf path, strength)
 
     // LoRA strength automation (see sa3::DitEnv). Breakpoints (seconds on the OUTPUT timeline,
-    // amount), linear between them and held flat past either end. `amount` multiplies every DiT
-    // adapter's strength above, so with strength 1.0 it reads as the strength itself. Empty = the
-    // ordinary constant-strength run. Needs the functional adapter path ('lora'/'dora-rows').
+    // amount), linear between them and held flat past either end; points that share a time are a
+    // jump, in the order given (see envelope_amount). `amount` multiplies every DiT adapter's
+    // strength above, so with strength 1.0 it reads as the strength itself. Empty = the ordinary
+    // constant-strength run. Needs the functional adapter path ('lora'/'dora-rows').
     std::vector<std::pair<float, float>> lora_envelope;
     // How the envelope is applied. "velocity": separate base and adapted forward passes, their
     // velocities mixed per frame (two passes per step; no leak within a pass). "layer": one pass,
@@ -886,6 +887,28 @@ struct GenParams {
 // overflows the velocity mix exactly like an infinite one and decodes to silence.
 constexpr float kMaxLaneAmount = 100.0f;
 constexpr size_t kMaxLanes = 8, kMaxEnvelopePoints = 256;
+
+// Envelope points ordered by time only. Points that share a time keep the order given, so
+// (t, 2), (t, 0) stays a drop at t; a pair sort would turn it into a dip followed by a ramp.
+inline std::vector<std::pair<float, float>> sorted_envelope(std::vector<std::pair<float, float>> pts) {
+    std::stable_sort(pts.begin(), pts.end(),
+                     [](const std::pair<float, float>& a, const std::pair<float, float>& b) { return a.first < b.first; });
+    return pts;
+}
+
+// The amount at time t of a sorted_envelope: linear between points, held flat past either end.
+// Points that share a time are a jump: before it the curve heads to the first of them, from it on
+// it starts at the last.
+inline float envelope_amount(const std::vector<std::pair<float, float>>& pts, float t) {
+    if (pts.empty()) return 0.0f;
+    if (t < pts.front().first) return pts.front().second;
+    for (size_t k = 1; k < pts.size(); k++)
+        if (t < pts[k].first) {
+            const float t0 = pts[k-1].first, t1 = pts[k].first;
+            return pts[k-1].second + (t - t0) / (t1 - t0) * (pts[k].second - pts[k-1].second);
+        }
+    return pts.back().second;
+}
 inline std::string lora_lanes_error(const GenParams& p) {
     auto points_error = [](const std::vector<std::pair<float, float>>& env, const char* what) -> std::string {
         if (env.size() > kMaxEnvelopePoints) return std::string(what) + ": at most 256 envelope points";
@@ -1835,25 +1858,13 @@ inline GenResult Pipeline::generate(const GenParams& params) {
     ggml_tensor* local = nullptr;
     if (!localb.empty()) { local = ggml_new_tensor_2d(dctx, GGML_TYPE_F32, dc.local_dim, T); ggml_set_input(local); }
     // Automation: a lane's breakpoints sampled at each latent frame's centre, relative to the peak
-    // its chain was built at; linear between points and held flat past either end.
+    // its chain was built at (see envelope_amount).
     const int spf = sc.patch_size * sc.output_seg;
     auto sample_envelope = [&](const std::vector<std::pair<float,float>>& bps, float peak) {
-        std::vector<std::pair<float,float>> pts(bps.begin(), bps.end());
-        std::sort(pts.begin(), pts.end());
+        const std::vector<std::pair<float,float>> pts = sorted_envelope(bps);
         std::vector<float> e(T);
-        for (int i = 0; i < T; i++) {
-            const float t = ((float)i + 0.5f) * (float)spf / 44100.0f;
-            float a = pts.back().second;
-            if (t <= pts.front().first) a = pts.front().second;
-            else for (size_t k = 1; k < pts.size(); k++)
-                if (t <= pts[k].first) {
-                    const float t0 = pts[k-1].first, t1 = pts[k].first;
-                    const float u = t1 > t0 ? (t - t0) / (t1 - t0) : 1.0f;
-                    a = pts[k-1].second + u * (pts[k].second - pts[k-1].second);
-                    break;
-                }
-            e[i] = a / peak;
-        }
+        for (int i = 0; i < T; i++)
+            e[i] = envelope_amount(pts, ((float)i + 0.5f) * (float)spf / 44100.0f) / peak;
         return e;
     };
     // layer mode: one pass, the per-token amount fed to every adapted layer (sa3::DitEnv)

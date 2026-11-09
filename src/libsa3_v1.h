@@ -145,7 +145,8 @@ typedef struct {
  * envelope holds envelope_point_count (seconds, amount) pairs. Seconds are on the output timeline,
  * so with Continue time 0 is the start of the source. Amounts are in [0, 100] and multiply the
  * adapters' strengths: with strength 1, the curve is the strength. Linear between points, held flat
- * past either end. request.lane_stride must be sizeof(sa3_lane_v1). */
+ * past either end. Points are ordered by time; points that share a time are a jump, in the order
+ * given, so (4, 2), (4, 0) drops from 2 to 0 at 4 s. request.lane_stride must be sizeof(sa3_lane_v1). */
 typedef struct {
     uint32_t size;
     const sa3_adapter_v1* adapters;
