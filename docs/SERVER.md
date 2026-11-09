@@ -185,6 +185,10 @@ ignores these fields and renders without automation. An envelope draws an adapte
 replaces crop -> continue at another strength -> crop. Breakpoints are `[seconds, amount]`, linear
 between points and held flat past either end; `amount` multiplies the adapter's `strength`, so with
 strength 1.0 the curve is the strength. With continuation, time 0 is the start of the kept source.
+Points are ordered by time; points that share a time are a jump, in the order given:
+`[[0, 0], [4, 2], [4, 0]]` ramps up to 2 and drops to 0 at 4 s, and `[[4, 0], [4, 2]]` rises at
+4 s. Before the shared time the curve heads to the first of them; from that time on it starts at
+the last.
 
 ```json
 "lora_lanes": [

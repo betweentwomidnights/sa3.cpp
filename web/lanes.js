@@ -40,19 +40,21 @@ function load() {
   for (const l of state.lanes) nextLaneId = Math.max(nextLaneId, (l.id || 0) + 1);
 }
 
-// ─── envelope maths (mirrors the C++ sampler: sorted, linear, held flat past the ends) ──
+// ─── envelope maths (mirrors sa3::envelope_amount: sorted by time, linear, held flat past the
+// ends; points that share a time are a jump, in the order given) ──
 
 function amountAt(points, t) {
   if (!points.length) return 0;
-  if (t <= points[0][0]) return points[0][1];
+  if (t < points[0][0]) return points[0][1];
   for (let k = 1; k < points.length; k++) {
-    if (t <= points[k][0]) {
+    if (t < points[k][0]) {
       const [t0, a0] = points[k - 1], [t1, a1] = points[k];
-      return t1 > t0 ? a0 + (t - t0) / (t1 - t0) * (a1 - a0) : a1;
+      return a0 + (t - t0) / (t1 - t0) * (a1 - a0);
     }
   }
   return points[points.length - 1][1];
 }
+// Array.prototype.sort is stable, so points that share a time keep their order.
 const sortPts = (l) => l.points.sort((a, b) => a[0] - b[0]);
 const round = (v, q) => Math.round(v / q) * q;
 
