@@ -1622,6 +1622,20 @@ int main(int argc, char** argv) {
         // Normal routes run after cpp-httplib reads POST bodies into req.body.
         svr.Get(R"(/training(?:/.*)?)", proxy_training);
         svr.Post(R"(/training/.*)", proxy_training);
+    } else {
+        // The Studio's training tab frames /training/. Say why it is empty instead of a 404.
+        svr.Get(R"(/training(?:/.*)?)", [](const httplib::Request&, httplib::Response& res) {
+            res.status = 503;
+            res.set_content(
+                "<!doctype html><meta charset=\"utf-8\"><meta name=\"color-scheme\" content=\"light dark\"><title>LoRA training is off</title>"
+                "<body style=\"font-family:system-ui,sans-serif;max-width:40em;margin:3em auto;line-height:1.5\">"
+                "<h2>LoRA training is not running</h2>"
+                "<p>This server was started without <code>--train-port</code>, so it has no training server to show here.</p>"
+                "<p>On Windows, stop it and run <code>studio.cmd</code>, which starts both. Elsewhere, run "
+                "<code>sa3-train-web --port 8016</code> and restart <code>sa3-server</code> with "
+                "<code>--train-port 8016</code>.</p></body>",
+                "text/html; charset=utf-8");
+        });
     }
 
     // --web-dir: serve a directory of static files at /, so a front-end lives beside the server
