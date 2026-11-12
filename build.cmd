@@ -46,20 +46,30 @@ cmake --build %DIR% --config Release
 if errorlevel 1 exit /b 1
 echo [sa3] done -^> %DIR%\bin\Release\
 
-rem Write env files so the tools run from any dir without the long path.
+rem Write env files so the tools run from any dir without the long path. They print
+rem commands to paste. The studio comes first because only it starts LoRA training.
+rem studio.cmd and server.cmd prefer the sa3-server on PATH, so they run this build.
 set "BIN=%CD%\%DIR%\bin\Release"
+set "GENERATE=sa3-generate --model medium --prompt "..." --out song.wav"
+set "TRAIN=sa3-train --dataset C:\path\to\dataset --steps 1500"
 > env.cmd echo @set "PATH=%BIN%;%%PATH%%"
 >> env.cmd echo @set "SA3_MODELS_DIR=%CD%\models"
->> env.cmd echo @echo [sa3] environment ready. Example:
->> env.cmd echo @echo [sa3]   sa3-generate --model medium --prompt "..." --out song.wav
->> env.cmd echo @echo [sa3]   sa3-train --dataset C:\path\to\dataset --steps 1500
+>> env.cmd echo @echo [sa3] %BACKEND% environment ready. Studio and LoRA training, at http://127.0.0.1:8006/
+>> env.cmd echo @echo [sa3]   studio.cmd
+>> env.cmd echo @echo [sa3] Studio without training:
+>> env.cmd echo @echo [sa3]   server.cmd
+>> env.cmd echo @echo [sa3] CLI:
+>> env.cmd echo @echo [sa3]   %GENERATE%
+>> env.cmd echo @echo [sa3]   %TRAIN%
 > env.ps1 echo $env:Path = "%BIN%;$env:Path"
 >> env.ps1 echo $env:SA3_MODELS_DIR = "%CD%\models"
->> env.ps1 echo Write-Host '[sa3] environment ready. Example:'
->> env.ps1 echo Write-Host '[sa3]   sa3-generate --model medium --prompt "..." --out song.wav'
->> env.ps1 echo Write-Host '[sa3]   sa3-train --dataset C:\path\to\dataset --steps 1500'
-echo [sa3] to run the tools from any dir:
+>> env.ps1 echo Write-Host '[sa3] %BACKEND% environment ready. Studio and LoRA training, at http://127.0.0.1:8006/'
+>> env.ps1 echo Write-Host '[sa3]   .\studio.cmd'
+>> env.ps1 echo Write-Host '[sa3] Studio without training:'
+>> env.ps1 echo Write-Host '[sa3]   .\server.cmd'
+>> env.ps1 echo Write-Host '[sa3] CLI:'
+>> env.ps1 echo Write-Host '[sa3]   %GENERATE%'
+>> env.ps1 echo Write-Host '[sa3]   %TRAIN%'
+echo [sa3] next, put this build on PATH. It prints how to start the studio:
 echo [sa3]   cmd:         env.cmd
 echo [sa3]   powershell:  . .\env.ps1
-echo [sa3]   then, e.g.:  sa3-generate --model medium --prompt "..." --out song.wav
-echo [sa3]                 sa3-train --dataset C:\path\to\dataset --steps 1500

@@ -32,16 +32,16 @@ in the web ui:
 the models and settings tabs handle model downloads, decoder corrections, and audio output
 preferences.
 
-After the build and model download below, run `server.cmd` on Windows to start the
-inference studio at [127.0.0.1:8006](http://127.0.0.1:8006):
+After the build and model download below, run `studio.cmd` on Windows to start the
+studio, **with LoRA training**, at [127.0.0.1:8006](http://127.0.0.1:8006):
 
 ```powershell
-.\server.cmd
+.\studio.cmd
 ```
 
-Use `.\studio.cmd` instead to start **both inference and LoRA training** behind
-the same browser URL. On macOS/Linux, use `./server.sh --port 8006` for inference;
-the [server guide](docs/SERVER.md) covers starting the training companion.
+`.\server.cmd` starts the studio without training. On macOS/Linux, `source ./env.sh`
+prints the command that starts both; `./server.sh` starts inference only. The env
+scripts on every platform print these commands for the backend you just built.
 
 ## quickstart
 
