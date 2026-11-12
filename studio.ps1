@@ -12,7 +12,11 @@ if ($Port -lt 1 -or $Port -gt 65535 -or $TrainPort -lt 1 -or $TrainPort -gt 6553
     throw "Port and TrainPort must be distinct valid TCP ports."
 }
 
-$candidates = if ($BinDir) { @($BinDir) } else { @(".", "build-cuda/bin/Release", "build-vulkan/bin/Release", "build-all/bin/Release", "build/bin/Release", "build-studio/bin/Release", "build-preview/bin/Release") }
+# A release package keeps the binaries beside this script ("."). In a checkout, the build
+# env.cmd put on PATH is the one just built, so try it before the fixed list of build dirs.
+$onPath = Get-Command sa3-server.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+$pathDir = if ($onPath) { @(Split-Path -Parent $onPath.Source) } else { @() }
+$candidates = if ($BinDir) { @($BinDir) } else { @(".") + $pathDir + @("build-cuda/bin/Release", "build-vulkan/bin/Release", "build-all/bin/Release", "build/bin/Release", "build-studio/bin/Release", "build-preview/bin/Release") }
 $bin = $null
 foreach ($candidate in $candidates) {
     $resolved = if ([IO.Path]::IsPathRooted($candidate)) { $candidate } else { Join-Path $root $candidate }

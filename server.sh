@@ -8,4 +8,5 @@ for d in build-cuda build-metal build-vulkan build-hip build-all build; do
     if [ -x "$d/bin/Release/sa3-server.exe" ]; then BIN="$d/bin/Release/sa3-server.exe"; break; fi
 done
 if [ -z "$BIN" ]; then echo "sa3-server not built — run ./build.sh <backend> first" >&2; exit 1; fi
-exec "$BIN" --model medium --encoding f16 --port 8086 "$@"
+echo "[sa3-server] LoRA training is not started here; see 'source ./env.sh' for the studio command." >&2
+exec "$BIN" --model medium --encoding f16 --port 8006 "$@"
