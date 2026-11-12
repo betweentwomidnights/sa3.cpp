@@ -116,7 +116,8 @@ GCC 14.2 and Vulkan build tools were extracted under `toolchains/`, without
 installing system packages. CUDA uses the existing toolkit 13.0.88. The CUDA
 smoke flags resolve to `compute_121a` / `sm_121a`; this is not a general portable
 CUDA release. The Vulkan build used loader/headers 1.4.328.1, SPIRV-Headers
-1.4.328.1 and shaderc 2023.8 (without optional cooperative-matrix support).
+1.4.328.1 and shaderc 2023.8 (KHR cooperative matrices available; optional
+NVIDIA cooperative-matrix2 features unavailable).
 
 | Check | CUDA | Vulkan |
 | --- | --- | --- |
