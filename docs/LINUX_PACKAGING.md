@@ -2,7 +2,7 @@
 
 `ci/package-linux.py` builds native x64 or ARM64 Linux packages for gary4local.
 This is an experimental packaging path. Windows/macOS release publishing is
-unchanged; the Linux dry-run workflow does not attach anything to a release.
+unchanged; Linux CI artifacts are dry runs and are not attached to releases.
 
 | Archive | Contents |
 | --- | --- |
@@ -87,10 +87,22 @@ These are packaging/control checks, not audio-quality, generation, training,
 or API parity checks. Run short generation and server tests with existing
 weights separately before proposing a release or consumer manifest change.
 
-The **Linux packaging dry run** workflow exercises x64 Vulkan packages on
-packaging pull requests or manual dispatch on Ubuntu 24.04, with 7-day artifact retention. Hosted CI does not
-validate GPU execution. ARM64/CUDA validation currently happens on Spark;
-there is no self-hosted runner registration or automatic Spark job.
+The **Linux packaging dry run** workflow exercises native x64 and ARM64 Vulkan
+packages on packaging pull requests or manual dispatch on Ubuntu 24.04, with
+7-day artifact retention. The ARM64 runner installs GCC 14 for SME support.
+Hosted CI does not validate GPU execution; CUDA packaging and real CUDA/Vulkan
+generation checks currently happen on Spark. There is no self-hosted runner
+registration or automatic Spark job.
+
+The existing `release.yml` also calls this workflow for a **no-tag** dispatch
+with `platforms=all` or `platforms=linux`. An empty tag retains artifacts without
+publishing. `platforms=linux` skips Windows/macOS. Release events and tagged
+rebuilds continue to publish only Windows/macOS packages.
+
+```sh
+gh workflow run release.yml -R betweentwomidnights/sa3.cpp \
+  --ref feature/linux-runtime-packaging -f platforms=all
+```
 
 ## Spark workspace
 

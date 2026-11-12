@@ -1,4 +1,4 @@
-# ABOUTME: Builds the Windows packages and the signed, notarized macOS package for a release.
+# ABOUTME: Publishes Windows/macOS packages; no-tag dry runs also exercise Linux packaging.
 # ABOUTME: A no-tag dispatch keeps a dry-run artifact without publishing.
 name: release
 
@@ -14,10 +14,10 @@ on:
         required: false
         type: string
       platforms:
-        description: which packages to build (a release event always builds both)
+        description: packages to build (linux is no-tag dry-run only; release events build Windows/macOS)
         required: false
         type: choice
-        options: [all, windows, macos]
+        options: [all, windows, macos, linux]
         default: all
       rebuild_ggml_cuda:
         description: compile ggml-cuda even if a build for this ggml pin and toolchain already exists
@@ -43,7 +43,7 @@ jobs:
     # generator by name. A runner image moving to a newer Visual Studio should
     # be a change made here on purpose, not one that turns up as a red release.
     runs-on: windows-2022
-    if: github.event_name == 'release' || inputs.platforms != 'macos'
+    if: github.event_name == 'release' || inputs.platforms == 'all' || inputs.platforms == 'windows'
     timeout-minutes: 240
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -134,7 +134,7 @@ jobs:
     needs: windows-cuda
     # Pinned for the same reason as windows-cuda; they must match.
     runs-on: windows-2022
-    if: github.event_name == 'release' || inputs.platforms != 'macos'
+    if: github.event_name == 'release' || inputs.platforms == 'all' || inputs.platforms == 'windows'
     timeout-minutes: 90
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -234,7 +234,7 @@ jobs:
     name: macos-universal (metal + cpu)
     # macOS 15: its Rosetta runs the x86_64 slice's AVX2 code, so CI tests both slices.
     runs-on: macos-15
-    if: github.event_name == 'release' || inputs.platforms != 'windows'
+    if: github.event_name == 'release' || inputs.platforms == 'all' || inputs.platforms == 'macos'
     timeout-minutes: 90
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -330,3 +330,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$TAG" dist/sa3-*-macos-universal.zip dist/SHA256SUMS-macos --clobber
+
+  linux:
+    name: Linux experimental packages
+    # This invokes the same x64/ARM64 Vulkan packaging checks as the PR job.
+    # It never attaches assets to a tag, including during a tagged rebuild.
+    if: github.event_name == 'workflow_dispatch' && inputs.tag == '' && (inputs.platforms == 'all' || inputs.platforms == 'linux')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/linux-packaging.yml
