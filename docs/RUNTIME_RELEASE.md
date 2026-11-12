@@ -1,5 +1,8 @@
 # sa3.cpp native runtime release
 
+Experimental Linux core/CUDA/Vulkan packaging and the contained Spark validation
+workflow are documented in [Linux runtime packaging](LINUX_PACKAGING.md).
+
 The Windows release follows the yuey.cpp package contract. Gary4local installs
 the core archive and one backend archive, verifies their SHA-256 hashes, and
 uses its own shared CUDA runtime. Direct users take one standalone archive with

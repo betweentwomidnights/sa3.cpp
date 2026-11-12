@@ -16,6 +16,8 @@ build-metal-noblas/
 build-all/
 build-web/
 build-dist/
+build-dist-linux*/
+dist-linux*/
 build-dist-native/
 build-dist-short/
 dist/
