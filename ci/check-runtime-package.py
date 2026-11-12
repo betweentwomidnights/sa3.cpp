@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 
@@ -18,12 +19,16 @@ def main():
     parser.add_argument("directory", type=Path)
     parser.add_argument("version")
     parser.add_argument("--arch", choices=("arm64", "x86_64"))
+    parser.add_argument("--require-backend", choices=("cuda", "vulkan"))
+    parser.add_argument("--expect-platform")
     args = parser.parse_args()
     directory = args.directory.resolve(strict=True)
     version = args.version[1:] if args.version.startswith("v") else args.version
     suffix = ".exe" if os.name == "nt" else ""
     prefix = ["arch", "-" + args.arch] if args.arch else []
     env = os.environ.copy()
+    if sys.platform.startswith("linux"):
+        env.pop("LD_LIBRARY_PATH", None)
     for key in list(env):
         if key.startswith(("SA3_", "SAT_", "GGML_")):
             del env[key]
@@ -50,6 +55,10 @@ def main():
             assert props["version"] == version, props
             assert any(device["backend"].upper().startswith("CPU")
                        for device in props["devices"]), props
+            if args.require_backend:
+                assert any(device["backend"].lower() == args.require_backend
+                           and device.get("type") in {"gpu", "integrated_gpu"}
+                           for device in props["devices"]), props
 
         info = json.loads(output("sa3-server", "--control-info"))
         assert info["schema_version"] == 1 and info["service"] == "sa3", info
@@ -67,6 +76,8 @@ def main():
 
     build = json.loads((directory / "BUILD-INFO.json").read_bytes())
     assert build["service"] == "sa3" and build["version"] == "v" + version, build
+    if args.expect_platform:
+        assert build["platform"] == args.expect_platform, build
     if build.get("platform") == "windows-x64" and "build_flavor" in build:
         flavor = build["build_flavor"]
         assert flavor in {"portable", "cpu-smoke", "gpu-smoke"}, build
