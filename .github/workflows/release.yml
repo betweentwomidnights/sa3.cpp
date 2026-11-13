@@ -359,7 +359,7 @@ jobs:
 
   linux-preview:
     name: Verify/promote Linux preview
-    if: github.event_name == 'workflow_dispatch' && inputs.platforms == 'linux' && inputs.tag == '' && inputs.linux_preview_run_id != '' 
+    if: github.event_name == 'workflow_dispatch' && inputs.platforms == 'linux' && inputs.tag == '' && inputs.linux_preview_run_id != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
