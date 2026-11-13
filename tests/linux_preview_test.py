@@ -65,4 +65,14 @@ class PreviewTests(unittest.TestCase):
         with self.assertRaises(ValueError):p.assert_asset({'size':1,'digest':'sha256:'+'0'*64},
             {'bytes':1,'sha256':'1'*64},'unused')
 
+    def test_drafts_are_found_by_authenticated_listing_when_tag_endpoint_is_404(self):
+        draft={'id':42,'tag_name':'linux-v1.2.3-preview.1','draft':True}
+        def response(path,optional=False):
+            if '/releases/tags/' in path:return None
+            if '/releases?' in path:return [draft]
+            if path.endswith('/releases/42'):return draft
+            raise AssertionError(path)
+        with patch.object(p,'api',side_effect=response):
+            self.assertEqual(p.release_by_tag('repos/test/repo',draft['tag_name']),draft)
+
 if __name__=='__main__':unittest.main()

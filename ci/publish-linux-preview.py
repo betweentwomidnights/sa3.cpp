@@ -33,6 +33,18 @@ def api(path, optional=False):
     raw = gh('api', path, optional=optional)
     return None if raw is None else json.loads(raw)
 
+def release_by_tag(prefix,tag):
+    release=api(prefix+'/releases/tags/'+tag,optional=True)
+    if release is not None:return release
+    # GitHub's tag endpoint excludes drafts. Authenticated release listing
+    # includes them; resolve their ID before uploading or resuming.
+    for page in range(1,101):
+        releases=api(prefix+f'/releases?per_page=100&page={page}')
+        for candidate in releases:
+            if candidate['tag_name']==tag:return api(prefix+f"/releases/{candidate['id']}")
+        if len(releases)<100:return None
+    raise ValueError('Release lookup exceeded pagination bound')
+
 def sha(data): return hashlib.sha256(data).hexdigest()
 
 def source_run(run, repo_id, source):
@@ -156,13 +168,15 @@ def publish(result,output):
     if os.environ.get('GITHUB_ACTIONS')!='true' or os.environ.get('GITHUB_REPOSITORY')!=REPOSITORY:
         raise ValueError('Publish only through the repository workflow and its GITHUB_TOKEN')
     prefix='repos/'+REPOSITORY; tag=result['tag']; source=result['source_commit']
-    existing=api(prefix+'/releases/tags/'+tag,optional=True)
+    existing=release_by_tag(prefix,tag)
     ref=api(prefix+'/git/ref/tags/'+tag,optional=True)
     if ref and (ref['object']['type']!='commit' or ref['object']['sha']!=source):
         raise ValueError('Existing tag targets another source; tags are never moved')
     marker=f'<!-- gary-linux-preview-v1 {source} -->'
     if existing and (marker not in existing['body'] or not existing['prerelease']):
         raise ValueError('Refusing a release not created by this promotion contract')
+    if existing and not ref and existing['target_commitish']!=source:
+        raise ValueError('Draft source differs from the approved commit')
     if existing and not existing['draft']:
         assets={a['name']:a for a in existing['assets']}
         if set(assets)!=set(result['assets']): raise ValueError('Published asset set differs')
@@ -172,19 +186,20 @@ def publish(result,output):
         gh('release','create',tag,'--repo',REPOSITORY,'--target',source,'--draft','--prerelease','--latest=false',
            '--title',f'{SERVICE} {result["engine_version"]} Linux Vulkan preview',
            '--notes-file',output/'RELEASE-NOTES.md')
-        existing=api(prefix+'/releases/tags/'+tag)
+        existing=release_by_tag(prefix,tag)
+        if existing is None:raise ValueError('New draft was not found')
     assets={a['name']:a for a in existing['assets']}
     if not set(assets).issubset(result['assets']): raise ValueError('Unexpected existing draft assets')
     for name,expected in result['assets'].items():
         if name in assets: assert_asset(assets[name],expected,prefix)
         else: gh('release','upload',tag,output/name,'--repo',REPOSITORY)
     # Verify all uploaded bytes while still draft; no partial release is public.
-    existing=api(prefix+'/releases/tags/'+tag)
+    existing=api(prefix+f"/releases/{existing['id']}")
     assets={a['name']:a for a in existing['assets']}
     if set(assets)!=set(result['assets']): raise ValueError('Draft asset set differs')
     for n,expected in result['assets'].items(): assert_asset(assets[n],expected,prefix)
     gh('release','edit',tag,'--repo',REPOSITORY,'--draft=false','--prerelease','--latest=false')
-    released=api(prefix+'/releases/tags/'+tag)
+    released=api(prefix+f"/releases/{existing['id']}")
     if released['draft'] or not released['prerelease']: raise ValueError('Unexpected final release state')
     (output/'PUBLISHED.json').write_text(json.dumps({'url':released['html_url'],'tag':tag,'source':source},indent=2)+'\n')
     print('Published verified preview:',released['html_url'])
