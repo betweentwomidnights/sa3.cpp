@@ -87,3 +87,6 @@ build-ggml-check/
 
 # clangd index, written into the checkout by editors
 .cache/
+
+# Verified Linux release preparation
+dist-linux-preview/

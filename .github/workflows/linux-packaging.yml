@@ -1,10 +1,13 @@
 # Dry-run packaging only; also callable by release.yml without a tag.
-# Linux publishing remains disabled while distribution policy is experimental.
+# Publication promotes verified artifacts through release.yml; this workflow builds only.
 name: Linux packaging dry run
 
 on:
   pull_request:
     paths:
+      - ci/publish-linux-preview.py
+      - tests/linux_preview_test.py
+      - .github/workflows/release.yml
       - ci/package-linux.py
       - ci/check-runtime-package.py
       - tests/linux_package_test.py
@@ -47,6 +50,7 @@ jobs:
 
       - name: Build, test, package, and check extracted archives
         run: |
+          python3 tests/linux_preview_test.py
           python3 tests/linux_package_test.py
           version="v$(sed -nE 's/^project\(sa3_cpp VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)"
           python3 ci/package-linux.py --version "$version" --require-clean --jobs 4 --backends vulkan

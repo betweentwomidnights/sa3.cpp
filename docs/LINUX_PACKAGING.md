@@ -163,3 +163,21 @@ cache, and 116 MiB extracted validation runtimes/audio/logs. The CUDA ZIP set wa
 31 MiB and Vulkan 18 MiB. See the parent `storage.tsv` for subsequent measurements.
 The older 6.2 GiB control-center exploration folder is separate. The workspace's
 runner and smoke scripts record the exact commands and keep temporary files here.
+
+## Versioned Linux previews
+
+The release workflow can promote an existing successful Linux CI run without
+rebuilding its ZIPs. Set `platforms=linux`, `linux_preview_run_id`, the exact
+`linux_preview_source_sha`, and `linux_preview_number`. With publication false,
+the workflow retains a concrete release plan and checksum-verified artifacts.
+Set `publish_linux_preview=true` only for the approved plan. Tags use
+`linux-vX.Y.Z-preview.N`; engine versions and asset basenames stay `vX.Y.Z`.
+Previews are never marked latest and do not replace Windows/macOS assets.
+
+The script verifies repository/run identity, both native Linux jobs, the outer
+artifact digests, inner SHA256SUMS, source/ggml commits, portable Vulkan flags
+and test metadata. Uploads are checked while draft before publication; existing
+tags are never moved and conflicting assets are refused. A matching interrupted
+draft can resume. Publishing is restricted to the repository workflow token,
+which avoids recursively starting unrelated release builds. The immutable
+LINUX-PREVIEW.json index preserves provenance after CI artifacts expire.

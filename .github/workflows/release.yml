@@ -14,7 +14,7 @@ on:
         required: false
         type: string
       platforms:
-        description: packages to build (linux is no-tag dry-run only; release events build Windows/macOS)
+        description: packages to build (linux builds or promotes previews; release events build Windows/macOS)
         required: false
         type: choice
         options: [all, windows, macos, linux]
@@ -22,6 +22,23 @@ on:
       rebuild_ggml_cuda:
         description: compile ggml-cuda even if a build for this ggml pin and toolchain already exists
         required: false
+        type: boolean
+        default: false
+
+      linux_preview_run_id:
+        description: successful Linux CI run to promote (empty keeps the normal build path)
+        required: false
+        type: string
+      linux_preview_source_sha:
+        description: exact approved 40-character source SHA of that run
+        required: false
+        type: string
+      linux_preview_number:
+        description: immutable Linux preview sequence
+        type: number
+        default: 1
+      publish_linux_preview:
+        description: publish the verified plan as a prerelease (otherwise prepare only)
         type: boolean
         default: false
 
@@ -335,7 +352,40 @@ jobs:
     name: Linux experimental packages
     # This invokes the same x64/ARM64 Vulkan packaging checks as the PR job.
     # It never attaches assets to a tag, including during a tagged rebuild.
-    if: github.event_name == 'workflow_dispatch' && inputs.tag == '' && (inputs.platforms == 'all' || inputs.platforms == 'linux')
+    if: github.event_name == 'workflow_dispatch' && inputs.tag == '' && (inputs.platforms == 'all' || inputs.platforms == 'linux') && inputs.linux_preview_run_id == ''
     permissions:
       contents: read
     uses: ./.github/workflows/linux-packaging.yml
+
+  linux-preview:
+    name: Verify/promote Linux preview
+    if: github.event_name == 'workflow_dispatch' && inputs.platforms == 'linux' && inputs.tag == '' && inputs.linux_preview_run_id != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+    concurrency:
+      group: linux-preview-${{ inputs.linux_preview_number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check promotion boundaries
+        run: python3 tests/linux_preview_test.py
+      - name: Prepare verified artifacts and optional publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.linux_preview_run_id }}
+          SOURCE_SHA: ${{ inputs.linux_preview_source_sha }}
+          PREVIEW: ${{ inputs.linux_preview_number }}
+          PUBLISH: ${{ inputs.publish_linux_preview }}
+        run: |
+          args=()
+          if [ "$PUBLISH" = true ]; then args+=(--publish); fi
+          python3 ci/publish-linux-preview.py --run-id "$SOURCE_RUN" --source-sha "$SOURCE_SHA" --preview "$PREVIEW" "${args[@]}"
+      - name: Keep concrete release plan and verified ZIPs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sa3-linux-preview-plan
+          path: dist-linux-preview/*
+          retention-days: 7
