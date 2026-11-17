@@ -590,6 +590,8 @@ inline bool run_training(const TrainConfig& cfg, const TrainHooks& hooks,
                     if (!cache_dir.empty()) {
                         cache_name = sa3::train_latent_cache_name(stem);
                         cache_key.source_fingerprint = train_job_latent_fingerprint(decoded);
+                        cache_key.frames = sa3::train_pre_encode_grid(
+                            decoded.n_samples, decoded.sample_rate, sc.patch_size * sc.output_seg).n_valid;
                         if (sa3::train_read_latent_entry(cache_dir, cache_name, sc.latent,
                                                          cache_key, e)) {
                             cache_hits++;

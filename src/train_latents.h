@@ -9,7 +9,7 @@
 //
 // Faithful reproduction of the reference method:
 //  - audio is laid on the reference's padded grid: max_samples = (600s * sr) // ds * ds
-//    (26,456,064 samples / 6459 latent frames at 44.1kHz, ds=4096); longer files are cropped
+//    (26,456,064 samples / 6459 latent frames at 44.1kHz, ds=4096)
 //  - encoded CHUNKED exactly like encode_audio(chunked=True): chunk 128 latents, overlap 32,
 //    hop 96, final chunk anchored to the padded end, half-overlap trimmed at inner edges
 //    (chunks that only cover padding are skipped: training crops never read them)
@@ -28,6 +28,9 @@
 // Known deviation (accepted): the reference encoded with a fp16 autoencoder (--half); we run
 // the normal sa3.cpp encode (f16 weights, f32 activations). Short crops use the reference's
 // zero-latent fallback when no encoded silence latent is available.
+//
+// Deliberate deviation: the reference crops a file longer than its 600 s grid. Here the grid
+// grows to the file instead (train_pre_encode_grid), so training crops reach its tail too.
 #pragma once
 
 #include "train_audio.h"
@@ -67,6 +70,22 @@ struct TrainLatentEntry {
 };
 
 using TrainLatentCache = std::map<std::string, TrainLatentEntry>;
+
+// Where one file sits on the pre-encode grid. A file that fits the reference's 600 s grid keeps
+// it, so its latents match the reference frame for frame. A longer file gets a grid of its own
+// length: training only ever reads a crop, and the tail is as much the track as the head.
+struct TrainPreEncodeGrid {
+    int n_valid = 0;         // ceil(n_samples / ds)
+    int total_latents = 0;   // frames the chunks are laid on; >= n_valid
+};
+
+inline TrainPreEncodeGrid train_pre_encode_grid(int64_t n_samples, int sample_rate, int ds) {
+    TrainPreEncodeGrid g;
+    const int64_t pad_samples = (int64_t)(kPreEncodePadSeconds * sample_rate) / ds * ds;
+    g.n_valid = (int)((n_samples + ds - 1) / ds);
+    g.total_latents = std::max((int)(pad_samples / ds), g.n_valid);
+    return g;
+}
 
 // One full-file encode pass on the reference chunk grid at a given audio gain.
 // z is filled as [latent, total_latents]; only chunks whose kept frames intersect
@@ -132,14 +151,14 @@ inline bool train_pre_encode_file(TrainSameEncoder& enc, GgufModel& ae, const Sa
                                   const TrainAudio& full,
                                   float target_rms, TrainLatentEntry& out, std::string& err) {
     const int ds = sc.patch_size * sc.output_seg;
-    const int64_t max_samples = (int64_t)(kPreEncodePadSeconds * full.sample_rate) / ds * ds;
-    const int total_latents = (int)(max_samples / ds);
-    const int64_t actual = std::min<int64_t>(full.n_samples, max_samples);
+    const int64_t actual = full.n_samples;
     if (actual <= 0) {
         err = "pre-encode got empty audio";
         return false;
     }
-    const int n_valid = std::min(total_latents, (int)std::ceil((double)actual / (double)ds));
+    const TrainPreEncodeGrid grid = train_pre_encode_grid(actual, full.sample_rate, ds);
+    const int total_latents = grid.total_latents;
+    const int n_valid = grid.n_valid;
 
     float gain = 1.0f;
     float measured = 0.0f, pre = 0.0f;
@@ -240,6 +259,10 @@ struct TrainLatentKey {
     std::string autoencoder;          // resolved SAME gguf filename
     std::string source_fingerprint;   // of the DECODED audio, see train_job_latent_fingerprint
     float target_latent_rms = 0.0f;
+    // Frames the entry must hold, 0 for any. Not written to the sidecar: the array carries it.
+    // An entry written when files were still cropped to 600 s has the right fingerprint for a
+    // longer file and the wrong length, and this is what tells them apart.
+    int frames = 0;
 };
 
 // Filenames stay <stem>.npy / <stem>.json, matching gary4local, so a cache directory can be
@@ -343,6 +366,7 @@ inline bool train_read_latent_entry(const std::string& dir, const std::string& n
     std::string ignored;
     if (!train_load_npy_f32_2d(np.string(), C, T, raw, ignored)) return false;
     if (expect_latent > 0 && C != expect_latent) return false;
+    if (want.frames > 0 && T != want.frames) return false;
 
     e.latent = (int)C;
     e.n_valid = (int)T;

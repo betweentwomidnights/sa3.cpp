@@ -155,6 +155,8 @@ datasets/my-training-set/
 
 Training honors `train/filelist.txt` when present. Otherwise it scans the dataset root for paired audio and captions. Test and evaluation splits are optional; when present they are rejected if any train item overlaps by basename, canonical path, or `audio_sha256`.
 
+A track of any length is pre-encoded whole, and each step's random crop is drawn from anywhere in it; there is no need to split long files. (The PyTorch reference crops a file to its first 600 seconds. Tracks that fit in 600 seconds are encoded exactly as it encodes them.)
+
 Studio's **Train on full tracks** setting uses a fixed 285.35-second crop, matching the gary-localhost-installer recipe. Shorter tracks are zero padded in latent space and their padded frames are excluded from the training loss. This setting requires substantially more GPU memory than the default 47.5-second random crop.
 The native DiT does not yet hide padded tokens from self-attention, so short-track training is not exact PyTorch padding parity; compare adapter quality before relying on this setting for a release.
 

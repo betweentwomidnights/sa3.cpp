@@ -135,6 +135,29 @@ int main() {
            "different cache version misses");
     expect(!sa3::train_read_latent_entry(dir.string(), name, latent + 1, key, ignored),
            "different latent width misses");
+    // an entry cropped to the old 600 s grid has a longer file's fingerprint and too few frames
+    k = key;
+    k.frames = frames + 1;
+    expect(!sa3::train_read_latent_entry(dir.string(), name, latent, k, ignored),
+           "different frame count misses");
+    k.frames = frames;
+    expect(sa3::train_read_latent_entry(dir.string(), name, latent, k, ignored),
+           "matching frame count hits");
+
+    // the pre-encode grid: the reference's 600 s grid for a file that fits, the file's own past it
+    {
+        const int sr = 44100, ds = 4096, ref = 6459;
+        sa3::TrainPreEncodeGrid g = sa3::train_pre_encode_grid(40 * sr, sr, ds);
+        expect(g.n_valid == 431 && g.total_latents == ref, "a short file keeps the reference grid");
+        g = sa3::train_pre_encode_grid((int64_t)ref * ds, sr, ds);
+        expect(g.n_valid == ref && g.total_latents == ref, "a file filling the reference grid keeps it");
+        g = sa3::train_pre_encode_grid((int64_t)ref * ds + 1, sr, ds);
+        expect(g.n_valid == ref + 1 && g.total_latents == ref + 1, "one sample more grows the grid");
+        g = sa3::train_pre_encode_grid(27031760, sr, ds);   // 612.97 s
+        expect(g.n_valid == 6600 && g.total_latents == 6600, "a 613 s file is encoded to its end");
+        g = sa3::train_pre_encode_grid((int64_t)3600 * sr, sr, ds);
+        expect(g.n_valid == 38760 && g.total_latents == 38760, "an hour-long file is encoded to its end");
+    }
     expect(!sa3::train_read_latent_entry(dir.string(), "no such entry", latent, key, ignored),
            "absent entry misses");
 
