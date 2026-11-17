@@ -104,7 +104,8 @@ Windows/macOS, so a tagged `platforms=linux` dispatch adds Linux packages to a
 release published before this workflow attached them:
 
 ```sh
-gh workflow run release.yml -R betweentwomidnights/sa3.cpp   --ref main -f tag=v0.2.4 -f platforms=linux
+gh workflow run release.yml -R betweentwomidnights/sa3.cpp \
+  --ref main -f tag=v0.2.4 -f platforms=linux
 ```
 
 A no-tag dry run:
