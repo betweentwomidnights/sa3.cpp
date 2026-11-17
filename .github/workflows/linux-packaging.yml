@@ -1,6 +1,6 @@
-# Dry-run packaging only; also callable by release.yml without a tag.
-# Publication promotes verified artifacts through release.yml; this workflow builds only.
-name: Linux packaging dry run
+# Builds and checks the Linux x64/ARM64 Vulkan packages. On its own it is a dry
+# run; release.yml calls it with the release tag and attaches what it builds.
+name: Linux packaging
 
 on:
   pull_request:
@@ -14,6 +14,12 @@ on:
       - .github/workflows/linux-packaging.yml
   workflow_dispatch:
   workflow_call:
+    inputs:
+      tag:
+        description: release tag to build; empty builds the calling ref as a dry run
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -33,9 +39,11 @@ jobs:
     timeout-minutes: 60
     env:
       PLATFORM: ${{ matrix.platform }}
+      TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag }}
           submodules: recursive
 
       - name: Install build dependencies
@@ -53,10 +61,15 @@ jobs:
           python3 tests/linux_preview_test.py
           python3 tests/linux_package_test.py
           version="v$(sed -nE 's/^project\(sa3_cpp VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)"
+          [ "$version" != v ] || { echo "no project(VERSION) in CMakeLists.txt"; exit 1; }
+          # A release's Linux packages must say the release's version.
+          if [ -n "$TAG" ] && [ "$TAG" != "$version" ]; then
+            echo "tag $TAG does not match project(VERSION) $version"; exit 1
+          fi
           python3 ci/package-linux.py --version "$version" --require-clean --jobs 4 --backends vulkan
           (cd dist-linux && sha256sum -c "SHA256SUMS-$PLATFORM")
 
-      - name: Keep verified dry-run packages
+      - name: Keep verified packages
         uses: actions/upload-artifact@v4
         with:
           name: sa3-${{ matrix.platform }}-vulkan-dry-run

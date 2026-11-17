@@ -1,8 +1,8 @@
 # Linux runtime packaging
 
 `ci/package-linux.py` builds native x64 or ARM64 Linux packages for gary4local.
-This is an experimental packaging path. Windows/macOS release publishing is
-unchanged; Linux CI artifacts are dry runs and are not attached to releases.
+Every published release builds them from its tag and attaches them beside the
+Windows and macOS packages, so one `vX.Y.Z` release carries all three platforms.
 
 | Archive | Contents |
 | --- | --- |
@@ -94,10 +94,20 @@ Hosted CI does not validate GPU execution; CUDA packaging and real CUDA/Vulkan
 generation checks currently happen on Spark. There is no self-hosted runner
 registration or automatic Spark job.
 
-The existing `release.yml` also calls this workflow for a **no-tag** dispatch
-with `platforms=all` or `platforms=linux`. An empty tag retains artifacts without
-publishing. `platforms=linux` skips Windows/macOS. Release events and tagged
-rebuilds continue to publish only Windows/macOS packages.
+`release.yml` calls this workflow on every release event, and for a dispatch
+with `platforms=all` or `platforms=linux`. With a tag (the release's, or the
+dispatch's `tag`) it checks out that tag, refuses a tag that disagrees with
+`project(VERSION)`, and the `linux-attach` job attests the four ZIPs and uploads
+them with `SHA256SUMS-linux-x64` and `SHA256SUMS-linux-arm64` to that release.
+An empty tag retains artifacts without publishing. `platforms=linux` skips
+Windows/macOS, so a tagged `platforms=linux` dispatch adds Linux packages to a
+release published before this workflow attached them:
+
+```sh
+gh workflow run release.yml -R betweentwomidnights/sa3.cpp   --ref main -f tag=v0.2.4 -f platforms=linux
+```
+
+A no-tag dry run:
 
 ```sh
 gh workflow run release.yml -R betweentwomidnights/sa3.cpp \
@@ -166,7 +176,8 @@ runner and smoke scripts record the exact commands and keep temporary files here
 
 ## Versioned Linux previews
 
-The release workflow can promote an existing successful Linux CI run without
+Releases now carry their Linux packages; previews remain for promoting a build
+that has no release of its own. The release workflow can promote an existing successful Linux CI run without
 rebuilding its ZIPs. Set `platforms=linux`, `linux_preview_run_id`, the exact
 `linux_preview_source_sha`, and `linux_preview_number`. With publication false,
 the workflow retains a concrete release plan and checksum-verified artifacts.

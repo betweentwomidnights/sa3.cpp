@@ -1,4 +1,4 @@
-# ABOUTME: Publishes Windows/macOS packages; no-tag dry runs also exercise Linux packaging.
+# ABOUTME: Publishes Windows, macOS and Linux packages to the release that triggers it.
 # ABOUTME: A no-tag dispatch keeps a dry-run artifact without publishing.
 name: release
 
@@ -14,7 +14,7 @@ on:
         required: false
         type: string
       platforms:
-        description: packages to build (linux builds or promotes previews; release events build Windows/macOS)
+        description: packages to build (release events build all three; linux without a tag can also promote a preview)
         required: false
         type: choice
         options: [all, windows, macos, linux]
@@ -349,13 +349,52 @@ jobs:
         run: gh release upload "$TAG" dist/sa3-*-macos-universal.zip dist/SHA256SUMS-macos --clobber
 
   linux:
-    name: Linux experimental packages
-    # This invokes the same x64/ARM64 Vulkan packaging checks as the PR job.
-    # It never attaches assets to a tag, including during a tagged rebuild.
-    if: github.event_name == 'workflow_dispatch' && inputs.tag == '' && (inputs.platforms == 'all' || inputs.platforms == 'linux') && inputs.linux_preview_run_id == ''
+    name: Linux packages
+    # The same x64/ARM64 Vulkan build and checks as the PR job, from the release
+    # tag when there is one. linux-attach publishes what it builds.
+    if: github.event_name == 'release' || (inputs.linux_preview_run_id == '' && (inputs.platforms == 'all' || inputs.platforms == 'linux'))
     permissions:
       contents: read
     uses: ./.github/workflows/linux-packaging.yml
+    with:
+      tag: ${{ github.event.release.tag_name || inputs.tag }}
+
+  linux-attach:
+    name: Attach Linux packages
+    needs: linux
+    if: github.event.release.tag_name != '' || inputs.tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Fetch both platforms' packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sa3-linux-*-vulkan-dry-run
+          path: dist
+          merge-multiple: true
+
+      - name: Check the packages are this release's
+        working-directory: dist
+        run: |
+          for platform in linux-x64 linux-arm64; do
+            sha256sum -c "SHA256SUMS-$platform"
+            for part in core vulkan; do
+              test -f "sa3-$TAG-$platform-$part.zip"
+            done
+          done
+          test "$(ls *.zip | wc -l)" -eq 4
+
+      - name: Attest provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.zip'
+
+      - name: Attach to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" -R "$GITHUB_REPOSITORY" dist/sa3-*-linux-*.zip dist/SHA256SUMS-linux-* --clobber
 
   linux-preview:
     name: Verify/promote Linux preview
