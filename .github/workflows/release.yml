@@ -254,6 +254,8 @@ jobs:
     if: github.event_name == 'release' || inputs.platforms == 'all' || inputs.platforms == 'macos'
     timeout-minutes: 90
     env:
+      # The macOS 26 SDK builds the separate Metal tensor library for newer GPUs.
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
       # Whether the Developer ID and notary secrets exist, without exposing them to every step.
       HAVE_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' && secrets.APPLE_NOTARY_KEY_P8 != '' }}
@@ -316,6 +318,12 @@ jobs:
             echo "SA3_NOTARY_ISSUER=$APPLE_NOTARY_ISSUER_ID"
             echo "SIGNING_KEYCHAIN=$keychain"
           } >> "$GITHUB_ENV"
+
+      - name: Ensure the offline Metal compiler is installed
+        run: |
+          if ! xcrun --sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
 
       - name: Build, test, sign, notarize, and package
         run: |

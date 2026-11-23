@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--arch", choices=("arm64", "x86_64"))
     parser.add_argument("--require-backend", choices=("cuda", "vulkan"))
     parser.add_argument("--expect-platform")
+    parser.add_argument("--require-precompiled-metal", action="store_true")
     args = parser.parse_args()
     directory = args.directory.resolve(strict=True)
     version = args.version[1:] if args.version.startswith("v") else args.version
@@ -36,21 +37,37 @@ def main():
     env["SA3_PORT"] = "-1"
     env["SA3_MODELS_DIR"] = str(directory / "absent-contract-models")
     with tempfile.TemporaryDirectory(prefix="sa3-package-contract-") as scratch:
-        def output(tool, flag):
+        def output(tool, flag, *, metal_libraries=(), extra_env=None):
             executable = directory / (tool + suffix)
             result = subprocess.run(
                 [*prefix, str(executable), flag,
                  *(["--port", "0"] if tool == "sa3-server" and flag == "--control-info" else [])],
-                cwd=scratch, env=env,
+                cwd=scratch, env={**env, **(extra_env or {})},
                 capture_output=True, text=True, encoding="utf-8", timeout=30,
             )
             if result.returncode:
                 raise RuntimeError(f"{tool} {flag} failed: {result.stderr}")
+            if metal_libraries:
+                library_log_prefix = "ggml_metal_library_init: loading '"
+                loaded = {
+                    Path(line[len(library_log_prefix):-1]).resolve()
+                    for line in result.stderr.splitlines()
+                    if line.startswith(library_log_prefix) and line.endswith("'")
+                }
+                expected = {directory / name for name in metal_libraries}
+                if not loaded & expected or "ggml_metal_library_init: loaded in " not in result.stderr:
+                    raise RuntimeError(f"{tool} did not load a packaged Metal library: {result.stderr}")
             return result.stdout.strip()
+
+        metal_libraries = ()
+        if args.require_precompiled_metal:
+            metal_libraries = ("default.metallib", "default-bf16.metallib")
+            for name in metal_libraries:
+                assert (directory / name).stat().st_size > 0, name
 
         for service, tool in (("sa3", "sa3-server"), ("sat", "sat-server")):
             assert output(tool, "--version") == version, tool
-            props = json.loads(output(tool, "--props"))
+            props = json.loads(output(tool, "--props", metal_libraries=metal_libraries))
             assert props["success"] is True and props["service"] == service, props
             assert props["version"] == version, props
             assert any(device["backend"].upper().startswith("CPU")
@@ -59,6 +76,10 @@ def main():
                 assert any(device["backend"].lower() == args.require_backend
                            and device.get("type") in {"gpu", "integrated_gpu"}
                            for device in props["devices"]), props
+
+        if args.require_precompiled_metal:
+            output("sat-server", "--props", metal_libraries=("default.metallib",),
+                   extra_env={"GGML_METAL_BF16_DISABLE": "1"})
 
         info = json.loads(output("sa3-server", "--control-info"))
         assert info["schema_version"] == 1 and info["service"] == "sa3", info

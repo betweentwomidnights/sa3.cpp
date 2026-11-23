@@ -561,11 +561,14 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
     const OobleckSpec ac = oobleck_spec_from(ae);
     if (ac.latent_channels != dc.io_channels)
         throw std::runtime_error("DiT and Oobleck latent widths differ");
-    const size_t latent_n = (size_t)dc.io_channels * params.frames;
-    std::vector<float> decoder_z(latent_n);
-    for (int frame = 0; frame < params.frames; ++frame)
+    result.sample_rate = (int)ae.u32("sat.sample_rate");
+    const int requested_samples = params.output_samples > 0 ? params.output_samples
+        : (int)std::lround(params.seconds * result.sample_rate);
+    const int decoder_frames = oobleck_decode_prefix_frames(ac, params.frames, requested_samples);
+    std::vector<float> decoder_z((size_t)dc.io_channels * decoder_frames);
+    for (int frame = 0; frame < decoder_frames; ++frame)
         for (int channel = 0; channel < dc.io_channels; ++channel)
-            decoder_z[(size_t)channel * params.frames + frame] =
+            decoder_z[(size_t)channel * decoder_frames + frame] =
                 x[(size_t)frame * dc.io_channels + channel];
 
     start = now_s();
@@ -574,7 +577,7 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
     arena.ctx = ggml_init(aip);
     if (!arena.ctx) throw std::runtime_error("failed to create decoder graph context");
     ggml_tensor* z = ggml_new_tensor_2d(arena.ctx, GGML_TYPE_F32,
-                                         params.frames, ac.latent_channels);
+                                         decoder_frames, ac.latent_channels);
     ggml_set_input(z);
     ggml_tensor* audio = ggml_cont(arena.ctx, oobleck_decode(arena.ctx, ae, z, ac));
     ggml_set_output(audio);
@@ -593,10 +596,7 @@ GenerateResult Pipeline::generate(const GenerateParams& params) const {
 
     const int decoded_samples = (int)audio->ne[0];
     result.channels = (int)audio->ne[1];
-    result.sample_rate = (int)ae.u32("sat.sample_rate");
-    result.samples = params.output_samples > 0 ? params.output_samples
-        : (int)std::lround(params.seconds * result.sample_rate);
-    result.samples = std::min(result.samples, decoded_samples);
+    result.samples = std::min(requested_samples, decoded_samples);
     std::vector<float> decoded((size_t)decoded_samples * result.channels);
     ggml_backend_tensor_get(audio, decoded.data(), 0, decoded.size() * sizeof(float));
     result.audio.resize((size_t)result.samples * result.channels);

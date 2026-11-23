@@ -85,7 +85,8 @@ build_slice() {
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$1" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
     -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=OFF -DBUILD_SHARED_LIBS=ON \
-    -DGGML_METAL="$2" -DSA3_METAL="$2" -DGGML_METAL_EMBED_LIBRARY=ON \
+    -DGGML_METAL="$2" -DSA3_METAL="$2" -DGGML_METAL_EMBED_LIBRARY=OFF \
+    -DGGML_METAL_MACOSX_VERSION_MIN="$DEPLOYMENT_TARGET" -DGGML_METAL_PRECOMPILE_BF16="$2" \
     -DSA3_CUDA=OFF -DSA3_VULKAN=OFF -DSA3_BUILD_TOOLS=ON \
     -DSA3_BUILD_SAT=ON -DSA3_PRIVATE_GGML=OFF -DBUILD_TESTING=ON
   cmake --build "$BUILD_PATH/$1" --config Release --parallel "$JOBS"
@@ -126,6 +127,12 @@ while IFS= read -r arm; do
   BINARIES+=("$name")
 done < <(find -L "$BUILD_PATH/arm64" -type f -name '*.dylib')
 [ -f "$STAGE/libsa3.dylib" ] || fail "no libsa3.dylib staged"
+# Stage Metal data beside its backend. The tensor API library requires an OS 26 SDK.
+cp "$ARM/default.metallib" "$ARM/default-bf16.metallib" "$STAGE/"
+METAL_SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+if [ "${METAL_SDK_VERSION%%.*}" -ge 26 ]; then
+  cp "$ARM/ggml-tensor.metallib" "$STAGE/"
+fi
 # Rewrite all non-system imports to the flat package before codesigning.
 for name in "${BINARIES[@]}"; do
   file="$STAGE/$name"
@@ -172,9 +179,8 @@ cat > "$STAGE/BUILD-INFO.json" <<EOF
 EOF
 # --- sign -------------------------------------------------------------------
 #
-# Hardened runtime with no entitlements: nothing here JITs or loads foreign code, and
-# Metal compiles its embedded shaders without one. The secure timestamp is required
-# for notarization.
+# Sign the executables and dylibs with hardened runtime and a secure timestamp.
+# The Metal libraries are data files in the notarized archive.
 
 if [ "$SIGN" = 1 ]; then
   for f in "${BINARIES[@]}"; do
@@ -196,7 +202,9 @@ for a in arm64 x86_64; do
   done < <(otool -L "$SCRATCH/contract-$a" | awk '/^[[:space:]]/ {print $1}')
   codesign --force --sign - "$SCRATCH/contract-$a"
   (cd "$SCRATCH"; arch -"$a" ./contract-"$a"; arch -"$a" "$STAGE/sa3-server" --props > "props-$a.json")
-  python3 "$ROOT/ci/check-runtime-package.py" "$STAGE" "$VERSION" --arch "$a"
+  check_args=(--arch "$a")
+  if [ "$a" = arm64 ]; then check_args+=(--require-precompiled-metal); fi
+  python3 "$ROOT/ci/check-runtime-package.py" "$STAGE" "$VERSION" "${check_args[@]}"
 done
 # --- zip, notarize, checksum --------------------------------------------------
 
