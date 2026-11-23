@@ -11,6 +11,8 @@
 #include "gguf_model.h"
 #include "sat/model_spec.h"
 
+#include <algorithm>
+#include <iterator>
 #include <string>
 
 namespace sa3::sat {
@@ -124,17 +126,35 @@ inline ggml_tensor* oobleck_residual_unit(ggml_context* ctx,
     return ggml_add(ctx, residual, x);
 }
 
+inline constexpr int oobleck_decoder_edge_padding = 3;
+inline constexpr int oobleck_residual_dilations[] = {1, 3, 9};
+
+// Follow the last requested sample back through the decoder's right-hand
+// context. The sampler can keep its full canvas while the discarded tail never
+// enters the decoder graph.
+inline int oobleck_decode_prefix_frames(const OobleckSpec& c, int frames, int output_samples) {
+    if (output_samples <= 0) return frames;
+    int64_t last = (int64_t)output_samples - 1 + oobleck_decoder_edge_padding;
+    // Decoder execution visits the strides in reverse encoder order.
+    for (const int stride : c.encoder_strides) {
+        for (const int dilation : oobleck_residual_dilations)
+            last += 3 * dilation;  // right-hand context of the residual's 7-tap convolution
+        // A transposed-convolution input at i first contributes at i*stride - padding.
+        last = (last + stride / 2) / stride;
+    }
+    return (int)std::min<int64_t>(frames, last + oobleck_decoder_edge_padding + 1);
+}
+
 // latent is time-major [frames, latent_channels]; returns [samples, audio_channels].
 inline ggml_tensor* oobleck_decode(ggml_context* ctx,
                                    const GgufModel& W,
                                    ggml_tensor* latent,
                                    const OobleckSpec& c) {
-    constexpr int dilations[3] = {1, 3, 9};
     const int stages = (int)c.channel_multipliers.size();
     ggml_tensor* x = oobleck_conv1d(ctx,
                                     W.get("ae.decoder.in.weight"),
                                     W.get("ae.decoder.in.bias"),
-                                    latent, 1, 3, 1);
+                                    latent, 1, oobleck_decoder_edge_padding, 1);
     for (int block = 0; block < stages; ++block) {
         const int source_stage = stages - 1 - block;
         const int stride = c.encoder_strides[(size_t)source_stage];
@@ -142,7 +162,6 @@ inline ggml_tensor* oobleck_decode(ggml_context* ctx,
             ? c.channel_multipliers[(size_t)source_stage - 1]
             : 1;
         const int out_channels = c.base_channels * out_multiplier;
-        const int kernel = 2 * stride;
         const std::string p = "ae.decoder.blocks." + std::to_string(block) + ".";
         x = oobleck_snake(ctx, x,
                           W.get(p + "snake.alpha_exp"),
@@ -150,17 +169,17 @@ inline ggml_tensor* oobleck_decode(ggml_context* ctx,
         x = oobleck_conv_transpose1d(ctx,
                                      W.get(p + "up.weight_col2im"),
                                      W.get(p + "up.bias"),
-                                     x, stride, (kernel - stride) / 2, out_channels);
-        for (int r = 0; r < 3; ++r) {
+                                     x, stride, stride / 2, out_channels);
+        for (size_t r = 0; r < std::size(oobleck_residual_dilations); ++r) {
             x = oobleck_residual_unit(ctx, W,
                                       p + "res." + std::to_string(r) + ".",
-                                      x, dilations[r]);
+                                      x, oobleck_residual_dilations[r]);
         }
     }
     x = oobleck_snake(ctx, x,
                       W.get("ae.decoder.out_snake.alpha_exp"),
                       W.get("ae.decoder.out_snake.beta_recip"));
-    x = oobleck_conv1d(ctx, W.get("ae.decoder.out.weight"), nullptr, x, 1, 3, 1);
+    x = oobleck_conv1d(ctx, W.get("ae.decoder.out.weight"), nullptr, x, 1, oobleck_decoder_edge_padding, 1);
     return c.final_tanh ? ggml_tanh(ctx, x) : x;
 }
 

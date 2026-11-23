@@ -180,6 +180,14 @@ static int test_oobleck_decoder_graph_shape() {
                     audio->ne[1] == c.audio_channels,
                     "config-driven Oobleck decoder output shape");
     ggml_free(ctx);
+
+    const auto saos = sa3::sat::stable_audio_open_small().oobleck;
+    fails += expect(sa3::sat::oobleck_decode_prefix_frames(saos, 256, 176400) == 96,
+                    "four-second SAOS crop keeps its right-hand decoder context");
+    fails += expect(sa3::sat::oobleck_decode_prefix_frames(saos, 256, 524288) == 256,
+                    "full SAOS canvas decodes every latent frame");
+    fails += expect(sa3::sat::oobleck_decode_prefix_frames(saos, 86, 176400) == 86,
+                    "decoder context never extends past a short sampler canvas");
     return fails;
 }
 
