@@ -48,10 +48,14 @@ def main():
             if result.returncode:
                 raise RuntimeError(f"{tool} {flag} failed: {result.stderr}")
             if metal_libraries:
-                loaded_from_package = any(
-                    f"loading '{directory / name}'" in result.stderr for name in metal_libraries
-                )
-                if not loaded_from_package or "ggml_metal_library_init: loaded in " not in result.stderr:
+                library_log_prefix = "ggml_metal_library_init: loading '"
+                loaded = {
+                    Path(line[len(library_log_prefix):-1]).resolve()
+                    for line in result.stderr.splitlines()
+                    if line.startswith(library_log_prefix) and line.endswith("'")
+                }
+                expected = {directory / name for name in metal_libraries}
+                if not loaded & expected or "ggml_metal_library_init: loaded in " not in result.stderr:
                     raise RuntimeError(f"{tool} did not load a packaged Metal library: {result.stderr}")
             return result.stdout.strip()
 
