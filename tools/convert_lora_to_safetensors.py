@@ -13,7 +13,7 @@ which means the two directions cannot drift apart.
   python3 tools/convert_lora_to_safetensors.py \\
       --in train-runs/<run>/adapter-final.gguf --out loras/my-adapter
 
-writes <out>.safetensors + <out>.json.
+writes <out>.safetensors (config embedded as `lora_config` metadata) + <out>.json.
 
 Verified by round-trip on a real 228-target dora-rows adapter: converting to safetensors and
 back through sa3-lora-convert reproduces the original gguf **bit-exactly** — 684/684 tensors,
@@ -132,8 +132,11 @@ def main():
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    save_file(out_sd, str(out.with_suffix(".safetensors")))
     cfg = {"adapter_type": str(adapter_type), "rank": int(rank), "alpha": float(alpha)}
+    # The PyTorch loader reads the config only from the safetensors header
+    # (stable_audio_3 load_lora_checkpoint); without it alpha falls back to rank.
+    save_file(out_sd, str(out.with_suffix(".safetensors")),
+              metadata={"lora_config": json.dumps(cfg)})
     out.with_suffix(".json").write_text(json.dumps(cfg, indent=2))
 
     print(f"wrote {out}.safetensors + {out}.json")
