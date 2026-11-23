@@ -129,13 +129,13 @@ script, which also changes the name.
 ## macOS universal package
 
 `sa3-<tag>-macos-universal.zip` contains the servers, generation/training tools,
-`libsa3.dylib`, ggml dylibs, licenses, model downloader and prompt pools. It is
-flat at the root. Keep the libraries beside the tools. Apple Silicon uses Metal
-or CPU; Intel uses CPU (AVX2 baseline, macOS 13.3 or newer). Model weights are
+`libsa3.dylib`, ggml dylibs, precompiled Metal libraries, licenses, model
+downloader and prompt pools. Keep these files together. Apple Silicon uses Metal
+or CPU and Intel uses CPU (AVX2 baseline, macOS 13.3 or newer). Model weights are
 separate. `SHA256SUMS-macos` covers this archive without conflicting with the
 Windows checksum asset.
 
-Build on Apple Silicon with Xcode command line tools, CMake and Rosetta:
+Build on Apple Silicon with Xcode, its Metal Toolchain, CMake and Rosetta:
 
 ```sh
 ./ci/package-macos.sh --version v0.2.0 --jobs 3
@@ -144,8 +144,10 @@ Build on Apple Silicon with Xcode command line tools, CMake and Rosetta:
 The script builds each architecture separately, runs CTest (Intel under Rosetta
 on macOS 15+), merges matching binaries with lipo, rewrites bundled library
 imports to `@loader_path`, and checks server startup and the ABI contract from
-outside the package directory. The Metal dylib is arm64 only. Hosted CI checks
-compilation and packaging; real Metal inference must also be tested on a Mac.
+outside the package directory. The arm64 backend loads the precompiled base
+library or the BF16 variant on supported macOS 14+ devices. Builds with an OS 26
+SDK also ship the separate tensor API library. Package checks exercise the
+precompiled loader path. Model inference requires a separate test with weights.
 
 Release builds require Developer ID signing and notarization. Set these
 repository Actions secrets, matching the stems.cpp workflow:
