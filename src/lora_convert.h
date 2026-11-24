@@ -91,11 +91,15 @@ inline std::string dit_rename(const std::string& k) {
 // stable_audio_3 attaches DiT adapters to model.conditioner too: the seconds_total projection is
 // kept as "te.secs" (the pipeline adapts it where it computes it); the T5Gemma conditioner is not
 // adapted. Mirrors convert_lora.py base_name().
+//
+// The retired MLX gary4local for Mac saved the same DiT modules without the "model." prefix
+// ("transformer.layers.0.self_attn.to_qkv", "preprocess_conv"); those read as "model.<module>".
 inline std::string lora_base_name(const std::string& module) {
     if (module == "conditioners.seconds_total.embedder.embedding.1") return "te.secs";
     static const std::string M = "model.";
-    if (module.rfind(M, 0) != 0) return "";
-    const std::string full = "model.model." + module.substr(M.size()) + ".weight";
+    if (module.rfind("conditioners.", 0) == 0) return "";
+    const std::string dit = module.rfind(M, 0) == 0 ? module.substr(M.size()) : module;
+    const std::string full = "model.model." + dit + ".weight";
     const std::string n = dit_rename(full);
     static const std::string suf = ".weight";
     if (n.size() >= suf.size() && n.compare(n.size() - suf.size(), suf.size(), suf) == 0)
@@ -207,6 +211,8 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
     struct Emit { std::string name; std::vector<int64_t> shape; const void* data; size_t n; bool f16; };
     std::vector<Emit> emits;
     int n_targets = 0;
+    std::string unmapped;     // first module with no sa3.cpp weight, for the error
+    bool adapts_dit = false;
     {
         yyjson_doc* doc = yyjson_read((char*)buf.data() + 8, (size_t)hlen, 0);
         if (!doc) { err = "invalid safetensors header json"; return false; }
@@ -248,6 +254,7 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
 
         // count distinct mapped modules for lora.n_targets (parity with convert_lora.py)
         std::unordered_map<std::string, int> mapped_modules;
+        std::unordered_map<std::string, std::string> module_for_base;   // two spellings of one weight
         yyjson_obj_iter it; yyjson_obj_iter_init(root, &it);
         yyjson_val* key;
         while ((key = yyjson_obj_iter_next(&it))) {
@@ -256,7 +263,15 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
             std::string module, kind;
             if (!lora_parse_key(kname, module, kind)) continue;   // unrecognized key -> skip (like the python)
             const std::string base = ae ? ae_lora_base_name(module, target) : lora_base_name(module);
-            if (base.empty()) continue;                            // no sa3.cpp weight (T5Gemma conditioner) -> skip
+            if (base.empty()) {                                    // no sa3.cpp weight (T5Gemma conditioner) -> skip
+                if (unmapped.empty() && module.rfind("conditioners.", 0) != 0) unmapped = module;
+                continue;
+            }
+            if (auto [seen, fresh] = module_for_base.emplace(base, module); !fresh && seen->second != module) {
+                err = seen->second + " and " + module + " both adapt " + base + " in " + safetensors_path;
+                yyjson_doc_free(doc); return false;
+            }
+            if (base.rfind("dit.", 0) == 0) adapts_dit = true;
             yyjson_val* t = yyjson_obj_iter_get_val(key);
             yyjson_val* vd = yyjson_obj_get(t, "dtype");
             const std::string dtype = vd ? yyjson_get_str(vd) : "?";
@@ -281,6 +296,14 @@ inline bool convert_lora_safetensors(const std::string& safetensors_path,
     if (emits.empty()) {
         err = "no " + std::string(target == "dit" ? "DiT" : target) +
               " LoRA tensors found in " + safetensors_path;
+        if (!unmapped.empty()) err += " (no sa3.cpp weight for " + unmapped + ")";
+        return false;
+    }
+    // A DiT adapter whose DiT modules all went unmapped would still "convert" -- to a file that
+    // only nudges the seconds embedding and barely changes the audio. Refuse it instead.
+    if (target == "dit" && !adapts_dit) {
+        err = "no DiT weights adapted in " + safetensors_path + "; only the seconds conditioner mapped";
+        if (!unmapped.empty()) err += " (no sa3.cpp weight for " + unmapped + ")";
         return false;
     }
 

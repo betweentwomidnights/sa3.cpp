@@ -30,12 +30,17 @@ SECONDS_MODULE, SECONDS_BASE = "conditioners.seconds_total.embedder.embedding.1"
 
 
 def base_name(module):
-    """LoRA module name -> base weight name (without .weight), or None if sa3.cpp has no such weight."""
+    """LoRA module name -> base weight name (without .weight), or None if sa3.cpp has no such weight.
+
+    The retired MLX gary4local for Mac saved DiT modules without the "model." prefix
+    ("transformer.layers.0.self_attn.to_qkv"); those read as "model.<module>".
+    """
     if module == SECONDS_MODULE:
         return SECONDS_BASE
-    if not module.startswith("model."):
+    if module.startswith("conditioners."):
         return None                                  # other conditioners.* (T5Gemma) — not adapted
-    full = "model.model." + module[len("model."):] + ".weight"
+    dit = module[len("model."):] if module.startswith("model.") else module
+    full = "model.model." + dit + ".weight"
     n = dit_rename(full)
     return n[:-len(".weight")] if n and n.endswith(".weight") else None
 
@@ -57,6 +62,15 @@ def main():
         if not m:
             print(f"  ! unrecognized key skipped: {k}"); continue
         mods.setdefault(m.group("mod"), {})[m.group("kind")] = v
+
+    bases = {}
+    for module in sorted(mods):
+        base = base_name(module)
+        if base is not None and bases.setdefault(base, module) != module:
+            sys.exit(f"{bases[base]} and {module} both adapt {base}")
+    if not any(b.startswith("dit.") for b in bases):
+        unmapped = next((m for m in sorted(mods) if base_name(m) is None and not m.startswith("conditioners.")), None)
+        sys.exit("no DiT weights adapted" + (f" (no sa3.cpp weight for {unmapped})" if unmapped else ""))
 
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     w = GGUFWriter(str(out), arch="sa3-lora")

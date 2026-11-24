@@ -142,8 +142,46 @@ int main() {
         write_old_gguf(dir / "square-only.gguf", square_only);
         auto square = sa3::load_lora((dir / "square-only.gguf").string().c_str(), 1.0f, sa3_test_cpu_backend());
         check(square.type == "dora-rows", "square-only cached Gary adapter lost rows default");
+        // The retired MLX gary4local for Mac saved DiT modules without "model.": they must convert to
+        // the same GGUF, and a mix of both spellings for one weight is ambiguous.
+        auto bytes = [](const std::filesystem::path& p) {
+            std::ifstream f(p, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        };
+        auto convert = [&](const std::vector<Spec>& data, const char* out, std::string& error) {
+            write_safe(dir / "names.safetensors", data, true);
+            return sa3::convert_lora_safetensors((dir / "names.safetensors").string(), "",
+                                                 (dir / out).string(), error);
+        };
+        const auto prefixed = specs(false, false, true);
+        auto unprefixed = prefixed;
+        for (auto& s : unprefixed) s.module = s.module.substr(std::strlen("model."));
+        std::string error;
+        check(convert(prefixed, "prefixed.gguf", error), error.c_str());
+        check(convert(unprefixed, "unprefixed.gguf", error), error.c_str());
+        check(bytes(dir / "prefixed.gguf") == bytes(dir / "unprefixed.gguf"),
+              "unprefixed old Mac LoRA converted differently from the upstream spelling");
+
+        auto mixed = prefixed;
+        mixed.insert(mixed.end(), unprefixed.begin(), unprefixed.begin() + 3);
+        check(!convert(mixed, "mixed.gguf", error) && error.find("both adapt") != std::string::npos,
+              "two spellings of one module must be rejected");
+
+        // Only the seconds conditioner mapping used to write a near-empty adapter. Refuse it, and
+        // name the DiT module that didn't map.
+        auto seconds_only = std::vector<Spec>(prefixed.begin(), prefixed.begin() + 3);
+        for (auto& s : seconds_only) s.module = "conditioners.seconds_total.embedder.embedding.1";
+        auto unknown = seconds_only;
+        for (auto& s : unknown) s.module = "transformer.not_a_layer";
+        seconds_only.insert(seconds_only.end(), unknown.begin(), unknown.end());
+        check(!convert(seconds_only, "seconds.gguf", error) &&
+              error.find("no DiT weights adapted") != std::string::npos &&
+              error.find("transformer.not_a_layer") != std::string::npos,
+              "a DiT adapter that adapts no DiT weight must be rejected");
+        check(!std::filesystem::exists(dir / "seconds.gguf"), "rejected adapter still wrote a GGUF");
+
         std::filesystem::remove_all(dir);
-        std::puts("lora_legacy_test: ok (16 conversion/cache/merge cases)");
+        std::puts("lora_legacy_test: ok (16 conversion/cache/merge cases, 3 module-name cases)");
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL: %s (fixtures retained at %s)\n", e.what(), dir.string().c_str());
