@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Run with UTF-8 as the process code page (Windows 10 1903 and newer). sa3 treats every path as
+     UTF-8, but a narrow argv, std::filesystem::path(std::string), fopen and _popen otherwise read the
+     legacy system code page, so a dataset file named "Jóhannsson" reached the progress JSON as
+     invalid UTF-8, and names outside that code page became "?". -->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>
