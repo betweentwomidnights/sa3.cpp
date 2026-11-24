@@ -616,3 +616,16 @@ if(BUILD_TESTING)
     set_tests_properties(sa3-lib-v1-contract PROPERTIES LABELS "non-gpu;abi")
 endif()
 endif() # SA3_BUILD_TOOLS
+
+# Every sa3 executable runs with UTF-8 as its Windows process code page, so the narrow argv,
+# std::filesystem::path(std::string), fopen and _popen agree with the code that already converts
+# paths as UTF-8. libsa3 itself cannot set this; a host that loads it chooses its own code page.
+if(MSVC)
+    get_property(sa3_directory_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(sa3_target IN LISTS sa3_directory_targets)
+        get_target_property(sa3_target_type ${sa3_target} TYPE)
+        if(sa3_target_type STREQUAL "EXECUTABLE")
+            target_sources(${sa3_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cmake/utf8-code-page.manifest)
+        endif()
+    endforeach()
+endif()

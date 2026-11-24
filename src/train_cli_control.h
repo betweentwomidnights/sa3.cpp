@@ -2,6 +2,7 @@
 // Training algorithms and checkpoint ownership remain in run_training.
 #pragma once
 
+#include "utf8_path.h"
 #include "yyjson.h"
 #include <cmath>
 #include <cstdlib>
@@ -89,10 +90,12 @@ struct TrainCliControl {
         yyjson_mut_val* root = yyjson_mut_obj(doc);
         yyjson_mut_doc_set_root(doc, root);
         yyjson_mut_obj_add_int(doc, root, "schema_version", 1);
-        yyjson_mut_obj_add_str(doc, root, "status", status.c_str());
-        yyjson_mut_obj_add_str(doc, root, "phase", phase.c_str());
-        yyjson_mut_obj_add_str(doc, root, "message", message.c_str());
-        yyjson_mut_obj_add_str(doc, root, "error", error.c_str());
+        // yyjson refuses invalid UTF-8, so one bad byte used to lose the whole status. The text is
+        // UTF-8 already; this catches what slips through, like a localized OS error message.
+        yyjson_mut_obj_add_strcpy(doc, root, "status", utf8_sanitize(status).c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "phase", utf8_sanitize(phase).c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "message", utf8_sanitize(message).c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "error", utf8_sanitize(error).c_str());
         yyjson_mut_obj_add_int(doc, root, "step", step);
         yyjson_mut_obj_add_int(doc, root, "epoch", epoch);
         yyjson_mut_obj_add_int(doc, root, "max_steps", max_steps);
@@ -103,9 +106,9 @@ struct TrainCliControl {
             if (std::isfinite(metric.second)) yyjson_mut_obj_add_real(doc, root, metric.first, metric.second);
             else yyjson_mut_obj_add_null(doc, root, metric.first);
         }
-        yyjson_mut_obj_add_str(doc, root, "final_adapter", final_adapter.c_str());
-        yyjson_mut_obj_add_str(doc, root, "adapter_checkpoint", adapter_checkpoint.c_str());
-        yyjson_mut_obj_add_str(doc, root, "state_checkpoint", state_checkpoint.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "final_adapter", utf8_sanitize(final_adapter).c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "adapter_checkpoint", utf8_sanitize(adapter_checkpoint).c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "state_checkpoint", utf8_sanitize(state_checkpoint).c_str());
         size_t size = 0;
         char* data = yyjson_mut_write(doc, 0, &size);
         yyjson_mut_doc_free(doc);

@@ -31,4 +31,22 @@ with tempfile.TemporaryDirectory(prefix="sa3-cli-control-") as temporary:
     assert state["final_adapter"] == "" and cancel.is_file()
     assert not list(root.glob("progress.json.tmp-*"))
     assert "cancelled before loading" in cancelled.stdout
-print("PASS real trainer capabilities, terminal failure, and pre-load cooperative cancellation")
+# Arguments and paths are UTF-8 end to end. On Windows the trainer used to read argv in the system
+# code page, so a cp1252 name ("Jóhannsson") reached the progress JSON as invalid UTF-8 and the run
+# died with "cannot serialize training progress"; anything outside cp1252 became "?".
+with tempfile.TemporaryDirectory(prefix="sa3-cli-Jóhannsson-データ-") as temporary:
+    root = Path(temporary)
+    dataset = root / "dataset ü"
+    dataset.mkdir()
+    models = root / "modèles データ"
+    status = root / "progress é.json"
+    failed = subprocess.run([binary, "--dataset", dataset, "--models-dir", models,
+                             "--out", root / "run", "--steps", "1", "--device", "cpu",
+                             "--progress-file", status],
+                            capture_output=True)
+    assert failed.returncode != 0
+    assert status.is_file(), failed.stderr
+    state = json.loads(status.read_bytes().decode("utf-8"))
+    assert state["status"] == "failed", (state, failed.stderr)
+    assert str(models) in state["error"], (state["error"], str(models))
+print("PASS real trainer capabilities, terminal failure, pre-load cooperative cancellation, and UTF-8 paths")

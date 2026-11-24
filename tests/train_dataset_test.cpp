@@ -1,4 +1,5 @@
 #include "train_dataset.h"
+#include "utf8_path.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -79,6 +80,27 @@ int main() {
     fails += expect(!sa3::load_train_split_manifest(flat.string(), "train", m, err),
                     "flat folder missing caption rejected");
     fails += expect(err.find("missing caption") != std::string::npos, "flat caption error explains fix");
+
+    // Names come back as UTF-8 and resolve to files that open. On Windows they used to come back in
+    // the system code page: a cp1252 name was not valid UTF-8, and anything outside it became '?'.
+    {
+        const std::string name = "J\xC3\xB3hannsson- A Deal with Chaos \xE3\x83\x87\xE3\x83\xBC\xE3\x82\xBF";
+        const fs::path dir = sa3::utf8_path((root / "\xC3\xBC").u8string());
+        fs::create_directories(dir);
+        std::ofstream(dir / sa3::utf8_path(name + ".wav")) << "wav";
+        std::ofstream(dir / sa3::utf8_path(name + ".txt")) << "caption";
+        err.clear();
+        fails += expect(sa3::load_train_split_manifest(sa3::path_utf8(dir), "train", m, err),
+                        "non-ASCII flat folder loads");
+        fails += expect(m.records.size() == 1 && m.records[0].id == name, "non-ASCII id is UTF-8");
+        fails += expect(sa3::resolve_train_pairs(m, pairs, err) && pairs.size() == 1, "non-ASCII pairs resolve");
+        fails += expect(pairs.size() == 1 && pairs[0].id == name, "non-ASCII pair id is UTF-8");
+        fails += expect(pairs.size() == 1 && fs::is_regular_file(sa3::utf8_path(pairs[0].audio_path)),
+                        "non-ASCII audio path is UTF-8 and exists");
+        fails += expect(pairs.size() == 1 && fs::is_regular_file(sa3::utf8_path(pairs[0].caption_path)),
+                        "non-ASCII caption path is UTF-8 and exists");
+        fails += expect(sa3::validate_train_split_pairs(m, pairs, err), "non-ASCII pairs validate");
+    }
 
     fs::create_directories(root / "bad");
     {

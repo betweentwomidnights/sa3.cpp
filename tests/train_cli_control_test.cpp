@@ -89,5 +89,23 @@ int main() {
     for (const auto& item : fs::directory_iterator(root))
         expect(item.path().filename().string().find(".tmp-") == std::string::npos, "staging files retired");
     fs::remove_all(root);
+    {
+        // Text that is not UTF-8 degrades to U+FFFD instead of failing the whole status. A cp1252
+        // "J\xF3hannsson" (o-acute as one byte) used to stop training with "cannot serialize".
+        sa3::TrainCliControl bad;
+        bad.message = "[pre-encode] J\xF3hannsson: 130.2s";
+        bad.error = "ok \xC3\xB3 \xE3\x83\x87 then truncated \xE3\x83";
+        const std::string text = bad.json();
+        yyjson_doc* bad_doc = yyjson_read(text.data(), text.size(), 0);
+        yyjson_val* bad_root = yyjson_doc_get_root(bad_doc);
+        expect(bad_doc != nullptr, "invalid UTF-8 still serializes");
+        expect(bad_doc && std::string(yyjson_get_str(yyjson_obj_get(bad_root, "message"))) ==
+                              "[pre-encode] J\xEF\xBF\xBDhannsson: 130.2s",
+               "invalid byte becomes U+FFFD");
+        expect(bad_doc && std::string(yyjson_get_str(yyjson_obj_get(bad_root, "error"))) ==
+                              "ok \xC3\xB3 \xE3\x83\x87 then truncated \xEF\xBF\xBD\xEF\xBF\xBD",
+               "valid UTF-8 is kept and a truncated sequence is replaced");
+        yyjson_doc_free(bad_doc);
+    }
     std::puts("PASS native trainer file controls");
 }
